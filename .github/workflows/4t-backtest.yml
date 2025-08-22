@@ -2,167 +2,46 @@ name: 4t-backtest
 
 on:
   workflow_dispatch:
-    inputs:
-      train_start:
-        description: Train start (UTC, YYYY-MM-DD)
-        required: true
-        default: "2025-01-01"
-      train_end:
-        description: Train end
-        required: true
-        default: "2025-04-30"
-      test_start:
-        description: Test start
-        required: true
-        default: "2025-05-01"
-      test_end:
-        description: Test end
-        required: true
-        default: "2025-06-30"
-  push:
-    branches: [ "main" ]
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      # 1) Checkout (pinned)
-      - name: Checkout
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a107f1f871
+    - name: Checkout repo
+      uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744  # pinned SHA
 
-      # 2) Set up Python (pinned)
-      - name: Setup Python
-        uses: actions/setup-python@5ffd6e94f9a7b3e83d30db4f2f1825d6dedf0d1f
-        with:
-          python-version: '3.11'
+    - name: Set up Python
+      uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d  # pinned SHA
+      with:
+        python-version: "3.10"
 
-      # 3) Cache pip (pinned)
-      - name: Cache pip
-        uses: actions/cache@3624ceb22c1c5a301c8db4169662070a689d9ea8
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt || true
 
-      # 4) Prepare workspace (robust)
-      - name: Prep folders
-        run: |
-          set -euxo pipefail
-          mkdir -p data _out_4t/github/logs
+    - name: Prepare project
+      run: |
+        # 압축 풀기
+        unzip -o trend4t_fix_full.zip -d .
+        unzip -o ETHUSDT_1min_2020_2025.zip -d data || mkdir -p data
+        mv ETHUSDT_1min_2020_2025.csv data/ || true
+        mkdir -p _out_4t/github
 
-          echo "Repo content:"
-          ls -la
+    - name: Run backtest
+      run: |
+        python run_4t.py \
+          --train_start 2025-01-01 --train_end 2025-04-30 \
+          --test_start 2025-05-01 --test_end 2025-06-30 \
+          --data data/ETHUSDT_1min_2020_2025.csv \
+          --outdir _out_4t/github
 
-          # Detect and extract code pack
-          CODE_ZIP="trend4t_fix_full.zip"
-          if [ ! -f "$CODE_ZIP" ]; then
-            echo "❌ Code pack not found at repo root: $CODE_ZIP"; exit 2
-          fi
-          unzip -o "$CODE_ZIP" -d .
-
-          # Detect data zip & csv inside
-          DATA_ZIP="ETHUSDT_1min_2020_2025.zip"
-          if [ ! -f "$DATA_ZIP" ]; then
-            echo "❌ Data zip not found at repo root: $DATA_ZIP"; exit 3
-          fi
-
-          echo "Listing CSV in $DATA_ZIP"
-          CSV_IN_ZIP="$(unzip -Z1 "$DATA_ZIP" | grep -i '\.csv$' | head -n1 || true)"
-          if [ -z "$CSV_IN_ZIP" ]; then
-            echo "❌ No CSV found inside $DATA_ZIP"; exit 4
-          fi
-          echo "Found CSV in zip: $CSV_IN_ZIP"
-          unzip -o "$DATA_ZIP" "$CSV_IN_ZIP" -d data/
-
-          # Normalize filename to what runner expects
-          if [ "$CSV_IN_ZIP" != "ETHUSDT_1min_2020_2025.csv" ]; then
-            mv -f "data/$CSV_IN_ZIP" "data/ETHUSDT_1min_2020_2025.csv"
-          fi
-
-          echo "Data dir:"
-          ls -la data
-
-      # 5) Install deps (requirements.txt가 없을 수도 있으니 방어적으로)
-      - name: Install deps
-        run: |
-          set -euxo pipefail
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          elif [ -f trend4p/requirements.txt ]; then
-            pip install -r trend4p/requirements.txt
-          else
-            # 최소 필요 패키지 방어적 설치
-            pip install pandas numpy scikit-learn scipy joblib
-          fi
-
-      # 6) Find entry and run backtest (fail-safe; 실패해도 요약/로그 생성)
-      - name: Run backtest
-        id: runbt
-        continue-on-error: true
-        env:
-          TRAIN_S: ${{ github.event.inputs.train_start || '2025-01-01' }}
-          TRAIN_E: ${{ github.event.inputs.train_end   || '2025-04-30' }}
-          TEST_S:  ${{ github.event.inputs.test_start  || '2025-05-01' }}
-          TEST_E:  ${{ github.event.inputs.test_end    || '2025-06-30' }}
-        run: |
-          set -euxo pipefail
-
-          # 엔트리 탐색: run_4t.py 우선, 없으면 trend4p/run_backtest_4t.py
-          ENTRY=""
-          if [ -f run_4t.py ]; then
-            ENTRY="python run_4t.py --data data/ETHUSDT_1min_2020_2025.csv --train_start $TRAIN_S --train_end $TRAIN_E --test_start $TEST_S --test_end $TEST_E --out_dir _out_4t/github"
-          elif [ -f trend4p/run_backtest_4t.py ]; then
-            ENTRY="python -m trend4p.run_backtest_4t --data data/ETHUSDT_1min_2020_2025.csv --train_start $TRAIN_S --train_end $TRAIN_E --test_start $TEST_S --test_end $TEST_E --out_dir _out_4t/github"
-          else
-            echo "❌ Entry script not found (run_4t.py or trend4p/run_backtest_4t.py)"; echo "{}" > _out_4t/github/train_test_summary.json; exit 5
-          fi
-
-          echo "Running: $ENTRY" | tee _out_4t/github/logs/cmd.txt
-
-          # 실행 + 표준출력을 요약 JSON으로도 저장(스크립트가 파일 생성 안해도 최소 기록 남김)
-          set +e
-          $ENTRY 2>&1 | tee _out_4t/github/logs/backtest_stdout.txt
-          RT=$?
-          set -e
-
-          # 요약이 없다면 stdout에서 최소한 JSON 비슷한 라인만 추출해서 저장(방어)
-          if [ ! -s "_out_4t/github/train_test_summary.json" ]; then
-            python - <<'PY'
-import json, re, sys, pathlib
-p = pathlib.Path("_out_4t/github/logs/backtest_stdout.txt")
-d = {"note":"auto-extracted summary (fallback)"}
-if p.exists():
-    s = p.read_text(errors="ignore")
-    # 매우 러프한 키워드 파싱(스크립트가 출력한 메트릭을 힌트로 수집)
-    def grab(key):
-        m = re.search(rf'"?{key}"?\s*:\s*([0-9\.\-eE]+)', s)
-        return float(m.group(1)) if m else None
-    for k in ["coverage","acc","mcc","total_return","monthly_return"]:
-        d[k] = grab(k)
-    # H, trades, regime
-    for k in ["H","n_trades","regime_gate_rate","edge"]:
-        v = grab(k)
-        if v is not None: d[k] = v
-else:
-    d = {"error":"no stdout"}
-pathlib.Path("_out_4t/github/train_test_summary.json").write_text(json.dumps(d, ensure_ascii=False, indent=2))
-PY
-          fi
-
-          echo "Exit code: $RT" | tee _out_4t/github/logs/exit_code.txt
-          exit $RT
-
-      # 7) 항상 아티팩트 업로드 (pinned)
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
-        with:
-          name: out_4t_${{ github.run_id }}
-          path: |
-            "_out_4t/github/**"
-            "**/train_test_summary*.json"
-            "**/logs/**"
-          if-no-files-found: warn
+    - name: Upload results
+      uses: actions/upload-artifact@c7d193f32edcb7bfad88892161225aeda64e9392  # pinned SHA
+      with:
+        name: backtest-results
+        path: |
+          _out_4t/github/**
+          **/train_test_summary*.json
+          **/logs/**
