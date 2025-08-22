@@ -20,123 +20,309 @@ on:
         required: true
         default: "2025-06-30"
       H:
-        description: "Forecast horizon (minutes)"
+        description: "Prediction horizon (minutes)"
         required: true
         default: "5"
-      fee_bps:
-        description: "Fee in bps"
-        required: false
-        default: "1.0"
-
-permissions:
-  contents: write   # outputs 브랜치로 결과 push
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
-    env:
-      TRAIN_START: ${{ github.event.inputs.train_start }}
-      TRAIN_END:   ${{ github.event.inputs.train_end }}
-      TEST_START:  ${{ github.event.inputs.test_start }}
-      TEST_END:    ${{ github.event.inputs.test_end }}
-      H:           ${{ github.event.inputs.H }}
-      FEE_BPS:     ${{ github.event.inputs.fee_bps || '1.0' }}
+    permissions:
+      contents: read
 
     steps:
-      - name: Clone current repository (no marketplace actions)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git config --global init.defaultBranch main
-          git config --global user.email "actions@github.com"
-          git config --global user.name "github-actions"
-          git clone --depth 1 "https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
-          echo "Current path:"
-          pwd
-          ls -la
+      - name: Checkout
+        # 풀 SHA 고정 (예: actions/checkout@v4)
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
 
-      - name: Unpack code & data
+      - name: Set up Python 3.11
+        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pandas scikit-learn==1.4.2 joblib
+
+      - name: Prepare workdir (unzip code & data)
         shell: bash
         run: |
-          set -euxo pipefail
-          # 코드팩 파일명은 네가 올려둔 이름으로 맞춘다
-          CODE_ZIP="trend4t_fix_full_hotfix.zip"
-          [ -f "$CODE_ZIP" ] || CODE_ZIP="trend4t_fix_full.zip"
-          unzip -o "$CODE_ZIP" -d .
+          set -euo pipefail
+          ls -al
+          # 코드팩
+          if [ -f trend4t_fix_full.zip ]; then
+            unzip -o trend4t_fix_full.zip -d .
+          else
+            echo "❌ trend4t_fix_full.zip not found in repo root"; exit 3
+          fi
+          # 데이터
           mkdir -p data
-
-          # 데이터 압축이름과 위치 자동 인식
-          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
-            unzip -o "ETHUSDT_1min_2020_2025.zip" -d data || true
+          if [ -f ETHUSDT_1min_2020_2025.csv ]; then
+            mv ETHUSDT_1min_2020_2025.csv data/ || true
+          elif [ -f ETHUSDT_1min_2020_2025.zip ]; then
+            unzip -o ETHUSDT_1min_2020_2025.zip -d data
+          else
+            echo "❌ Neither ETHUSDT_1min_2020_2025.csv nor ETHUSDT_1min_2020_2025.zip found"; exit 3
           fi
-          if [ -f "ETHUSDT_1min_2020_2025.csv" ] && [ ! -f "data/ETHUSDT_1min_2020_2025.csv" ]; then
-            mv "ETHUSDT_1min_2020_2025.csv" "data/ETHUSDT_1min_2020_2025.csv"
-          fi
+          ls -al data
 
-          echo "Repo root:"
-          ls -la
-          echo "data/:"
-          ls -la data || true
-          echo "trend4p/:"
-          ls -la trend4p
+      - name: Apply inline hotfix (override files)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trend4p
 
-      - name: Setup Python (venv + pip)
+          cat > trend4p/data_utils.py << 'PY'
+import pandas as pd
+import numpy as np
+
+def _parse_ts_col(df):
+    # prefer 'ts'; else 'open_time'
+    if 'ts' in df.columns:
+        ts = pd.to_datetime(df['ts'], utc=True, errors='coerce')
+    elif 'open_time' in df.columns:
+        s = df['open_time']
+        # int-like? detect ms vs sec
+        if np.issubdtype(s.dtype, np.integer) or np.issubdtype(s.dtype, np.floating):
+            # assume ms if values are big
+            unit = 'ms' if (pd.Series(s).dropna().astype(float).median() > 10_000_000_000) else 's'
+            ts = pd.to_datetime(s, unit=unit, utc=True, errors='coerce')
+        else:
+            ts = pd.to_datetime(s, utc=True, errors='coerce')
+    else:
+        raise ValueError("No time column: expected 'ts' or 'open_time'")
+    return ts
+
+def load_csv(path):
+    df = pd.read_csv(path)
+    # normalize columns to lower-case canonical set if possible
+    cols = {c.lower(): c for c in df.columns}
+    # rename typical ohlcv
+    ren = {}
+    for c in ['open','high','low','close','volume','ts','open_time']:
+        if c in cols and cols[c] != c:
+            ren[cols[c]] = c
+    if ren:
+        df = df.rename(columns=ren)
+
+    df['ts'] = _parse_ts_col(df)
+    df = df.dropna(subset=['ts']).sort_values('ts')
+    # ensure numeric OHLC
+    for c in ['open','high','low','close','volume']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.drop_duplicates(subset=['ts']).set_index('ts')
+    # keep only needed columns
+    keep = [c for c in ['open','high','low','close','volume'] if c in df.columns]
+    df = df[keep].dropna(how='any')  # strict: any NaN row removed
+    return df
+PY
+
+          cat > trend4p/labeling.py << 'PY'
+import numpy as np
+import pandas as pd
+
+def make_labels(prices: pd.Series, H: int, k: float = 0.0):
+    """
+    prices: close price Series (indexed by ts)
+    H     : horizon in bars
+    k     : threshold as absolute return (e.g., 0.001 = 10bps)
+    Returns int8 Series in {-1,0,1} aligned with current bar (uses shift(-H)).
+    """
+    if prices.empty or H <= 0:
+        return pd.Series(dtype='int8')
+
+    p = prices.astype(float).copy()
+    # avoid division by zero
+    p = p.replace(0.0, np.nan)
+    fwd = p.shift(-H) / p - 1.0
+    # boundary rows become NaN -> fill neutral so astype(int) is safe
+    y = pd.Series(0, index=prices.index, dtype='int8')
+    y[fwd >  k]  = 1
+    y[fwd < -k]  = -1
+    # NaN stays 0; final dtype is int8
+    return y.astype('int8')
+PY
+
+          cat > trend4p/model_4t.py << 'PY'
+from sklearn.ensemble import RandomForestClassifier
+
+def build_model():
+    # conservative default; caller may tune n_estimators via env later if needed
+    return RandomForestClassifier(
+        n_estimators=120,
+        max_depth=None,
+        min_samples_leaf=2,
+        n_jobs=-1,
+        random_state=42,
+        class_weight='balanced_subsample'
+    )
+PY
+
+          cat > trend4p/features_4t.py << 'PY'
+import pandas as pd
+import numpy as np
+
+def make_features(df: pd.DataFrame):
+    out = pd.DataFrame(index=df.index)
+    c = df['close']
+    # simple returns
+    out['r1'] = c.pct_change(1)
+    out['r3'] = c.pct_change(3)
+    out['r5'] = c.pct_change(5)
+    # ranges / volatility
+    out['hl'] = (df['high'] - df['low']) / df['close'].replace(0, np.nan)
+    out['atr3'] = out['hl'].rolling(3).mean()
+    out['mom'] = c / c.rolling(10).mean() - 1
+    out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return out
+PY
+
+          cat > trend4p/execution_4t.py << 'PY'
+import json
+import numpy as np
+import pandas as pd
+from sklearn.metrics import matthews_corrcoef, accuracy_score
+from .data_utils import load_csv
+from .features_4t import make_features
+from .labeling import make_labels
+from .model_4t import build_model
+
+def _safe_mcc(y_true, y_pred):
+    # sklearn mcc throws warning on single class; return 0.0 instead
+    try:
+        return float(matthews_corrcoef(y_true, y_pred))
+    except Exception:
+        return 0.0
+
+def _metrics(y_true, y_pred):
+    if len(y_true) == 0:
+        return dict(coverage=0.0, acc=0.0, mcc=0.0)
+    acc = float(accuracy_score(y_true, y_pred))
+    mcc = _safe_mcc(y_true, y_pred)
+    cov = float(np.mean(np.array(y_pred) != 0))
+    return dict(coverage=cov, acc=acc, mcc=mcc)
+
+def backtest(data_path, tr_start, tr_end, te_start, te_end, H=5, fee_bps=1.0, out_dir=None, k_edge=0.0):
+    df = load_csv(data_path)
+    df = df.loc[(df.index >= pd.Timestamp(tr_start, tz='UTC')) &
+                (df.index <= pd.Timestamp(te_end, tz='UTC'))]
+
+    feats = make_features(df)
+    y = make_labels(df['close'], H=H, k=k_edge)
+
+    # align X,y and split
+    Xy = feats.join(y.rename('y')).dropna()
+    if Xy.empty:
+        res = {
+            "H": H, "edge": k_edge,
+            "train_metrics": {"coverage":0,"acc":0,"mcc":0},
+            "test_metrics": {"coverage":0,"acc":0,"mcc":0},
+            "n_trades": 0, "note": "empty after align"
+        }
+        return res
+
+    Xy_tr = Xy.loc[(Xy.index >= pd.Timestamp(tr_start, tz='UTC')) &
+                   (Xy.index <= pd.Timestamp(tr_end,   tz='UTC'))]
+    Xy_te = Xy.loc[(Xy.index >= pd.Timestamp(te_start, tz='UTC')) &
+                   (Xy.index <= pd.Timestamp(te_end,   tz='UTC'))]
+
+    # safety: if any side empty, return zeros but keep success
+    if Xy_tr.empty or Xy_te.empty:
+        res = {
+            "H": H, "edge": k_edge,
+            "train_metrics": {"coverage":0,"acc":0,"mcc":0},
+            "test_metrics": {"coverage":0,"acc":0,"mcc":0},
+            "n_trades": 0, "note": "train or test empty"
+        }
+        return res
+
+    Xtr, ytr = Xy_tr.drop(columns=['y']).values, Xy_tr['y'].astype('int8').values
+    Xte, yte = Xy_te.drop(columns=['y']).values, Xy_te['y'].astype('int8').values
+
+    mdl = build_model()
+    # handle single-class training gracefully: fit on dummy 0s then predict zeros
+    if len(np.unique(ytr)) < 2:
+        yhat_tr = np.zeros_like(ytr)
+        yhat_te = np.zeros_like(yte)
+    else:
+        mdl.fit(Xtr, ytr)
+        yhat_tr = mdl.predict(Xtr)
+        yhat_te = mdl.predict(Xte)
+
+    m_tr = _metrics(ytr, yhat_tr)
+    m_te = _metrics(yte, yhat_te)
+
+    res = {
+        "H": H, "edge": k_edge,
+        "train": {"start": str(tr_start), "end": str(tr_end)},
+        "test":  {"start": str(te_start), "end": str(te_end)},
+        "train_metrics": m_tr,
+        "test_metrics": m_te,
+        "n_trades": int(np.sum(np.array(yhat_te) != 0))
+    }
+    return res
+PY
+
+          cat > run_4t.py << 'PY'
+import argparse, json, os
+from trend4p.execution_4t import backtest
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--train_start", required=True)
+    ap.add_argument("--train_end", required=True)
+    ap.add_argument("--test_start", required=True)
+    ap.add_argument("--test_end", required=True)
+    ap.add_argument("--H", type=int, default=5)
+    ap.add_argument("--fee_bps", type=float, default=1.0)
+    ap.add_argument("--edge", type=float, default=0.0)
+    ap.add_argument("--out_dir", default="_out_4t/github")
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    out = backtest(
+        args.data, args.train_start, args.train_end,
+        args.test_start, args.test_end, H=args.H,
+        fee_bps=args.fee_bps, k_edge=args.edge, out_dir=args.out_dir
+    )
+    print(json.dumps(out, indent=2))
+    with open(os.path.join(args.out_dir, "train_test_summary.json"), "w") as f:
+        json.dump(out, f, indent=2)
+
+if __name__ == "__main__":
+    main()
+PY
+
+      - name: Run backtest
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -V
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install --upgrade pip wheel setuptools
-          # requirements.txt가 있으면 우선 설치
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt || true
-          fi
-          # 누락 대비 필수 패키지 보강
-          pip install numpy pandas scikit-learn scipy joblib
-
-      - name: Run 4t backtest
-        shell: bash
-        run: |
-          set -euxo pipefail
-          . .venv/bin/activate
-
           OUT_DIR="_out_4t/github"
           mkdir -p "${OUT_DIR}"
-
-          DATA_CSV="data/ETHUSDT_1min_2020_2025.csv"
-          if [ ! -f "${DATA_CSV}" ]; then
-            echo "❌ Data CSV not found at ${DATA_CSV}"
-            echo "현재 위치:" && pwd
-            echo "루트 목록:" && ls -la
-            echo "data/ 목록:" && ls -la data || true
-            exit 3
-          fi
-
-          # 수익 관련 옵션을 run_4t.py가 받는다면 함께 넘겨라. (여기선 out_dir/H 중심)
           python run_4t.py \
-            --data "${DATA_CSV}" \
-            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
-            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
-            --H "${H}" --out_dir "${OUT_DIR}" | tee "${OUT_DIR}/run.log"
-
-          echo -e "### 4t Backtest outputs\n" >> "$GITHUB_STEP_SUMMARY"
+            --data data/ETHUSDT_1min_2020_2025.csv \
+            --train_start "${{ inputs.train_start }}" \
+            --train_end   "${{ inputs.train_end }}"   \
+            --test_start  "${{ inputs.test_start }}"  \
+            --test_end    "${{ inputs.test_end }}"    \
+            --H ${{ inputs.H }} \
+            --edge 0.0000 \
+            --out_dir "${OUT_DIR}" | tee "${OUT_DIR}/run.log"
+          echo "=== Backtest summary ==="
           if [ -f "${OUT_DIR}/train_test_summary.json" ]; then
-            echo -e "\n\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-            cat "${OUT_DIR}/train_test_summary.json" >> "$GITHUB_STEP_SUMMARY"
-            echo -e "\n\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+            cat "${OUT_DIR}/train_test_summary.json"
           else
-            echo "No train_test_summary.json generated." >> "$GITHUB_STEP_SUMMARY"
+            echo "No train_test_summary.json generated."
           fi
 
-      - name: Commit outputs to 'outputs' branch (no actions/artifacts)
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git checkout -B outputs
-          git add _out_4t/github || true
-          git commit -m "Add 4t backtest outputs $(date -u +%Y%m%d-%H%M%S)" || true
-          git push -f "https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" outputs
+      - name: Upload artifacts
+        uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
+        with:
+          name: 4t_backtest_outputs
+          path: |
+            _out_4t/github/train_test_summary.json
+            _out_4t/github/run.log
+          if-no-files-found: warn
