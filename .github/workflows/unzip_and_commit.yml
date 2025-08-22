@@ -1,45 +1,100 @@
-name: Unzip 4t pack and commit
+name: backtest-4t
 
 on:
   workflow_dispatch:
     inputs:
-      zip_path:
-        description: 'Zip file path in repo'
+      asset_name:
+        description: "Release asset name (CSV or ZIP)"
         required: true
-        default: '4t_hotfix_pack.zip'
-      target_dir:
-        description: 'Where to extract'
+        default: "ETHUSDT_1min_2020_2025.csv"
+      train_start:
         required: true
-        default: '.'
+        default: "2025-01-01"
+      train_end:
+        required: true
+        default: "2025-04-30"
+      test_start:
+        required: true
+        default: "2025-05-01"
+      test_end:
+        required: true
+        default: "2025-06-30"
+      H:
+        required: true
+        default: "5"
+      fee_bps:
+        required: true
+        default: "1.0"
+      cov_low:
+        required: true
+        default: "0.20"
+      cov_high:
+        required: true
+        default: "0.40"
 
 jobs:
-  unzip:
+  run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # push 권한
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: "3.11"
 
-      - name: Check zip exists
+      - name: Install deps
         run: |
-          if [ ! -f "${{ github.event.inputs.zip_path }}" ]; then
-            echo "Zip not found: ${{ github.event.inputs.zip_path }}"; exit 1
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas scikit-learn joblib matplotlib
           fi
-          echo "Found zip: ${{ github.event.inputs.zip_path }}"
 
-      - name: Unzip
+      - name: Download latest release asset -> data/
+        env:
+          REPO: ${{ github.repository }}
+          ASSET: ${{ github.event.inputs.asset_name }}
+          TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "${{ github.event.inputs.target_dir }}"
-          unzip -o "${{ github.event.inputs.zip_path }}" -d "${{ github.event.inputs.target_dir }}"
-          echo "Unzipped to ${{ github.event.inputs.target_dir }}"
-          ls -la "${{ github.event.inputs.target_dir }}"
+          mkdir -p data
+          rel=$(curl -s -H "Authorization: token $TOKEN" https://api.github.com/repos/$REPO/releases/latest)
+          url=$(echo "$rel" | jq -r ".assets[] | select(.name==\"$ASSET\") | .url")
+          if [ -z "$url" ]; then
+            echo "❌ Asset '$ASSET' not found in latest release."; exit 1
+          fi
+          curl -L -H "Authorization: token $TOKEN" -H "Accept: application/octet-stream" "$url" -o "data/$ASSET"
+          ls -lh data
 
-      - name: Commit & push
+      - name: (Optional) Unzip if asset is zip
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Unpack ${{ github.event.inputs.zip_path }} via Actions" || echo "Nothing to commit"
-          git push
+          if echo "${{ github.event.inputs.asset_name }}" | grep -qi '\.zip$'; then
+            sudo apt-get update && sudo apt-get install -y unzip
+            unzip -o "data/${{ github.event.inputs.asset_name }}" -d data
+            ls -lh data
+          fi
+
+      - name: Run 4t backtest
+        run: |
+          mkdir -p _out_4t
+          DATA_PATH=$(echo data/*.csv | awk '{print $1}')
+          echo "Using data: $DATA_PATH"
+          python run_4t.py \
+            --data "$DATA_PATH" \
+            --train_start "${{ github.event.inputs.train_start }}" \
+            --train_end   "${{ github.event.inputs.train_end }}" \
+            --test_start  "${{ github.event.inputs.test_start }}"  \
+            --test_end    "${{ github.event.inputs.test_end }}" \
+            --H ${{ github.event.inputs.H }} \
+            --fee_bps ${{ github.event.inputs.fee_bps }} \
+            --cov_low  ${{ github.event.inputs.cov_low }} \
+            --cov_high ${{ github.event.inputs.cov_high }} \
+            | tee _out_4t/result.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest_4t_results
+          path: _out_4t
