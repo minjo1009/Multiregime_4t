@@ -20,160 +20,123 @@ on:
         required: true
         default: "2025-06-30"
       H:
-        description: "Horizon"
+        description: "Forecast horizon (minutes)"
         required: true
         default: "5"
+      fee_bps:
+        description: "Fee in bps"
+        required: false
+        default: "1.0"
+
+permissions:
+  contents: write   # outputs 브랜치로 결과 push
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      TRAIN_START: ${{ github.event.inputs.train_start }}
+      TRAIN_END:   ${{ github.event.inputs.train_end }}
+      TEST_START:  ${{ github.event.inputs.test_start }}
+      TEST_END:    ${{ github.event.inputs.test_end }}
+      H:           ${{ github.event.inputs.H }}
+      FEE_BPS:     ${{ github.event.inputs.fee_bps || '1.0' }}
+
     steps:
-      # 1) Checkout (PINNED SHA)
-      - name: Checkout
-        uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871
-        # actions/checkout v4.2.1 의 풀 SHA  [oai_citation:0‡GitHub](https://github.com/actions/checkout/commit/eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871)
-
-      # 2) Python 세팅 (PINNED SHA)
-      - name: Set up Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.11"
-        # actions/setup-python v5.6.0 의 풀 SHA  [oai_citation:1‡GitHub](https://github.com/actions/setup-python/commit/a26af69be951a213d495a4c3e4e4022e16d87065)
-
-      # 3) PIP 캐시 (PINNED SHA)
-      - name: Cache pip
-        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-4t-${{ hashFiles('requirements.txt') }}
-        # actions/cache v4.2.0 의 풀 SHA  [oai_citation:2‡GitHub](https://github.com/actions/cache/commit/1bd1e32a3bdc45362d1e726936510720a7c30a57)
-
-      # 4) 루트 내용 점검
-      - name: Show repository tree
+      - name: Clone current repository (no marketplace actions)
+        shell: bash
         run: |
           set -euxo pipefail
+          git config --global init.defaultBranch main
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions"
+          git clone --depth 1 "https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" .
+          echo "Current path:"
           pwd
           ls -la
 
-      # 5) 코드/데이터 unzip + 표준 경로 배치
-      - name: Prepare code & data
+      - name: Unpack code & data
         shell: bash
         run: |
           set -euxo pipefail
+          # 코드팩 파일명은 네가 올려둔 이름으로 맞춘다
+          CODE_ZIP="trend4t_fix_full_hotfix.zip"
+          [ -f "$CODE_ZIP" ] || CODE_ZIP="trend4t_fix_full.zip"
+          unzip -o "$CODE_ZIP" -d .
+          mkdir -p data
 
-          CODE_ZIP="trend4t_fix_full.zip"
-          DATA_ZIP="ETHUSDT_1min_2020_2025.zip"
-
-          # 코드 언집
-          if [ -f "$CODE_ZIP" ]; then
-            unzip -o "$CODE_ZIP" -d .
-          else
-            echo "❌ $CODE_ZIP not found in repo root" >&2; exit 2
+          # 데이터 압축이름과 위치 자동 인식
+          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
+            unzip -o "ETHUSDT_1min_2020_2025.zip" -d data || true
+          fi
+          if [ -f "ETHUSDT_1min_2020_2025.csv" ] && [ ! -f "data/ETHUSDT_1min_2020_2025.csv" ]; then
+            mv "ETHUSDT_1min_2020_2025.csv" "data/ETHUSDT_1min_2020_2025.csv"
           fi
 
-          # 코드 디렉터리 결정(스크린샷 기준 폴더명)
-          if [ -d "trend4t_fix_full" ]; then
-            CODE_DIR="trend4t_fix_full"
-          else
-            # 혹시 zip이 바로 run_4t.py와 trend4p/를 풀어놓는 경우
-            if [ -f "run_4t.py" ] && [ -d "trend4p" ]; then
-              CODE_DIR="."
-            else
-              echo "❌ Unable to detect code directory after unzip" >&2; exit 2
-            fi
-          fi
-          echo "CODE_DIR=$CODE_DIR" >> $GITHUB_ENV
+          echo "Repo root:"
+          ls -la
+          echo "data/:"
+          ls -la data || true
+          echo "trend4p/:"
+          ls -la trend4p
 
-          # 데이터 언집 → CODE_DIR/data/ 로 복사
-          mkdir -p "$CODE_DIR/data"
-          if [ -f "$DATA_ZIP" ]; then
-            # zip 내부에 csv 하나라고 가정, 경로 깨끗이
-            unzip -o "$DATA_ZIP" -d "$CODE_DIR/data"
-          elif [ -f "$CODE_DIR/data/ETHUSDT_1min_2020_2025.csv" ]; then
-            true
-          else
-            echo "❌ Data zip or CSV not found" >&2; exit 3
-          fi
-
-          # CSV 실명 파악(혹시 대소문자/경로 차이 대비)
-          CSV=$(ls "$CODE_DIR"/data | grep -i '^ETHUSDT_1min_2020_2025.*\.csv$' | head -n1 || true)
-          if [ -z "$CSV" ]; then
-            echo "❌ CSV not found after unzip" >&2; ls -la "$CODE_DIR/data"; exit 3
-          fi
-          echo "DATA_CSV=$CSV" >> $GITHUB_ENV
-
-          echo "---- CODE_DIR ----"
-          ls -la "$CODE_DIR"
-          echo "---- DATA DIR ----"
-          ls -la "$CODE_DIR/data"
-
-      # 6) 의존성 설치(4t 핫픽스와 호환되는 버전 고정)
-      - name: Install python deps
+      - name: Setup Python (venv + pip)
+        shell: bash
         run: |
           set -euxo pipefail
-          cat > requirements.txt <<'REQ'
-          numpy==1.26.4
-          pandas==2.2.2
-          scikit-learn==1.6.1
-          scipy>=1.11
-          REQ
-          python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
+          python3 -V
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip wheel setuptools
+          # requirements.txt가 있으면 우선 설치
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          fi
+          # 누락 대비 필수 패키지 보강
+          pip install numpy pandas scikit-learn scipy joblib
 
-      # 7) 백테스트 실행 + 로그/요약 JSON 생성
       - name: Run 4t backtest
-        working-directory: ${{ env.CODE_DIR }}
         shell: bash
         run: |
           set -euxo pipefail
+          . .venv/bin/activate
+
           OUT_DIR="_out_4t/github"
-          mkdir -p "$OUT_DIR"
+          mkdir -p "${OUT_DIR}"
 
-          # 실행 (stdout을 로그로 저장)
+          DATA_CSV="data/ETHUSDT_1min_2020_2025.csv"
+          if [ ! -f "${DATA_CSV}" ]; then
+            echo "❌ Data CSV not found at ${DATA_CSV}"
+            echo "현재 위치:" && pwd
+            echo "루트 목록:" && ls -la
+            echo "data/ 목록:" && ls -la data || true
+            exit 3
+          fi
+
+          # 수익 관련 옵션을 run_4t.py가 받는다면 함께 넘겨라. (여기선 out_dir/H 중심)
           python run_4t.py \
-            --data "data/${{ env.DATA_CSV }}" \
-            --train_start "${{ inputs.train_start }}" \
-            --train_end   "${{ inputs.train_end }}" \
-            --test_start  "${{ inputs.test_start }}" \
-            --test_end    "${{ inputs.test_end }}" \
-            --H           "${{ inputs.H }}" \
-            --out_dir     "$OUT_DIR" | tee "$OUT_DIR/run.log"
+            --data "${DATA_CSV}" \
+            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
+            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
+            --H "${H}" --out_dir "${OUT_DIR}" | tee "${OUT_DIR}/run.log"
 
-          # run_4t.py가 콘솔에 출력하는 마지막 JSON 덩어리를 파싱해 요약 저장
-          python - <<'PY'
-          import re, json, pathlib, sys
-          p = pathlib.Path("_out_4t/github/run.log")
-          txt = p.read_text(encoding="utf-8", errors="ignore") if p.exists() else ""
-          # 가장 마지막 JSON 객체 추출
-          blocks = list(re.finditer(r"\{(?:[^{}]|\{[^{}]*\})*\}", txt, re.S))
-          if not blocks:
-              # out_dir에 이미 summary가 생성돼 있을 수도 있으니 탐색
-              for cand in pathlib.Path("_out_4t/github").glob("train_test_summary*.json"):
-                  s = cand.read_text(encoding="utf-8", errors="ignore")
-                  try:
-                      json.loads(s)
-                      pathlib.Path("_out_4t/github/train_test_summary.json").write_text(s, encoding="utf-8")
-                      print(s); sys.exit(0)
-                  except Exception:
-                      pass
-              raise SystemExit("No JSON found in run.log and no summary present.")
-          js = txt[blocks[-1].start():blocks[-1].end()]
-          pathlib.Path("_out_4t/github/train_test_summary.json").write_text(js, encoding="utf-8")
-          print(js)
-          PY
+          echo -e "### 4t Backtest outputs\n" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "${OUT_DIR}/train_test_summary.json" ]; then
+            echo -e "\n\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+            cat "${OUT_DIR}/train_test_summary.json" >> "$GITHUB_STEP_SUMMARY"
+            echo -e "\n\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No train_test_summary.json generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-          echo "---- OUT TREE ----"
-          ls -R "$OUT_DIR"
-
-      # 8) 결과/로그 업로드 (PINNED SHA)
-      - name: Upload artifacts
+      - name: Commit outputs to 'outputs' branch (no actions/artifacts)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: 4t-results
-          path: |
-            ${{ env.CODE_DIR }}/_out_4t/github/**
-            ${{ env.CODE_DIR }}/_out_4t/**/logs/**
-            ${{ env.CODE_DIR }}/_out_4t/**/train_test_summary*.json
-          if-no-files-found: warn
-        # actions/upload-artifact v4.6.2 의 풀 SHA  [oai_citation:3‡GitHub](https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git checkout -B outputs
+          git add _out_4t/github || true
+          git commit -m "Add 4t backtest outputs $(date -u +%Y%m%d-%H%M%S)" || true
+          git push -f "https://${GITHUB_ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" outputs
