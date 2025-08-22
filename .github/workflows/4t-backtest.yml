@@ -1,48 +1,18 @@
-name: 4t Backtest (Pinned & Safe)
+name: 4t Backtest (Pinned, Robust)
 
 on:
   workflow_dispatch:
     inputs:
-      code_zip:
-        description: "Code pack zip in repo root"
-        default: "4t_hotfix_pack.zip"
-        required: true
-      data_csv:
-        description: "ETH 1min CSV in repo (or zip alongside)"
-        default: "ETHUSDT_1min_2020_2025.csv"
-        required: true
-      train_start:
-        description: "Train start (YYYY-MM-DD)"
-        default: "2025-01-01"
-        required: true
-      train_end:
-        description: "Train end (YYYY-MM-DD)"
-        default: "2025-04-30"
-        required: true
-      test_start:
-        description: "Test start (YYYY-MM-DD)"
-        default: "2025-05-01"
-        required: true
-      test_end:
-        description: "Test end (YYYY-MM-DD)"
-        default: "2025-06-30"
-        required: true
-      H:
-        description: "H (horizon)"
-        default: "5"
-        required: true
-      fee_bps:
-        description: "Fee (bps)"
-        default: "1.0"
-        required: true
-      cov_low:
-        description: "Coverage lower bound (0~1)"
-        default: "0.2"
-        required: true
-      cov_high:
-        description: "Coverage upper bound (0~1)"
-        default: "0.4"
-        required: true
+      code_zip:   { description: "Code pack zip in repo root", default: "4t_hotfix_pack.zip", required: true }
+      data_csv:   { description: "ETH 1min CSV in repo (or zip alongside)", default: "ETHUSDT_1min_2020_2025.csv", required: true }
+      train_start:{ description: "YYYY-MM-DD", default: "2025-01-01", required: true }
+      train_end:  { description: "YYYY-MM-DD", default: "2025-04-30", required: true }
+      test_start: { description: "YYYY-MM-DD", default: "2025-05-01", required: true }
+      test_end:   { description: "YYYY-MM-DD", default: "2025-06-30", required: true }
+      H:          { description: "Horizon", default: "5", required: true }
+      fee_bps:    { description: "Fee bps", default: "1.0", required: true }
+      cov_low:    { description: "Coverage low", default: "0.20", required: true }
+      cov_high:   { description: "Coverage high", default: "0.40", required: true }
 
 permissions:
   contents: read
@@ -51,139 +21,190 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (pinned SHA)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5 pinned
-        with:
-          fetch-depth: 1
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Setup Python 3.11 (pinned SHA)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 pinned
+      - name: Setup Python 3.11 (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
 
-      - name: Show inputs
-        run: |
-          echo "code_zip=${{ inputs.code_zip }}"
-          echo "data_csv=${{ inputs.data_csv }}"
-          echo "train=${{ inputs.train_start }}..${{ inputs.train_end }}"
-          echo "test=${{ inputs.test_start }}..${{ inputs.test_end }}"
-          echo "H=${{ inputs.H }} fee_bps=${{ inputs.fee_bps }} cov=[${{ inputs.cov_low }},${{ inputs.cov_high }}]"
-
-      - name: Ensure unzip & tooling
+      - name: Prep tools
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y unzip
+          sudo apt-get install -y unzip rsync
 
-      - name: Resolve code pack
-        id: codepack
+      - name: List repo root
+        run: ls -alh
+
+      # 코드팩/데이터 찾기 + 언집/배치: 실패하면 친절한 메시지 남기고 종료
+      - name: Resolve code & data
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          ZIP="${{ inputs.code_zip }}"
-          if [[ -f "$ZIP" ]]; then
-            FOUND="$ZIP"
-          else
-            # backup search
-            mapfile -t CANDS < <(ls -1 *.zip 2>/dev/null | grep -i -E '4t.*pack|trend4t|hotfix')
-            if [[ ${#CANDS[@]} -gt 0 ]]; then
-              FOUND="${CANDS[0]}"
-            else
-              echo "Code pack zip not found in repo root."
-              exit 2
-            fi
-          fi
-          echo "found_zip=$FOUND" >> "$GITHUB_OUTPUT"
-          unzip -o "$FOUND" -d .
-          # normalize layout
-          if [[ -d trend4p ]]; then echo "trend4p/ exists"; else
-            # sometimes packs nest a directory; pull it up
-            TOP=$(find . -maxdepth 2 -type d -name trend4p | head -n1 || true)
-            if [[ -n "$TOP" && "$TOP" != "./trend4p" ]]; then
-              rsync -a "$TOP"/ ./trend4p/
-            fi
-          fi
+          mkdir -p work/_logs work/_out_4t/github work/data
 
-      - name: Resolve data (CSV or ZIP)
-        id: datain
-        shell: bash
-        run: |
-          set -euo pipefail
-          CSV="${{ inputs.data_csv }}"
-          if [[ -f "$CSV" ]]; then
-            DATA="$CSV"
-          elif [[ -f "data/$CSV" ]]; then
-            DATA="data/$CSV"
+          # --- Code ZIP 찾기 ---
+          CODE_ZIP="${{ inputs.code_zip }}"
+          if [[ -f "$CODE_ZIP" ]]; then :
           else
-            # try to unzip any data zip containing the csv name stem
-            STEM="${CSV%.csv}"
-            mapfile -t ZS < <(ls -1 *.zip data/*.zip 2>/dev/null | grep -i "$STEM" || true)
-            if [[ ${#ZS[@]} -gt 0 ]]; then
-              unzip -o "${ZS[0]}" -d data
-              if [[ -f "data/$CSV" ]]; then DATA="data/$CSV"; fi
-            fi
+            # 패턴 백업
+            for p in ./*4t*hotfix*pack*.zip ./*4t*pack*.zip ./*4t*.zip ./*trend4t*.zip ./trend4t*.zip ./4t*.zip; do
+              [[ -f "$p" ]] && CODE_ZIP="$p" && break
+            done
           fi
-          if [[ -z "${DATA:-}" || ! -f "$DATA" ]]; then
-            echo "Data CSV not found after attempts."
-            ls -la
-            ls -la data 2>/dev/null || true
+          if [[ ! -f "$CODE_ZIP" ]]; then
+            echo "ERROR: Code pack zip not found. Put your 4t zip in repo root." | tee work/_logs/resolve_error.txt
+            exit 2
+          fi
+          echo "CODE_ZIP=$CODE_ZIP" | tee -a work/_logs/resolve.txt
+          unzip -o "$CODE_ZIP" -d work/code >/dev/null
+
+          # run_4t.py / trend4p 폴더 auto-detect
+          RUNPY=$(find work/code -maxdepth 3 -type f -name "run_4t.py" | head -n1 || true)
+          PKGDIR=$(find work/code -maxdepth 3 -type d -name "trend4p" | head -n1 || true)
+          if [[ -z "$RUNPY" || -z "$PKGDIR" ]]; then
+            echo "ERROR: run_4t.py or trend4p/ not found inside code pack" | tee work/_logs/resolve_error.txt
+            find work/code -maxdepth 3 -type f -o -type d | tee -a work/_logs/resolve_tree.txt
             exit 3
           fi
-          echo "data_path=$DATA" >> "$GITHUB_OUTPUT"
+          echo "RUNPY=$RUNPY"   | tee -a work/_logs/resolve.txt
+          echo "PKGDIR=$PKGDIR" | tee -a work/_logs/resolve.txt
+          echo "runpy=$RUNPY"   >> "$GITHUB_OUTPUT"
+          echo "pkgdir=$PKGDIR" >> "$GITHUB_OUTPUT"
 
-      - name: Cache pip (pinned SHA)
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4 pinned
+          # --- 데이터 CSV 찾기/언집 ---
+          CSV_IN="${{ inputs.data_csv }}"
+          DATA_PATH=""
+          if [[ -f "$CSV_IN" ]]; then DATA_PATH="$CSV_IN"; fi
+          if [[ -z "$DATA_PATH" && -f "data/$CSV_IN" ]]; then DATA_PATH="data/$CSV_IN"; fi
+          if [[ -z "$DATA_PATH" ]]; then
+            STEM="${CSV_IN%.csv}"
+            CAND=$(ls -1 *.zip data/*.zip 2>/dev/null | grep -i "$STEM" | head -n1 || true)
+            if [[ -n "$CAND" ]]; then
+              unzip -o "$CAND" -d work/data >/dev/null || true
+            fi
+            # 최종 탐색
+            C=$(find work -maxdepth 3 -type f -iname "$CSV_IN" | head -n1 || true)
+            [[ -n "$C" ]] && DATA_PATH="$C"
+          fi
+          if [[ -z "$DATA_PATH" || ! -f "$DATA_PATH" ]]; then
+            echo "ERROR: Data CSV not found after attempts." | tee work/_logs/resolve_error.txt
+            find . -maxdepth 2 -type f | tee -a work/_logs/repo_files.txt
+            find work -maxdepth 3 -type f | tee -a work/_logs/work_files.txt
+            exit 4
+          fi
+          # 표준 위치로 복사
+          cp -f "$DATA_PATH" work/data/
+          echo "DATA_CSV=$(basename "$DATA_PATH")" | tee -a work/_logs/resolve.txt
+          echo "data_csv=work/data/$(basename "$DATA_PATH")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pip (pinned)
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-py311-${{ hashFiles('**/requirements.txt') }}
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py311-
 
-      - name: Install dependencies
+      - name: Install Python deps (robust)
         shell: bash
         run: |
           set -euo pipefail
-          python -V
-          python -m pip install -U pip wheel
-          if [[ -f requirements.txt ]]; then
-            python -m pip install -r requirements.txt
-          elif [[ -f trend4p/requirements.txt ]]; then
-            python -m pip install -r trend4p/requirements.txt
+          python -V | tee -a work/_logs/python.txt
+          python -m pip install -U pip wheel >/dev/null
+          REQ1=$(find work/code -maxdepth 2 -name "requirements.txt" | head -n1 || true)
+          REQ2=$(find work/code -maxdepth 2 -name "requirements-4t.txt" | head -n1 || true)
+          if [[ -n "$REQ1" ]]; then
+            python -m pip install -r "$REQ1" 2>&1 | tee -a work/_logs/pip_install.txt
+          elif [[ -n "$REQ2" ]]; then
+            python -m pip install -r "$REQ2" 2>&1 | tee -a work/_logs/pip_install.txt
           else
-            # minimal stack for our runners
-            python -m pip install pandas numpy scipy scikit-learn lightgbm ta tqdm joblib
+            python -m pip install pandas numpy scipy scikit-learn lightgbm ta tqdm joblib 2>&1 | tee -a work/_logs/pip_install.txt
           fi
+          python - <<'PY' 2>&1 | tee -a work/_logs/versions.txt
+import sys, pkgutil
+print("PY:", sys.version)
+for m in ["pandas","numpy","scikit_learn","scipy","lightgbm","tqdm","joblib"]:
+    try:
+        mod=__import__(m if m!="scikit_learn" else "sklearn")
+        print(m, getattr(mod, "__version__", "unknown"))
+    except Exception as e:
+        print(m, "ERR", e)
+PY
 
-      - name: Run backtest
+      # 실패해도 로그/아티팩트 남기기 위해 continue-on-error
+      - name: Run backtest (always logs)
         id: runbt
         shell: bash
+        continue-on-error: true
         env:
-          DATA: ${{ steps.datain.outputs.data_path }}
+          RUNPY:  ${{ steps.resolve.outputs.runpy }}
+          PKGDIR: ${{ steps.resolve.outputs.pkgdir }}
+          CSV:    ${{ steps.resolve.outputs.data_csv }}
         run: |
           set -euo pipefail
-          SCRIPT=""
-          if [[ -f run_4t.py ]]; then SCRIPT="run_4t.py"; fi
-          if [[ -z "$SCRIPT" && -f trend4p/run_4t.py ]]; then SCRIPT="trend4p/run_4t.py"; fi
-          if [[ -z "$SCRIPT" ]]; then echo "run_4t.py not found"; exit 4; fi
+          echo "RUNPY=$RUNPY"
+          echo "PKGDIR=$PKGDIR"
+          echo "CSV=$CSV"
+          echo "$PKGDIR" > work/_logs/pkgdir.txt
+          echo "$RUNPY"  > work/_logs/runpy.txt
+          echo "$CSV"    > work/_logs/csv.txt
 
-          python "$SCRIPT" \
-            --data "$DATA" \
+          # PYTHONPATH에 code 루트 추가
+          export PYTHONPATH="$(dirname "$PKGDIR"):$PYTHONPATH"
+
+          # 아웃 디렉토리 미리 생성
+          OUTDIR="work/_out_4t/github"
+          mkdir -p "$OUTDIR"
+
+          set -x
+          python "$RUNPY" \
+            --data "$CSV" \
             --train_start "${{ inputs.train_start }}" --train_end "${{ inputs.train_end }}" \
             --test_start  "${{ inputs.test_start }}"  --test_end  "${{ inputs.test_end }}" \
             --H "${{ inputs.H }}" --fee_bps "${{ inputs.fee_bps }}" \
             --cov_low "${{ inputs.cov_low }}" --cov_high "${{ inputs.cov_high }}" \
-            --out_dir "./_out_4t/github"
+            --out_dir "$OUTDIR" \
+            > "$OUTDIR/console.out" 2> "$OUTDIR/console.err"
+          RC=$?
+          set +x
 
-          # collect useful artifacts if present
-          OUTDIR="./_out_4t/github"
-          mkdir -p "$OUTDIR"
-          if ls "$OUTDIR"/*.json >/dev/null 2>&1; then echo "has_json=true" >> "$GITHUB_OUTPUT"; fi
-          if ls "$OUTDIR"/*.csv  >/dev/null 2>&1; then echo "has_csv=true"  >> "$GITHUB_OUTPUT"; fi
+          echo "RC=${RC}" | tee work/_logs/rc.txt
 
-      - name: Upload artifacts (pinned SHA)
+          # summary.json 없으면 더미라도 생성 (아티팩트 확인용)
+          if [[ ! -f "$OUTDIR/summary.json" ]]; then
+            python - <<PY > "$OUTDIR/summary.json"
+import json, os
+print(json.dumps({
+  "status": "failed" if ${RC}!=0 else "ok",
+  "hint": "Check console.err for the Python exception/traceback.",
+  "inputs": {
+    "train": ["${{ inputs.train_start }}","${{ inputs.train_end }}"],
+    "test":  ["${{ inputs.test_start }}","${{ inputs.test_end }}"],
+    "H": "${{ inputs.H }}", "fee_bps": "${{ inputs.fee_bps }}",
+    "cov": ["${{ inputs.cov_low }}","${{ inputs.cov_high }}"]
+  }
+}, indent=2))
+PY
+          fi
+
+          # job output flag
+          if [[ ${RC} -ne 0 ]]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            # 실패라도 워크플로 전체는 계속해서 아티팩트 업로드
+            exit 0
+          fi
+
+      - name: Upload artifacts (pinned)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 pinned
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_${{ github.run_id }}
+          name: backtest_${{ github.run_number }}
           path: |
-            _out_4t/github/**
-            **/train_test_summary*.json
-            **/logs/**
+            work/_out_4t/github/**
+            work/_logs/**
+            work/code/**
+            work/data/**
           if-no-files-found: warn
