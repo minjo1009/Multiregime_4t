@@ -1,0 +1,144 @@
+name: 4t-backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_path:
+        description: 'Path to ETH 1min CSV'
+        required: false
+        default: './data/ETHUSDT_1min_2020_2025.csv'
+      train_start:
+        description: 'Train start (YYYY-MM-DD)'
+        default: '2025-01-01'
+      train_end:
+        description: 'Train end (YYYY-MM-DD)'
+        default: '2025-04-30'
+      test_start:
+        description: 'Test start (YYYY-MM-DD)'
+        default: '2025-05-01'
+      test_end:
+        description: 'Test end (YYYY-MM-DD)'
+        default: '2025-06-30'
+      H:
+        description: 'Prediction horizon'
+        default: '5'
+      fee_bps:
+        description: 'Fee (bps)'
+        default: '1.0'
+      cov_low:
+        description: 'Coverage lower bound'
+        default: '0.2'
+      cov_high:
+        description: 'Coverage upper bound'
+        default: '0.4'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Ensure unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: Prepare code and data
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Repo root:"
+          ls -la
+          # 4t 코드팩(zip) 자동 해제
+          CODE_ZIP=$(ls -1 *4t*.zip 2>/dev/null | head -n1 || true)
+          if [[ -n "${CODE_ZIP}" ]]; then
+            echo "Unzipping code pack: ${CODE_ZIP}"
+            unzip -o "$CODE_ZIP" -d .
+          fi
+          # 데이터 정리
+          mkdir -p data
+          if ls -1 *.csv.zip >/dev/null 2>&1; then
+            unzip -o *.csv.zip -d data
+          fi
+          if ls -1 *.csv >/dev/null 2>&1; then
+            for f in *.csv; do
+              if [[ "$f" == *"ETH"* ]] || [[ "$f" == *"eth"* ]]; then
+                mv -f "$f" data/ || true
+              fi
+            done
+          fi
+          echo "Tree after prepare:"
+          find . -maxdepth 2 -type f | sed 's|^./||'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          else
+            pip install "numpy==1.26.*" "pandas==2.2.*" "scikit-learn==1.5.*" "xgboost==2.1.*" "scipy" "pyarrow" "matplotlib"
+          fi
+
+      - name: Run 4t backtest
+        env:
+          TRAIN_START: ${{ github.event.inputs.train_start }}
+          TRAIN_END:   ${{ github.event.inputs.train_end }}
+          TEST_START:  ${{ github.event.inputs.test_start }}
+          TEST_END:    ${{ github.event.inputs.test_end }}
+          H:           ${{ github.event.inputs.H }}
+          FEE_BPS:     ${{ github.event.inputs.fee_bps }}
+          COV_LOW:     ${{ github.event.inputs.cov_low }}
+          COV_HIGH:    ${{ github.event.inputs.cov_high }}
+          DATA_PATH:   ${{ github.event.inputs.data_path }}
+        run: |
+          set -euo pipefail
+          python --version
+          # 엔트리포인트 탐색
+          if [[ -f run_4t.py ]]; then
+            SCRIPT=run_4t.py
+          elif [[ -f trend4p/run_backtest_4t.py ]]; then
+            SCRIPT=trend4p/run_backtest_4t.py
+          else
+            echo "❌ run_4t entrypoint not found." >&2
+            ls -la
+            exit 1
+          fi
+          # 데이터 경로 보정
+          if [[ ! -f "${DATA_PATH}" ]]; then
+            CAND=$(ls -1 data/*ETH*1min*2020*2025*.csv 2>/dev/null | head -n1 || true)
+            if [[ -n "${CAND}" ]]; then
+              DATA_PATH="$CAND"
+            fi
+          fi
+          echo "Using DATA_PATH=${DATA_PATH}"
+          mkdir -p _out_4t/ci
+          python "$SCRIPT" --data "${DATA_PATH}" \
+            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
+            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
+            --H "${H}" --fee_bps "${FEE_BPS}" --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
+            --out_dir "./_out_4t/ci" | tee _out_4t/ci/run.log
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest_4t_outputs
+          path: |
+            _out_4t/**
+            **/summary.json
+            **/*.log
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "### 4t Backtest Completed ✅" >> $GITHUB_STEP_SUMMARY
+          if [[ -f _out_4t/ci/summary.json ]]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat _out_4t/ci/summary.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No summary.json found. Check artifacts." >> $GITHUB_STEP_SUMMARY
