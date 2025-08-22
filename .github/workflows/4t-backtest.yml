@@ -3,46 +3,38 @@ name: 4t-backtest
 on:
   workflow_dispatch:
     inputs:
-      code_zip:
-        description: 'Code pack zip at repo root'
-        required: false
-        default: 'trend4t_fix_full.zip'
-      data_csv:
-        description: 'Data CSV path (root or data/)'
-        required: false
-        default: 'ETHUSDT_1min_2020_2025.csv'
       train_start:
-        description: 'Train start (UTC)'
-        required: false
-        default: '2025-01-01'
+        description: "Train start (UTC)"
+        required: true
+        default: "2025-01-01"
       train_end:
-        description: 'Train end (UTC)'
-        required: false
-        default: '2025-04-30'
+        description: "Train end (UTC)"
+        required: true
+        default: "2025-04-30"
       test_start:
-        description: 'Test start (UTC)'
-        required: false
-        default: '2025-05-01'
+        description: "Test start (UTC)"
+        required: true
+        default: "2025-05-01"
       test_end:
-        description: 'Test end (UTC)'
-        required: false
-        default: '2025-06-30'
+        description: "Test end (UTC)"
+        required: true
+        default: "2025-06-30"
       H:
-        description: 'Horizon H'
-        required: false
-        default: '5'
+        description: "Horizon"
+        required: true
+        default: "5"
       fee_bps:
-        description: 'Fee in bps (e.g., 1.0)'
-        required: false
-        default: '1.0'
+        description: "Fee in bps"
+        required: true
+        default: "1.0"
       cov_low:
-        description: 'Coverage lower bound'
-        required: false
-        default: '0.20'
+        description: "Coverage low"
+        required: true
+        default: "0.20"
       cov_high:
-        description: 'Coverage upper bound'
-        required: false
-        default: '0.40'
+        description: "Coverage high"
+        required: true
+        default: "0.40"
 
 permissions:
   contents: read
@@ -50,148 +42,153 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
-      - name: Self checkout via git (no actions)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 1) 체크아웃 (풀 SHA 고정)
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 1
+
+      # 2) 파이썬 셋업 (풀 SHA 고정)
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      # 3) 의존성 설치 (requirements.txt 없을 때를 대비한 기본 세트)
+      - name: Install dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          git init .
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-          git fetch --depth=1 origin "${{ github.sha }}"
-          git checkout --force FETCH_HEAD
-          git status --porcelain || true
-          ls -la
+          python -m pip install --upgrade pip
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          else
+            # 최소 실행에 필요한 것들 (필요 시 여기에 추가)
+            pip install numpy pandas scikit-learn scipy lightgbm
+          fi
 
-      - name: Verify code/data exist at repo root or ./data
+      # 4) 코드/데이터 zip 검증 및 풀기
+      - name: Unpack code & data
+        shell: bash
         run: |
           set -euo pipefail
-          CODE_ZIP="${{ inputs.code_zip }}"
-          DATA_CSV_INPUT="${{ inputs.data_csv }}"
+          echo "PWD: $(pwd)"
+          ls -al
 
-          # code zip 확인
+          # ---- 코드팩 ----
+          CODE_ZIP="trend4t_fix_full.zip"
           if [[ ! -f "$CODE_ZIP" ]]; then
-            echo "❌ Code pack zip not found at repo root: $CODE_ZIP"
-            echo "현재 위치: $(pwd)"
-            ls -la
+            echo "❌ Code pack zip not found in repo root: $CODE_ZIP"
             exit 2
           fi
 
-          # csv 경로 후보
-          if [[ -f "$DATA_CSV_INPUT" ]]; then
-            DATA_CSV="$DATA_CSV_INPUT"
-          elif [[ -f "data/$DATA_CSV_INPUT" ]]; then
-            DATA_CSV="data/$DATA_CSV_INPUT"
-          else
-            echo "❌ Data CSV not found: tried $DATA_CSV_INPUT and data/$DATA_CSV_INPUT"
-            echo "현재 위치: $(pwd)"
-            ls -la
-            echo "data/ 목록:"
-            ls -la data || true
-            exit 3
+          mkdir -p codepack
+          unzip -o "$CODE_ZIP" -d codepack
+
+          # 코드팩 내부 표준화: run_4t.py / trend4p 디렉토리가 루트로 오도록 정리
+          # (zip 내부 구조가 /trend4p, /run_4t.py 형태라면 다음 mv는 성공)
+          if [[ -f codepack/run_4t.py ]]; then
+            mv -f codepack/run_4t.py ./
+          elif [[ -f codepack/**/run_4t.py ]]; then
+            # 서브폴더에 있을 경우
+            RP=$(ls codepack/**/run_4t.py | head -n1)
+            mv -f "$RP" ./run_4t.py
           fi
 
-          echo "✅ Found code zip: $CODE_ZIP"
-          echo "✅ Found data csv: $DATA_CSV"
-
-          echo "CODE_ZIP=$CODE_ZIP" >> $GITHUB_ENV
-          echo "DATA_CSV=$DATA_CSV" >> $GITHUB_ENV
-
-      - name: Unzip code pack
-        run: |
-          set -euo pipefail
-          unzip -o "$CODE_ZIP" -d .
-          echo "📦 Unzipped content:"
-          ls -la
-          echo "📂 tree (top level):"
-          find . -maxdepth 2 -type d -print
-
-      - name: Prepare Python (use system Python)
-        run: |
-          set -euo pipefail
-          python3 -V
-          python3 -m venv .venv
-          source .venv/bin/activate
-          python -V
-          python -m pip install --upgrade pip wheel setuptools
-          # 필수 패키지 (여기에서 최소 셋만 지정, 나머지는 requirements.txt 있으면 설치)
-          python -m pip install "numpy==1.26.4" "pandas==2.2.2" "scikit-learn==1.5.1" "pyarrow>=15" "matplotlib>=3.8"
-          if [[ -f requirements.txt ]]; then
-            python -m pip install -r requirements.txt
-          elif [[ -f trend4p/requirements.txt ]]; then
-            python -m pip install -r trend4p/requirements.txt
+          if [[ -d codepack/trend4p ]]; then
+            rm -rf trend4p || true
+            mv -f codepack/trend4p ./
+          elif ls codepack/**/trend4p -d >/dev/null 2>&1; then
+            RP=$(ls -d codepack/**/trend4p | head -n1)
+            rm -rf trend4p || true
+            mv -f "$RP" ./trend4p
           fi
 
-      - name: Run backtest (4t)
-        id: run_bt
-        env:
-          TRAIN_START: ${{ inputs.train_start }}
-          TRAIN_END:   ${{ inputs.train_end }}
-          TEST_START:  ${{ inputs.test_start }}
-          TEST_END:    ${{ inputs.test_end }}
-          H:           ${{ inputs.H }}
-          FEE_BPS:     ${{ inputs.fee_bps }}
-          COV_LOW:     ${{ inputs.cov_low }}
-          COV_HIGH:    ${{ inputs.cov_high }}
-        run: |
-          set -euo pipefail
-          source .venv/bin/activate
+          echo "After code unpack:"
+          ls -al
+          ls -al trend4p || true
 
-          # 아웃풋 디렉토리
-          OUTDIR="_out_4t/github"
-          mkdir -p "$OUTDIR"
+          # 필수 파일 확인
+          [[ -f run_4t.py ]] || { echo "❌ run_4t.py not found after unpack"; exit 3; }
+          [[ -f trend4p/__init__.py ]] || { echo "❌ trend4p package not found after unpack"; exit 3; }
 
-          # run_4t.py 위치 탐색
-          TARGET=""
-          if [[ -f "./run_4t.py" ]]; then
-            TARGET="./run_4t.py"
-          elif [[ -f "./trend4p/run_4t.py" ]]; then
-            TARGET="./trend4p/run_4t.py"
-          else
-            # 광역 탐색
-            CAND=$(grep -Rsl --include="run_4t.py" "" . || true)
-            if [[ -n "$CAND" ]]; then
-              TARGET="$CAND"
+          # ---- 데이터 ----
+          mkdir -p data
+
+          # 1) CSV가 이미 루트나 data/에 있는지
+          if [[ -f "ETHUSDT_1min_2025.csv" ]]; then
+            mv -f ETHUSDT_1min_2025.csv data/
+          fi
+          if [[ -f "ETHUSDT_1min_2020_2025.csv" ]]; then
+            mv -f ETHUSDT_1min_2020_2025.csv data/
+          fi
+
+          # 2) zip만 있을 때 풀기
+          if [[ ! -f "data/ETHUSDT_1min_2020_2025.csv" ]]; then
+            if [[ -f "ETHUSDT_1min_2020_2025.zip" ]]; then
+              unzip -o ETHUSDT_1min_2020_2025.zip -d data || true
             fi
           fi
 
-          if [[ -z "$TARGET" ]]; then
-            echo "❌ run_4t.py not found in code pack."
-            find . -name "run_4t.py" -print || true
-            exit 4
+          # 3) 최종 CSV 경로 탐색 (이름이 다를 수도 있음)
+          CSV_PATH=""
+          if [[ -f "data/ETHUSDT_1min_2020_2025.csv" ]]; then
+            CSV_PATH="data/ETHUSDT_1min_2020_2025.csv"
+          else
+            # data/ 밑에서 가장 큰 CSV 하나를 선택
+            FOUND=$(ls -S data/*.csv 2>/dev/null | head -n1 || true)
+            if [[ -n "${FOUND:-}" ]]; then
+              CSV_PATH="$FOUND"
+            fi
           fi
-          echo "▶ Running: $TARGET"
 
-          # 실행
-          python "$TARGET" \
-            --data "$DATA_CSV" \
-            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
-            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
-            --H "${H}" --fee_bps "${FEE_BPS}" --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
-            --out_dir "$OUTDIR" \
-          | tee "$OUTDIR/run_stdout.txt"
+          if [[ -z "${CSV_PATH:-}" ]]; then
+            echo "❌ Data CSV not found: looked for data/ETHUSDT_1min_2020_2025.csv or any data/*.csv"
+            echo "현재 위치: $(pwd)"; ls -al; echo; echo "data/ 목록:"; ls -al data || true
+            exit 3
+          fi
 
-          echo "✅ Backtest finished."
+          echo "✅ Using CSV: $CSV_PATH"
+          echo "CSV_PATH=$CSV_PATH" >> $GITHUB_ENV
 
-      - name: Summarize to job summary
-        if: always()
+      # 5) 백테스트 실행
+      - name: Run backtest
+        shell: bash
         run: |
           set -euo pipefail
-          OUTDIR="_out_4t/github"
-          echo "## 4t Backtest Summary" >> $GITHUB_STEP_SUMMARY
-          if [[ -f "$OUTDIR/train_test_summary.json" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
-            cat "$OUTDIR/train_test_summary.json" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- (notice) train_test_summary.json not found. See logs below." >> $GITHUB_STEP_SUMMARY
-          fi
-          if [[ -f "$OUTDIR/run_stdout.txt" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Raw stdout (tail)" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            tail -n 80 "$OUTDIR/run_stdout.txt" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          fi
+          mkdir -p _out_4t/github
+          python ./run_4t.py \
+            --data "${CSV_PATH}" \
+            --train_start "${{ inputs.train_start }}" --train_end "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}"  --test_end  "${{ inputs.test_end }}" \
+            --H "${{ inputs.H }}" \
+            --fee_bps "${{ inputs.fee_bps }}" \
+            --cov_low "${{ inputs.cov_low }}" --cov_high "${{ inputs.cov_high }}" \
+            --out_dir _out_4t/github
+
+          echo "After run:"
+          find _out_4t -maxdepth 3 -type f -print
+
+      # 6) 아티팩트 업로드 (풀 SHA 고정)
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results_${{ github.run_id }}
+          path: |
+            _out_4t/github/**
+            **/train_test_summary*.json
+            **/logs/**
+          if-no-files-found: warn
+
+      # (옵션) 캐시: 데이터/venv 캐시는 취향에 따라
+      - name: (Optional) Cache pip
+        if: false
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
