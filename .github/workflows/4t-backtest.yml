@@ -2,93 +2,42 @@ name: 4t-backtest
 
 on:
   workflow_dispatch:
-    inputs:
-      train_start:
-        description: "Train start (YYYY-MM-DD)"
-        required: true
-        default: "2025-01-01"
-      train_end:
-        description: "Train end (YYYY-MM-DD)"
-        required: true
-        default: "2025-04-30"
-      test_start:
-        description: "Test start (YYYY-MM-DD)"
-        required: true
-        default: "2025-05-01"
-      test_end:
-        description: "Test end (YYYY-MM-DD)"
-        required: true
-        default: "2025-06-30"
-      H:
-        description: "Prediction horizon (minutes)"
-        required: true
-        default: "5"
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
     steps:
-      # NOTE: 아래 actions/* 는 네 레포 정책에 맞춰 "풀 길이 SHA"로 핀 고정해둔 버전 유지해
-      - name: Checkout
-        uses: actions/checkout@<핀된_SHA>
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@<핀된_SHA>
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy pandas scikit-learn
+          pip install -r requirements.txt
 
-      - name: Unpack code & data
+      - name: Run backtest
         run: |
           set -euxo pipefail
-          ls -al
-          mkdir -p data _out_4t/github
-          # 코드팩(zip)은 레포 루트에 올려두기: trend4t_hotfix_pack_u3.zip
-          test -f trend4t_hotfix_pack_u3.zip
-          unzip -o trend4t_hotfix_pack_u3.zip -d .
-          # 데이터는 ETHUSDT_1min_2020_2025.csv 또는 zip
-          if [ -f ETHUSDT_1min_2020_2025.csv ]; then
-            echo "CSV found."
-          elif [ -f ETHUSDT_1min_2020_2025.zip ]; then
-            unzip -o ETHUSDT_1min_2020_2025.zip -d data
-          fi
-          # CSV 위치 표준화
-          if [ -f ETHUSDT_1min_2020_2025.csv ]; then
-            mv -f ETHUSDT_1min_2020_2025.csv data/ETHUSDT_1min_2020_2025.csv || true
-          fi
-          ls -al data || true
-          ls -al trend4p
-
-      - name: Backtest run
-        env:
-          TRAIN_START: ${{ github.event.inputs.train_start }}
-          TRAIN_END:   ${{ github.event.inputs.train_end }}
-          TEST_START:  ${{ github.event.inputs.test_start }}
-          TEST_END:    ${{ github.event.inputs.test_end }}
-          H:           ${{ github.event.inputs.H }}
-        run: |
-          set -euxo pipefail
-          OUT_DIR="_out_4t/github"
-          mkdir -p "${OUT_DIR}"
+          OUT_DIR=_out_4t/github
+          mkdir -p $OUT_DIR
           python run_4t.py \
             --data data/ETHUSDT_1min_2020_2025.csv \
-            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
-            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
-            --H ${H} --out_dir "${OUT_DIR}" | tee "${OUT_DIR}/stdout.json"
-          echo "---- Result preview ----"
-          cat "${OUT_DIR}/train_test_summary.json" || true
-          echo "------------------------"
+            --train_start 2025-01-01 \
+            --train_end 2025-04-30 \
+            --test_start 2025-05-01 \
+            --test_end 2025-06-30 \
+            --H 5 \
+            --out_dir $OUT_DIR | tee $OUT_DIR/run.log
 
       - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@<핀된_SHA>
+        uses: actions/upload-artifact@v4
         with:
-          name: 4t-backtest_${{ github.run_id }}
+          name: backtest-results
           path: |
             _out_4t/github/**
+            **/train_test_summary*.json
+            **/logs/**
