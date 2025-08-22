@@ -1,40 +1,40 @@
-name: Backtest 4t (Pinned SHA)
+name: 4t backtest (ETH 1m)
 
 on:
   workflow_dispatch:
     inputs:
       train_start:
-        description: "Train start"
-        required: true
+        description: "Train start (UTC)"
         default: "2025-01-01"
+        required: true
       train_end:
-        description: "Train end"
-        required: true
+        description: "Train end (UTC)"
         default: "2025-04-30"
+        required: true
       test_start:
-        description: "Test start"
-        required: true
+        description: "Test start (UTC)"
         default: "2025-05-01"
-      test_end:
-        description: "Test end"
         required: true
+      test_end:
+        description: "Test end (UTC)"
         default: "2025-06-30"
+        required: true
       H:
         description: "Horizon"
-        required: true
         default: "5"
+        required: true
       fee_bps:
         description: "Fee (bps)"
-        required: true
         default: "1.0"
+        required: true
       cov_low:
-        description: "Coverage low"
-        required: true
+        description: "Coverage lower bound"
         default: "0.20"
-      cov_high:
-        description: "Coverage high"
         required: true
+      cov_high:
+        description: "Coverage upper bound"
         default: "0.40"
+        required: true
 
 permissions:
   contents: read
@@ -42,100 +42,129 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - name: Checkout (pinned)
+      # 1) Checkout (pinned to full commit SHA)
+      - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
 
-      - name: Set up Python (pinned)
+      # 2) Setup Python (pinned)
+      - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
-          python-version: '3.11'   # 3.13도 가능하지만 sklearn 안정성상 3.11 권장
+          python-version: "3.12"
 
-      - name: Cache pip (pinned)
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4
+      # 3) Cache pip (pinned)
+      - name: Cache pip
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Prepare repo layout (unzip packs)
+      # 4) Unzip code & data (repo 루트에 zip이 있다고 했음)
+      - name: Prepare code & data
+        shell: bash
         run: |
-          set -e
-          mkdir -p data _out_4t
-          shopt -s nullglob
-          for z in *.zip; do
-            echo "Unzipping $z"
-            unzip -o "$z" -d .
-          done
-          # CSV를 data/로 이동(여러 위치 대비)
-          cands=(
-            "./ETHUSDT_1min_2020_2025.csv"
-            "./data/ETHUSDT_1min_2020_2025.csv"
-            "./trend4p/ETHUSDT_1min_2020_2025.csv"
-          )
-          found=""
-          for p in "${cands[@]}"; do
-            if [ -f "$p" ]; then found="$p"; break; fi
-          done
-          if [ -z "$found" ]; then
-            # 루트/서브폴더 전체 탐색(최대 1개만 기대)
-            found=$(git ls-files -- ':/*ETHUSDT_1min_2020_2025.csv' | head -n 1 || true)
-          fi
-          if [ -n "$found" ]; then
-            echo "CSV found: $found"
-            mv -f "$found" data/ETHUSDT_1min_2020_2025.csv
-          fi
-          test -f data/ETHUSDT_1min_2020_2025.csv || (echo "CSV not found"; exit 1)
+          set -euo pipefail
+          mkdir -p trend4p data _out
+          # 코드팩: 4t_hotfix_pack.zip 또는 trend4t_pack.zip 중 하나가 있다는 가정
+          if [ -f "4t_hotfix_pack.zip" ]; then unzip -o 4t_hotfix_pack.zip
+          elif [ -f "trend4t_pack.zip" ]; then unzip -o trend4t_pack.zip
+          else echo "Code pack zip not found in repo root." && exit 2; fi
 
+          # 이더리움 1분봉 데이터 zip 혹은 csv 확인
+          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then unzip -o ETHUSDT_1min_2020_2025.zip -d data
+          fi
+          if [ -f "ETHUSDT_1min_2020_2025.csv" ]; then
+            mv -f ETHUSDT_1min_2020_2025.csv data/ETHUSDT_1min_2020_2025.csv
+          fi
+
+          ls -al .
+          ls -al trend4p || true
+          ls -al data || true
+
+      # 5) Install dependencies (requirements*.txt가 없으면 합리적 기본 세트 설치)
       - name: Install dependencies
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           if [ -f requirements.txt ]; then
+            python -m pip install --upgrade pip
             pip install -r requirements.txt
           else
-            pip install --upgrade pip
-            pip install pandas numpy scikit-learn==1.5.2 scipy ta pyarrow
+            python -m pip install --upgrade pip
+            pip install pandas numpy scikit-learn==1.5.1 xgboost==2.1.1 joblib scipy pyarrow
+            # 필요 시: ta, statsmodels 등 추가
+            pip install ta statsmodels
           fi
 
-      - name: Sanity check (schema & time col)
+      # 6) Schema quick check (open_time/ts 컬럼 확인)
+      - name: Sanity check data columns
+        shell: python
         run: |
-          python - <<'PY'
-          import pandas as pd, sys
-          df = pd.read_csv('data/ETHUSDT_1min_2020_2025.csv', nrows=5)
-          cols = set(df.columns.str.lower())
-          need = {'open_time','open','high','low','close','volume'}
-          miss = need - cols
-          if miss:
-            print("Missing columns:", miss); sys.exit(1)
-          print("OK header:", list(df.columns))
-          PY
+          import pandas as pd, sys, os
+          p = os.path.join("data","ETHUSDT_1min_2020_2025.csv")
+          df = pd.read_csv(p, nrows=5)
+          cols = {c.lower() for c in df.columns}
+          if "open_time" in cols:
+              print("OK: found open_time")
+          elif "ts" in cols:
+              print("OK: found ts")
+          else:
+              print("ERROR: need open_time or ts in CSV header, got:", df.columns.tolist())
+              sys.exit(3)
 
+      # 7) Run backtest (4t 실행 스크립트 가정: run_4t.py 또는 trend4p/run_backtest_4t.py)
       - name: Run 4t backtest
+        shell: bash
+        env:
+          TRAIN_START: ${{ inputs.train_start }}
+          TRAIN_END:   ${{ inputs.train_end }}
+          TEST_START:  ${{ inputs.test_start }}
+          TEST_END:    ${{ inputs.test_end }}
+          H:          ${{ inputs.H }}
+          FEE_BPS:    ${{ inputs.fee_bps }}
+          COV_LOW:    ${{ inputs.cov_low }}
+          COV_HIGH:   ${{ inputs.cov_high }}
         run: |
-          set -e
-          # 실행 엔트리포인트: run_4t.py (repo 루트에 있다고 가정)
-          python ./run_4t.py \
-            --data ./data/ETHUSDT_1min_2020_2025.csv \
-            --train_start '${{ inputs.train_start }}' \
-            --train_end   '${{ inputs.train_end }}' \
-            --test_start  '${{ inputs.test_start }}' \
-            --test_end    '${{ inputs.test_end }}' \
-            --H '${{ inputs.H }}' \
-            --fee_bps '${{ inputs.fee_bps }}' \
-            --cov_low '${{ inputs.cov_low }}' \
-            --cov_high '${{ inputs.cov_high }}' \
-            --out_dir ./_out_4t
-          echo "==== RESULT PREVIEW ===="
-          ls -al _out_4t || true
-          echo "========================"
+          set -euo pipefail
+          if [ -f "run_4t.py" ]; then
+            python run_4t.py \
+              --data data/ETHUSDT_1min_2020_2025.csv \
+              --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
+              --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
+              --H "${H}" --fee_bps "${FEE_BPS}" --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
+              --out_dir _out
+          elif [ -f "trend4p/run_backtest_4t.py" ]; then
+            python -m trend4p.run_backtest_4t \
+              --data data/ETHUSDT_1min_2020_2025.csv \
+              --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
+              --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
+              --H "${H}" --fee_bps "${FEE_BPS}" --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
+              --out_dir _out
+          else
+            echo "ERROR: 4t runner not found." && exit 4
+          fi
 
-      - name: Upload results (pinned)
+      # 8) 수치 요약을 파일로
+      - name: Summarize metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "_out/summary.json" ]; then
+            cat _out/summary.json
+          else
+            echo '{"error":"summary.json not found"}' > _out/summary.json
+          fi
+
+      # 9) 결과 업로드 (pinned)
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: backtest_4t_outputs
+          name: backtest_outputs
           path: |
-            _out_4t/**
-            **/runlog.txt
-          if-no-files-found: warn
-          retention-days: 14
+            _out/**
+            logs/**
+          retention-days: 10
