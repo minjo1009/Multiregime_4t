@@ -1,0 +1,63 @@
+name: Backtest 4t
+
+on:
+  workflow_dispatch:
+    inputs:
+      train_start: { required: true, default: "2025-01-01" }
+      train_end:   { required: true, default: "2025-04-30" }
+      test_start:  { required: true, default: "2025-05-01" }
+      test_end:    { required: true, default: "2025-06-30" }
+      H:           { required: true, default: "5" }
+      fee_bps:     { required: true, default: "1.0" }
+      cov_low:     { required: true, default: "0.20" }
+      cov_high:    { required: true, default: "0.40" }
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas scikit-learn xgboost scipy joblib
+          fi
+
+      - name: Check data file
+        run: |
+          test -f "data/ETHUSDT_1min_2020_2025.csv" || { echo "❌ data CSV not found under data/"; ls -la; exit 1; }
+          python - << 'PY'
+import pandas as pd
+df = pd.read_csv("data/ETHUSDT_1min_2020_2025.csv", nrows=5)
+print("Columns:", list(df.columns)); print(df.head().to_string())
+PY
+
+      - name: Run 4t
+        run: |
+          mkdir -p _out_4t
+          python run_4t.py \
+            --data "data/ETHUSDT_1min_2020_2025.csv" \
+            --train_start "${{ github.event.inputs.train_start }}" \
+            --train_end   "${{ github.event.inputs.train_end }}" \
+            --test_start  "${{ github.event.inputs.test_start }}"  \
+            --test_end    "${{ github.event.inputs.test_end }}" \
+            --H "${{ github.event.inputs.H }}" \
+            --fee_bps "${{ github.event.inputs.fee_bps }}" \
+            --cov_low "${{ github.event.inputs.cov_low }}" \
+            --cov_high "${{ github.event.inputs.cov_high }}" \
+            | tee _out_4t/console.jsonl
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest_4t_results
+          path: _out_4t/**
