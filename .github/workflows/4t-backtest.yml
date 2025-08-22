@@ -20,171 +20,160 @@ on:
         required: true
         default: "2025-06-30"
       H:
-        description: "Horizon (int)"
+        description: "Horizon"
         required: true
         default: "5"
-      fee_bps:
-        description: "Fee in bps"
-        required: true
-        default: "1.0"
-      cov_low:
-        description: "Coverage lower bound"
-        required: true
-        default: "0.2"
-      cov_high:
-        description: "Coverage upper bound"
-        required: true
-        default: "0.4"
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    # setup-python을 안 쓰고 컨테이너로 Python 환경 확보 → 액션 SHA 핀을 줄여 보안/안정성↑
-    container:
-      image: python:3.11-slim
-
     steps:
-      # actions/checkout@v4 (전체 SHA 고정)
+      # 1) Checkout (PINNED SHA)
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871
+        # actions/checkout v4.2.1 의 풀 SHA  [oai_citation:0‡GitHub](https://github.com/actions/checkout/commit/eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871)
 
-      - name: Show repo root
+      # 2) Python 세팅 (PINNED SHA)
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+        # actions/setup-python v5.6.0 의 풀 SHA  [oai_citation:1‡GitHub](https://github.com/actions/setup-python/commit/a26af69be951a213d495a4c3e4e4022e16d87065)
+
+      # 3) PIP 캐시 (PINNED SHA)
+      - name: Cache pip
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-4t-${{ hashFiles('requirements.txt') }}
+        # actions/cache v4.2.0 의 풀 SHA  [oai_citation:2‡GitHub](https://github.com/actions/cache/commit/1bd1e32a3bdc45362d1e726936510720a7c30a57)
+
+      # 4) 루트 내용 점검
+      - name: Show repository tree
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           pwd
-          ls -al
+          ls -la
 
-      - name: Prepare code & data (unzip via Python; CSV/ZIP 모두 대응)
+      # 5) 코드/데이터 unzip + 표준 경로 배치
+      - name: Prepare code & data
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           CODE_ZIP="trend4t_fix_full.zip"
-          DATA_CSV="ETHUSDT_1min_2020_2025.csv"
           DATA_ZIP="ETHUSDT_1min_2020_2025.zip"
 
-          python - << 'PY'
-          import os, sys, zipfile, glob, shutil, json
+          # 코드 언집
+          if [ -f "$CODE_ZIP" ]; then
+            unzip -o "$CODE_ZIP" -d .
+          else
+            echo "❌ $CODE_ZIP not found in repo root" >&2; exit 2
+          fi
 
-          def ensure_file(path):
-            if not os.path.isfile(path):
-              print(f"❌ missing: {path}")
-              sys.exit(3)
+          # 코드 디렉터리 결정(스크린샷 기준 폴더명)
+          if [ -d "trend4t_fix_full" ]; then
+            CODE_DIR="trend4t_fix_full"
+          else
+            # 혹시 zip이 바로 run_4t.py와 trend4p/를 풀어놓는 경우
+            if [ -f "run_4t.py" ] && [ -d "trend4p" ]; then
+              CODE_DIR="."
+            else
+              echo "❌ Unable to detect code directory after unzip" >&2; exit 2
+            fi
+          fi
+          echo "CODE_DIR=$CODE_DIR" >> $GITHUB_ENV
 
-          root = os.getcwd()
-          code_zip = os.environ.get("CODE_ZIP","trend4t_fix_full.zip")
-          data_csv = os.environ.get("DATA_CSV","ETHUSDT_1min_2020_2025.csv")
-          data_zip = os.environ.get("DATA_ZIP","ETHUSDT_1min_2020_2025.zip")
+          # 데이터 언집 → CODE_DIR/data/ 로 복사
+          mkdir -p "$CODE_DIR/data"
+          if [ -f "$DATA_ZIP" ]; then
+            # zip 내부에 csv 하나라고 가정, 경로 깨끗이
+            unzip -o "$DATA_ZIP" -d "$CODE_DIR/data"
+          elif [ -f "$CODE_DIR/data/ETHUSDT_1min_2020_2025.csv" ]; then
+            true
+          else
+            echo "❌ Data zip or CSV not found" >&2; exit 3
+          fi
 
-          # 1) 코드팩 확인 및 해제
-          ensure_file(code_zip)
-          with zipfile.ZipFile(code_zip) as zf:
-            zf.extractall(root)
+          # CSV 실명 파악(혹시 대소문자/경로 차이 대비)
+          CSV=$(ls "$CODE_DIR"/data | grep -i '^ETHUSDT_1min_2020_2025.*\.csv$' | head -n1 || true)
+          if [ -z "$CSV" ]; then
+            echo "❌ CSV not found after unzip" >&2; ls -la "$CODE_DIR/data"; exit 3
+          fi
+          echo "DATA_CSV=$CSV" >> $GITHUB_ENV
 
-          # 2) 데이터 준비: CSV 우선, 없으면 ZIP 해제→ data/ 폴더로 정리
-          data_dir = os.path.join(root, "data")
-          os.makedirs(data_dir, exist_ok=True)
+          echo "---- CODE_DIR ----"
+          ls -la "$CODE_DIR"
+          echo "---- DATA DIR ----"
+          ls -la "$CODE_DIR/data"
 
-          if os.path.isfile(data_csv):
-            # 루트에 있으면 data/로 이동(복사)하여 경로 통일
-            shutil.copy2(data_csv, os.path.join(data_dir, os.path.basename(data_csv)))
-          elif os.path.isfile(data_zip):
-            with zipfile.ZipFile(data_zip) as zf:
-              zf.extractall(data_dir)
-          else:
-            print("❌ Data CSV not found: tried ETHUSDT_1min_2020_2025.csv and ETHUSDT_1min_2020_2025.zip")
-            sys.exit(3)
+      # 6) 의존성 설치(4t 핫픽스와 호환되는 버전 고정)
+      - name: Install python deps
+        run: |
+          set -euxo pipefail
+          cat > requirements.txt <<'REQ'
+          numpy==1.26.4
+          pandas==2.2.2
+          scikit-learn==1.6.1
+          scipy>=1.11
+          REQ
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
 
-          # 3) CSV가 data/ 아래 존재하는지 최종 확인 (zip풀린 경로도 커버)
-          csv_candidates = []
-          for p in glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive=True):
-            if "ETHUSDT_1min_2020_2025" in os.path.basename(p):
-              csv_candidates.append(p)
-          if not csv_candidates:
-            # 그냥 data/ 아래 첫 csv라도 사용
-            csv_candidates = glob.glob(os.path.join(data_dir, "*.csv"))
-          if not csv_candidates:
-            print("❌ No CSV in data/ after extraction")
-            sys.exit(3)
+      # 7) 백테스트 실행 + 로그/요약 JSON 생성
+      - name: Run 4t backtest
+        working-directory: ${{ env.CODE_DIR }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OUT_DIR="_out_4t/github"
+          mkdir -p "$OUT_DIR"
 
-          # 표준 경로를 data/ETHUSDT_1min_2020_2025.csv 로 통일
-          target = os.path.join(data_dir, "ETHUSDT_1min_2020_2025.csv")
-          if not os.path.isfile(target):
-            shutil.copy2(csv_candidates[0], target)
+          # 실행 (stdout을 로그로 저장)
+          python run_4t.py \
+            --data "data/${{ env.DATA_CSV }}" \
+            --train_start "${{ inputs.train_start }}" \
+            --train_end   "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}" \
+            --test_end    "${{ inputs.test_end }}" \
+            --H           "${{ inputs.H }}" \
+            --out_dir     "$OUT_DIR" | tee "$OUT_DIR/run.log"
 
-          # 4) 산출물 폴더
-          os.makedirs(os.path.join(root, "_out_4t", "github", "logs"), exist_ok=True)
-
-          print("✅ Prepared:")
-          print(" - code unzipped to repo root")
-          print(" - data at:", target)
+          # run_4t.py가 콘솔에 출력하는 마지막 JSON 덩어리를 파싱해 요약 저장
+          python - <<'PY'
+          import re, json, pathlib, sys
+          p = pathlib.Path("_out_4t/github/run.log")
+          txt = p.read_text(encoding="utf-8", errors="ignore") if p.exists() else ""
+          # 가장 마지막 JSON 객체 추출
+          blocks = list(re.finditer(r"\{(?:[^{}]|\{[^{}]*\})*\}", txt, re.S))
+          if not blocks:
+              # out_dir에 이미 summary가 생성돼 있을 수도 있으니 탐색
+              for cand in pathlib.Path("_out_4t/github").glob("train_test_summary*.json"):
+                  s = cand.read_text(encoding="utf-8", errors="ignore")
+                  try:
+                      json.loads(s)
+                      pathlib.Path("_out_4t/github/train_test_summary.json").write_text(s, encoding="utf-8")
+                      print(s); sys.exit(0)
+                  except Exception:
+                      pass
+              raise SystemExit("No JSON found in run.log and no summary present.")
+          js = txt[blocks[-1].start():blocks[-1].end()]
+          pathlib.Path("_out_4t/github/train_test_summary.json").write_text(js, encoding="utf-8")
+          print(js)
           PY
 
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -V
-          pip install --upgrade pip
-          # requirements.txt가 코드팩 안에 있을 수도 있으니 탐색
-          REQ=$(python - << 'PY'
-import os,glob
-cands = glob.glob("**/requirements*.txt", recursive=True)
-print(cands[0] if cands else "")
-PY
-)
-          if [ -n "$REQ" ]; then
-            echo "Using requirements: $REQ"
-            pip install -r "$REQ"
-          fi
-          # 누락 방지용 필수 설치(중복 설치 허용)
-          pip install numpy pandas scikit-learn lightgbm xgboost ta statsmodels joblib matplotlib
+          echo "---- OUT TREE ----"
+          ls -R "$OUT_DIR"
 
-      - name: Backtest (run_4t.py)
-        env:
-          TRAIN_START: ${{ inputs.train_start }}
-          TRAIN_END:   ${{ inputs.train_end }}
-          TEST_START:  ${{ inputs.test_start }}
-          TEST_END:    ${{ inputs.test_end }}
-          H:           ${{ inputs.H }}
-          FEE_BPS:     ${{ inputs.fee_bps }}
-          COV_LOW:     ${{ inputs.cov_low }}
-          COV_HIGH:    ${{ inputs.cov_high }}
-        run: |
-          set -euo pipefail
-
-          # run_4t.py가 루트 또는 압축 해제 경로에 존재한다고 가정 (코드팩 구조 그대로)
-          # 데이터는 data/ETHUSDT_1min_2020_2025.csv 로 표준화됨
-          echo "▶ Running backtest..."
-          python run_4t.py \
-            --data ./data/ETHUSDT_1min_2020_2025.csv \
-            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
-            --test_start  "${TEST_START}"  --test_end  "${TEST_END}" \
-            --H ${H} --fee_bps ${FEE_BPS} --cov_low ${COV_LOW} --cov_high ${COV_HIGH} \
-            --out_dir ./_out_4t/github | tee ./_out_4t/github/logs/console.txt
-
-          echo "──────── summary glimpse ────────"
-          python - << 'PY'
-import json, re, sys, pathlib, glob
-paths = glob.glob("_out_4t/github/**/train_test_summary*.json", recursive=True)
-if not paths:
-  print("⚠️  No summary json found yet.")
-else:
-  p = paths[0]
-  print("Found summary:", p)
-  try:
-    print(json.dumps(json.load(open(p,"r",encoding="utf-8")), indent=2))
-  except Exception as e:
-    print("read summary error:", e)
-PY
-
-      # actions/upload-artifact@v4 (전체 SHA 고정)
+      # 8) 결과/로그 업로드 (PINNED SHA)
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: 4t_results_${{ github.run_id }}
+          name: 4t-results
           path: |
-            _out_4t/github/**
-            **/train_test_summary*.json
-            **/logs/**
+            ${{ env.CODE_DIR }}/_out_4t/github/**
+            ${{ env.CODE_DIR }}/_out_4t/**/logs/**
+            ${{ env.CODE_DIR }}/_out_4t/**/train_test_summary*.json
           if-no-files-found: warn
+        # actions/upload-artifact v4.6.2 의 풀 SHA  [oai_citation:3‡GitHub](https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02)
