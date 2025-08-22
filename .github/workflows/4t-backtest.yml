@@ -2,42 +2,142 @@ name: 4t-backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      train_start:
+        description: Train start (UTC)
+        required: true
+        default: "2025-01-01"
+      train_end:
+        description: Train end (UTC)
+        required: true
+        default: "2025-04-30"
+      test_start:
+        description: Test start (UTC)
+        required: true
+        default: "2025-05-01"
+      test_end:
+        description: Test end (UTC)
+        required: true
+        default: "2025-06-30"
+      H:
+        description: Horizon H
+        required: true
+        default: "5"
+
+permissions:
+  contents: read
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@__PIN_CHECKOUT__
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@__PIN_SETUPPY__
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Cache pip
+        uses: actions/cache@__PIN_CACHE__
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
-      - name: Run backtest
+      - name: Show repo tree (debug)
+        run: |
+            pwd
+            ls -lah
+            ls -lah data || true
+
+      - name: Unpack code pack
         run: |
           set -euxo pipefail
-          OUT_DIR=_out_4t/github
-          mkdir -p $OUT_DIR
+          # 코드팩 파일명 고정
+          CODE=trend4t_fix_full.zip
+          test -f "$CODE" || { echo "::error::코드팩 ${CODE} 가 리포 루트에 없습니다"; exit 2; }
+          unzip -o "$CODE" -d .
+          # run_4t.py 가 루트로 풀렸는지 체크
+          test -f run_4t.py || { echo "::error::run_4t.py 가 없습니다(압축 구조 확인 필요)"; ls -lah; exit 3; }
+          # 패키지 루트도 확인
+          test -d trend4p || { echo "::error::trend4p 폴더가 없습니다(압축 구조 확인 필요)"; exit 4; }
+
+      - name: Prepare data
+        run: |
+          set -euxo pipefail
+          mkdir -p data
+          # CSV가 루트나 data/에 있으면 사용
+          if [ -f "ETHUSDT_1min_2020_2025.csv" ]; then
+            mv -f ETHUSDT_1min_2020_2025.csv data/ETHUSDT_1min_2020_2025.csv
+          fi
+          # zip만 있는 경우 풀어서 data/ 로 이동
+          if [ ! -f "data/ETHUSDT_1min_2020_2025.csv" ] && [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
+            unzip -p ETHUSDT_1min_2020_2025.zip > data/ETHUSDT_1min_2020_2025.csv || { echo "::error::데이터 zip 해제 실패"; exit 5; }
+          fi
+          # 최종 검증
+          test -s "data/ETHUSDT_1min_2020_2025.csv" || { echo "::error::데이터 CSV가 없습니다"; exit 6; }
+          # 헤더 한 줄 로깅(시간 컬럼명 검증: open_time or ts 중 하나 존재)
+          python - <<'PY'
+import pandas as pd
+import sys
+p="data/ETHUSDT_1min_2020_2025.csv"
+df=pd.read_csv(p, nrows=1)
+cols=set(map(str.lower, df.columns))
+print("HEADER:", df.columns.tolist())
+if not (("open_time" in cols) or ("ts" in cols)):
+    print("::warning:: 시간 컬럼(open_time 또는 ts)이 보이지 않습니다. data_utils가 ts로 매핑을 시도할 수 있습니다.")
+PY
+
+      - name: Install deps
+        run: |
+          set -euxo pipefail
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # 최소 구동 셋: sklearn 쪽은 1.4대 권장(4t 핫픽스에 맞춤)
+            pip install --upgrade pip
+            pip install numpy pandas "scikit-learn==1.4.2" scipy joblib
+            # 로깅/진행률 등 선택
+            pip install tqdm
+          fi
+          python -V
+          python - <<'PY'
+import numpy, pandas, sklearn
+print("NUMPY", numpy.__version__)
+print("PANDAS", pandas.__version__)
+print("SKLEARN", sklearn.__version__)
+PY
+
+      - name: Run backtest
+        id: runbt
+        run: |
+          set -euxo pipefail
+          OUT_DIR="_out_4t/github"
+          mkdir -p "${OUT_DIR}"
+          # 주어진 입력으로 실행
           python run_4t.py \
             --data data/ETHUSDT_1min_2020_2025.csv \
-            --train_start 2025-01-01 \
-            --train_end 2025-04-30 \
-            --test_start 2025-05-01 \
-            --test_end 2025-06-30 \
-            --H 5 \
-            --out_dir $OUT_DIR | tee $OUT_DIR/run.log
+            --train_start "${{ github.event.inputs.train_start }}" \
+            --train_end   "${{ github.event.inputs.train_end }}" \
+            --test_start  "${{ github.event.inputs.test_start }}" \
+            --test_end    "${{ github.event.inputs.test_end }}" \
+            --H "${{ github.event.inputs.H }}" \
+            --out_dir "${OUT_DIR}" \
+            2>&1 | tee "${OUT_DIR}/run.log"
+          # 결과 파일 존재 보강(없어도 로그는 업로드되게)
+          touch "${OUT_DIR}/KEEP_ALIVE"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@__PIN_UPLOAD__
         with:
-          name: backtest-results
+          name: 4t-results
           path: |
             _out_4t/github/**
             **/train_test_summary*.json
             **/logs/**
+          if-no-files-found: warn
