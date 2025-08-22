@@ -1,0 +1,45 @@
+name: Unzip 4t pack and commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Zip file path in repo'
+        required: true
+        default: '4t_hotfix_pack.zip'
+      target_dir:
+        description: 'Where to extract'
+        required: true
+        default: '.'
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push 권한
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check zip exists
+        run: |
+          if [ ! -f "${{ github.event.inputs.zip_path }}" ]; then
+            echo "Zip not found: ${{ github.event.inputs.zip_path }}"; exit 1
+          fi
+          echo "Found zip: ${{ github.event.inputs.zip_path }}"
+
+      - name: Unzip
+        run: |
+          mkdir -p "${{ github.event.inputs.target_dir }}"
+          unzip -o "${{ github.event.inputs.zip_path }}" -d "${{ github.event.inputs.target_dir }}"
+          echo "Unzipped to ${{ github.event.inputs.target_dir }}"
+          ls -la "${{ github.event.inputs.target_dir }}"
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Unpack ${{ github.event.inputs.zip_path }} via Actions" || echo "Nothing to commit"
+          git push
