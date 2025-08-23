@@ -27,6 +27,11 @@ on:
         description: "테스트 종료 (YYYY-MM-DD)"
         default: "2025-08-22"
         required: true
+  push:
+    paths:
+      - "trend4u.zip"
+      - "ETHUSDT_1min_2020_2025.zip"
+      - ".github/workflows/4t-backtest.yml"
 
 permissions:
   contents: read
@@ -42,12 +47,12 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # ✅ SHA 핀 고정(보안 정책 충족)
+      # 모든 액션은 '풀 길이 커밋 SHA'로 핀 (조직 정책 대응)
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0 pinned
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 pinned
         with:
           python-version: "3.11"
           cache: "pip"
@@ -64,30 +69,23 @@ jobs:
           pip -V    | tee -a "$LOG_DIR/versions.txt"
           ls -al    | tee "$LOG_DIR/ls_root.txt"
 
-      - name: Resolve inputs (with safe defaults)
+      - name: Resolve inputs
         id: in
         shell: bash
         run: |
           set -euo pipefail
-          CODE_ZIP="${{ github.event.inputs.code_zip }}"
-          DATA_ZIP="${{ github.event.inputs.data_zip }}"
-          TS="${{ github.event.inputs.train_start }}"
-          TE="${{ github.event.inputs.train_end }}"
-          VS="${{ github.event.inputs.test_start }}"
-          VE="${{ github.event.inputs.test_end }}"
-          # 빈 값 대비(표현식의 || 대신 bash에서 기본값 처리)
-          : "${CODE_ZIP:=trend4u.zip}"
-          : "${DATA_ZIP:=ETHUSDT_1min_2020_2025.zip}"
-          : "${TS:=2020-01-01}"
-          : "${TE:=2024-12-31}"
-          : "${VS:=2025-01-01}"
-          : "${VE:=2025-08-22}"
-          echo "code=${CODE_ZIP}" >> "$GITHUB_OUTPUT"
-          echo "data=${DATA_ZIP}" >> "$GITHUB_OUTPUT"
-          echo "ts=${TS}"         >> "$GITHUB_OUTPUT"
-          echo "te=${TE}"         >> "$GITHUB_OUTPUT"
-          echo "vs=${VS}"         >> "$GITHUB_OUTPUT"
-          echo "ve=${VE}"         >> "$GITHUB_OUTPUT"
+          : "${CODE_ZIP:=${{ github.event.inputs.code_zip }}}"
+          : "${DATA_ZIP:=${{ github.event.inputs.data_zip }}}"
+          : "${TS:=${{ github.event.inputs.train_start }}}"
+          : "${TE:=${{ github.event.inputs.train_end }}}"
+          : "${VS:=${{ github.event.inputs.test_start }}}"
+          : "${VE:=${{ github.event.inputs.test_end }}}"
+          echo "code=$CODE_ZIP" >> "$GITHUB_OUTPUT"
+          echo "data=$DATA_ZIP" >> "$GITHUB_OUTPUT"
+          echo "ts=$TS"         >> "$GITHUB_OUTPUT"
+          echo "te=$TE"         >> "$GITHUB_OUTPUT"
+          echo "vs=$VS"         >> "$GITHUB_OUTPUT"
+          echo "ve=$VE"         >> "$GITHUB_OUTPUT"
 
       - name: Unzip code & data
         shell: bash
@@ -96,34 +94,32 @@ jobs:
           CODE_ZIP="${{ steps.in.outputs.code }}"
           DATA_ZIP="${{ steps.in.outputs.data }}"
           [[ -f "$CODE_ZIP" ]] || { echo "::error::코드 ZIP($CODE_ZIP)이 루트에 없습니다"; exit 2; }
-          unzip -oq "$CODE_ZIP" -d .    # → trend4u/ ... 생성
-          if [[ -f "$DATA_ZIP" ]]; then
-            mkdir -p data
-            unzip -oq "$DATA_ZIP" -d data
-          else
-            echo "::error::데이터 ZIP($DATA_ZIP)이 루트에 없습니다"; exit 3;
-          fi
+          [[ -f "$DATA_ZIP" ]] || { echo "::error::데이터 ZIP($DATA_ZIP)이 루트에 없습니다"; exit 3; }
+
+          unzip -oq "$CODE_ZIP" -d .
+          mkdir -p data
+          unzip -oq "$DATA_ZIP" -d data
+
           echo "== CODE tree ==" | tee -a "$LOG_DIR/tree.txt"
           (find trend4u -maxdepth 2 -print) | tee -a "$LOG_DIR/tree.txt"
           echo "== DATA tree ==" | tee -a "$LOG_DIR/tree.txt"
           (find data -maxdepth 2 -print || true) | tee -a "$LOG_DIR/tree.txt"
 
-      - name: Hotfix syntax (trend4p/__init__.py) + CRLF cleanup
+      - name: Hotfix syntax (rewrite __init__.py) + CRLF cleanup
         shell: bash
         run: |
           set -euo pipefail
-          # CRLF 제거(안정성)
+          # 모든 .py CRLF 제거
           find trend4u -type f -name "*.py" -print0 | xargs -0 -I{} bash -lc $'sed -i "s/\\r$//" "{}"'
-          # 선행 '.' 문법 오류 수정
-          INIT="trend4u/trend4p/__init__.py"
-          if [[ -f "$INIT" ]]; then
-            sed -i 's/^[[:space:]]*\\.\([[:alnum:]_]\)/\\1/' "$INIT"
-            sed -i 's/^\\.[[:space:]]*__all__/__all__/' "$INIT"
-            # 파일 끝 개행 보장
-            tail -c1 "$INIT" | od -An -t x1 | grep -q . || printf '\n' >> "$INIT"
-            echo "[hotfix] fixed $INIT" | tee -a "$LOG_DIR/hotfix.txt"
+          # trend4p/__init__.py 완전 재작성 (선행 '.' 문법오류 차단)
+          if [[ -f trend4u/trend4p/__init__.py ]]; then
+            cat > trend4u/trend4p/__init__.py <<'PY'
+from . import data_utils, features_4u, labeling, model_4u, execution_4u, selector_4u
+__all__ = ['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']
+PY
+            echo "[hotfix] rewrote trend4u/trend4p/__init__.py" | tee -a "$LOG_DIR/hotfix.txt"
           else
-            echo "[info] $INIT not found (skip)" | tee -a "$LOG_DIR/hotfix.txt"
+            echo "[info] trend4u/trend4p/__init__.py not found (skip)" | tee -a "$LOG_DIR/hotfix.txt"
           fi
 
       - name: Install dependencies (trend4u/requirements.txt)
@@ -148,8 +144,8 @@ jobs:
           set -euo pipefail
           CSV="data/ETHUSDT_1min_2020_2025.csv"
           if [[ ! -f "$CSV" ]]; then
-            # fallback: 가장 큰 csv 1개
-            CSV="$(find data -type f -name '*.csv' -printf '%s %p\n' | sort -nr | head -1 | awk '{print $2}')"
+            # fallback: 가장 큰 csv
+            CSV="$(find data -type f -name '*.csv' -printf '%s %p\n' 2>/dev/null | sort -nr | head -1 | awk '{print $2}')"
           fi
           [[ -n "$CSV" && -f "$CSV" ]] || { echo "::error::CSV 데이터를 찾지 못했습니다 (data/*.csv)"; exit 4; }
 
@@ -157,6 +153,7 @@ jobs:
           export PYTHONPATH="trend4u:trend4u/trend4p:${PYTHONPATH:-}"
           echo "PYTHONPATH=$PYTHONPATH" | tee -a "$LOG_DIR/run.txt"
 
+          # 정확 인자 세트 (run_4u.py 확인됨)
           CMD=( python trend4u/run_4u.py
             --data "$CSV"
             --train_start "$TS" --train_end "$TE"
@@ -170,12 +167,12 @@ jobs:
           RC=${PIPESTATUS[0]}
           set -e
 
-          # run_4u 기본 out_dir이 _out_4u일 수도 있으니 병합 복사
+          # run_4u.py가 내부 기본 out_dir(_out_4u 등)에 썼을 경우 병합 복사
           rsync -a --ignore-missing-args "_out_4u/" "$OUT_DIR/" 2>/dev/null || true
           rsync -a --ignore-missing-args "trend4u/_out_4u/" "$OUT_DIR/" 2>/dev/null || true
           rsync -a --ignore-missing-args "trend4u/out/" "$OUT_DIR/" 2>/dev/null || true
 
-          # 결과 없으면 최소 요약 생성(경고 방지)
+          # 결과 없으면 최소 요약 생성
           if ! compgen -G "$OUT_DIR/*" > /dev/null; then
             echo "No artifacts produced. See logs/backtest.log" > "$OUT_DIR/SUMMARY.txt"
           fi
@@ -185,7 +182,7 @@ jobs:
 
       - name: Upload results (out/**)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 pinned
         with:
           name: backtest-results
           path: out/**
@@ -194,7 +191,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 pinned
         with:
           name: backtest-logs
           path: logs/**
