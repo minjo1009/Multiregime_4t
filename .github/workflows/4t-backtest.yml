@@ -1,106 +1,221 @@
-name: 4t-backtest
+name: 4T Backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      python:
+        description: 'Python version'
+        default: '3.11'
+        required: true
+      entry_hint:
+        description: '백테스트 엔트리 힌트(예: backtest.py 경로)'
+        required: false
+      data_hint:
+        description: '데이터 파일(또는 디렉토리) 힌트'
+        required: false
+  push:
+    paths:
+      - 'trend4u.zip'
+      - '*.zip'
+      - '*.csv'
+      - '.github/workflows/4t-backtest.yml'
 
-# 최소 권한
 permissions:
   contents: read
 
-# 중복 실행 방지
 concurrency:
   group: backtest-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Seoul
+  # 루트 파일 이름(필요 시 레포에 맞게 바꿔도 됨)
+  CODE_ZIP: trend4u.zip
+  DATA_ZIP: ETH_1min.zip
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout (pinned SHA, actions/checkout v5.0.0)
-        # tag 사용 금지, 풀 SHA로 고정
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-        # ref: v5.0.0 (Node 24 런타임, 최소 러너 v2.327.1 필요)
-        # https://github.com/actions/checkout/releases/tag/v5.0.0
-
-      - name: Setup Python 3.11 (pinned SHA, actions/setup-python v5.6.0)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        # ref: v5.6.0
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          python-version: '3.11'
-          cache: 'pip'   # 별도 actions/cache 없이 pip 캐싱
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ inputs.python }}
+          cache: 'pip'
 
-      - name: Unpack code & data
-        shell: bash
+      - name: Show repo root files
+        run: ls -alh
+
+      - name: Prepare workspace
         run: |
-          set -euxo pipefail
-          # 코드팩
-          [ -f trend4u.zip ] && unzip -o trend4u.zip -d trend4u
-          # 데이터: zip 우선, 없으면 csv 탐색
-          mkdir -p data
-          if ls -1 *.zip 2>/dev/null | grep -Ei 'ETH.*(1m|1min).*\.zip$' >/dev/null; then
-            z=$(ls -1 | grep -Ei 'ETH.*(1m|1min).*\.zip$' | head -n1)
-            unzip -o "$z" -d data
-          elif ls -1 *.csv 2>/dev/null | grep -Ei 'ETH.*(1m|1min).*\.csv$' >/dev/null; then
-            cp "$(ls -1 | grep -Ei 'ETH.*(1m|1min).*\.csv$' | head -n1)" data/
+          set -euo pipefail
+          mkdir -p work code data out logs
+          echo "TZ=$TZ" | tee logs/env.txt
+          echo "GITHUB_SHA=${GITHUB_SHA}" | tee -a logs/env.txt
+          echo "PY=${{ inputs.python }}" | tee -a logs/env.txt
+
+          # -------- 코드 압축 해제 --------
+          if [[ -f "$CODE_ZIP" ]]; then
+            echo "[info] Unzipping $CODE_ZIP -> code/"
+            unzip -q "$CODE_ZIP" -d code
+          else
+            echo "[warn] $CODE_ZIP not found. Searching for a single zip..."
+            ZIP_CAND=$(ls -1 *.zip 2>/dev/null | grep -v -E '(ETH|data)' | head -n1 || true)
+            if [[ -n "${ZIP_CAND:-}" ]]; then
+              unzip -q "$ZIP_CAND" -d code
+            else
+              echo "[error] 코드 zip을 찾지 못했습니다."; exit 12
+            fi
           fi
-          echo "== repo root =="
-          ls -al
-          echo "== trend4u =="
-          [ -d trend4u ] && ls -al trend4u || true
-          echo "== data =="
-          ls -al data
+
+          # 루트-레벨 압축이 그대로 풀릴 수 있으므로 단일 폴더 정규화
+          # (code 디렉토리 안에 폴더가 1개뿐이면 그걸 code/src 로 이동)
+          SUBDIRS=$(find code -mindepth 1 -maxdepth 1 -type d | wc -l)
+          if [[ "$SUBDIRS" -eq 1 ]]; then
+            mv "$(find code -mindepth 1 -maxdepth 1 -type d)" code/src
+          else
+            mkdir -p code/src
+            shopt -s dotglob; mv code/* code/src/ || true
+          fi
+
+          # -------- 데이터 준비 --------
+          # 1) data zip 우선
+          if [[ -f "$DATA_ZIP" ]]; then
+            echo "[info] Unzipping $DATA_ZIP -> data/"
+            unzip -q "$DATA_ZIP" -d data
+          fi
+          # 2) 루트에 csv가 있으면 data/로 이동
+          CSV_CNT=$(ls -1 *.csv 2>/dev/null | wc -l || true)
+          if [[ "$CSV_CNT" -gt 0 ]]; then
+            mkdir -p data
+            mv -f *.csv data/ || true
+          fi
+
+          echo "[info] Code tree"
+          (cd code/src && find . -maxdepth 3 -type f | sed 's#^\./##') | tee logs/tree_code.txt
+          echo "[info] Data tree"
+          (cd data && find . -maxdepth 2 -type f | sed 's#^\./##') | tee logs/tree_data.txt
 
       - name: Install dependencies
-        shell: bash
+        working-directory: code/src
         run: |
-          set -euxo pipefail
-          if [ -f trend4u/requirements.txt ]; then
-            pip install --upgrade pip
-            pip install -r trend4u/requirements.txt
+          set -euo pipefail
+          python -V | tee -a ../logs/versions.txt
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          elif [[ -f pyproject.toml ]]; then
+            pip install .
           else
-            # 최소 실행용 기본 패키지(필요시 requirements.txt로 대체)
-            pip install numpy pandas matplotlib
+            # 최소 구동 세트 (레포 의존패키지 없을 때 대비)
+            pip install numpy pandas matplotlib ta python-dateutil pytz
           fi
+
+      - name: Locate backtest entry
+        id: find_entry
+        working-directory: code/src
+        run: |
+          set -euo pipefail
+          HINT="${{ inputs.entry_hint }}"
+          if [[ -n "${HINT}" && -f "${HINT}" ]]; then
+            ENTRY="${HINT}"
+          else
+            # 우선순위 규칙: scripts/backtest.py > backtest.py > run_backtest.py > */backtest_*.py
+            CANDS=()
+            [[ -f scripts/backtest.py ]] && CANDS+=("scripts/backtest.py")
+            [[ -f backtest.py ]] && CANDS+=("backtest.py")
+            [[ -f run_backtest.py ]] && CANDS+=("run_backtest.py")
+            mapfile -t MORE < <(git ls-files '*.py' | grep -E '/?backtest(_|\.|-)?.*\.py$' || true)
+            CANDS+=("${MORE[@]}")
+            # __main__ 또는 argparse 포함 파일 가중치
+            PICK=""
+            for f in "${CANDS[@]}"; do
+              [[ -z "$f" ]] && continue
+              if grep -Eq "__main__|argparse|def main\\(|def backtest\\(" "$f"; then
+                PICK="$f"; break
+              fi
+            done
+            ENTRY="${PICK}"
+          fi
+
+          if [[ -z "${ENTRY:-}" ]]; then
+            echo "::error title=trend4u::백테스트 실행 스크립트를 찾지 못했습니다. code/src 파일구조를 확인하세요."
+            echo "entry=" >> $GITHUB_OUTPUT
+            exit 20
+          fi
+
+          echo "[info] Selected entry: $ENTRY" | tee -a ../logs/entry.txt
+          echo "entry=$ENTRY" >> $GITHUB_OUTPUT
 
       - name: Run backtest
-        shell: bash
+        if: steps.find_entry.outputs.entry != ''
+        working-directory: code/src
         run: |
-          set -euxo pipefail
-          cd trend4u || true
-          # 가장 그럴듯한 실행 스크립트 자동 탐색
-          script=$(ls -1 | grep -Ei '(^|_)backtest.*\.py$|^run_?backtest.*\.py$' | head -n1 || true)
-          if [ -n "${script:-}" ]; then
-            echo ">> running ${script}"
-            # 데이터 인자 유무에 따라 유연 실행
-            python "$script" --data ../data  --symbol ETHUSDT --tf 1m --out ../out || \
-            python "$script" --data ../data  || \
-            python "$script"
-          elif [ -f Makefile ]; then
-            make backtest || make
+          set -euo pipefail
+          ENTRY="${{ steps.find_entry.outputs.entry }}"
+          DATA_HINT="${{ inputs.data_hint }}"
+          # 데이터 후보 결정: 입력 힌트 > data 디렉토리 내 ETH/1min 유사 파일 > data 디렉토리 전체
+          DATA_ARG=""
+          if [[ -n "${DATA_HINT}" && -e "${DATA_HINT}" ]]; then
+            DATA_ARG="${DATA_HINT}"
           else
-            echo "::warning file=trend4u::백테스트 실행 스크립트를 찾지 못했습니다. 파일 목록을 확인하세요."
-            ls -al
+            CAND=$(ls -1 ../data/*ETH*1min*.csv 2>/dev/null | head -n1 || true)
+            [[ -z "$CAND" ]] && CAND=$(ls -1 ../data/*.csv 2>/dev/null | head -n1 || true)
+            [[ -z "$CAND" ]] && CAND="../data"
+            DATA_ARG="$CAND"
+          fi
+          echo "[info] DATA_ARG=$DATA_ARG" | tee -a ../logs/entry.txt
+
+          mkdir -p ../out
+          # 공통적인 인자 패턴을 순차 시도 (성공 시 종료)
+          try() { echo "[try] $*"; ( "$@" ) && return 0 || return 1; }
+
+          if ! try python "$ENTRY" --data "$DATA_ARG" --out ../out ; then
+            if ! try python "$ENTRY" --data "$DATA_ARG" --output ../out ; then
+              if ! try python "$ENTRY" --input "$DATA_ARG" --out ../out ; then
+                if ! try python "$ENTRY" ; then
+                  echo "::error title=trend4u::엔트리 실행 실패. 인자 규약을 레포에 명시하거나 entry_hint/data_hint를 제공하세요."
+                  echo "[debug] Available files:" | tee -a ../logs/run_fail.txt
+                  (cd .. && find . -maxdepth 3 -type f) | tee -a ../logs/run_fail.txt
+                  exit 30
+                fi
+              fi
+            fi
           fi
 
-      - name: Collect artifacts
-        shell: bash
+      - name: Collect results & always keep logs
+        if: always()
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p out
-          # 흔한 산출물 위치 모으기(없으면 무시)
-          [ -d trend4u/out ]    && cp -r trend4u/out/* out/    2>/dev/null || true
-          [ -d trend4u/logs ]   && mkdir -p out/logs  && cp -r trend4u/logs/* out/logs/    2>/dev/null || true
-          [ -d trend4u/reports ]&& mkdir -p out/reports && cp -r trend4u/reports/* out/reports/ 2>/dev/null || true
-          find out -type f -maxdepth 3 -printf '%P\n' || true
+          # 실행 중 생성된 대표 결과 디렉토리들을 out/ 아래로 모음
+          for d in out reports results; do
+            if [[ -d "code/src/$d" ]]; then
+              rsync -a "code/src/$d/" "out/"
+            fi
+          done
+          # 서머리 생성
+          {
+            echo "# Run summary ($(date +'%Y-%m-%d %H:%M:%S %Z'))"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Python: ${{ inputs.python }}"
+            echo "- Entry: ${{ steps.find_entry.outputs.entry }}"
+          } > out/SUMMARY.md
+          cp -r logs out/_logs || true
+          echo "[info] Final out tree:"
+          (cd out && find . -maxdepth 3 -type f | sed 's#^\./##' || true)
 
-      - name: Upload results (pinned SHA, upload-artifact v4.6.2)
-        # v4는 같은 이름으로 여러 번 업로드 불가 → 이 스텝 단일 업로드 유지
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        # ref: v4.6.2
+      - name: Upload artifact (results)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: backtest-${{ github.run_number }}
+          name: backtest-results-${{ github.run_id }}
           path: |
             out/**
-          if-no-files-found: warn
-          retention-days: 14
+            code/src/out/**
+            code/src/reports/**
+            code/src/results/**
+          if-no-files-found: error
+          retention-days: 7
