@@ -1,177 +1,243 @@
+# .github/workflows/4t-backtest.yml
 name: 4u Backtest
 
 on:
   workflow_dispatch:
     inputs:
-      python_version:
-        description: Python version
+      code_zip:
+        description: '코드 ZIP 파일명 (루트, 기본: trend4u.zip 검색형)'
         required: false
-        default: "3.12"
-      code_glob:
-        description: '코드 zip 패턴 (루트/하위1단계 검색)'
+        default: ''
+      data_zip:
+        description: '데이터 ZIP 파일명 (루트, 기본: ETH*1min*2025*.zip 검색형)'
         required: false
-        default: "trend4u*.zip"
-      data_glob:
-        description: '데이터 zip 패턴 (루트/하위1단계 검색)'
+        default: ''
+      data_csv_glob:
+        description: 'CSV 글롭 (데이터zip 없을 때 루트/경로 검색용)'
         required: false
-        default: "ETH*1min*2025*.zip|ETHUSDT_1min_2020_2025.zip"
-      out_dir:
-        description: '출력 디렉터리'
-        required: false
-        default: "out"
-      extra_args:
-        description: '추가 인자 (옵션)'
-        required: false
-        default: ""
-
-permissions:
-  contents: read
-
-defaults:
-  run:
-    shell: bash
+        default: 'ETH*1min*2025*.csv'
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+
     env:
       TZ: Asia/Seoul
+      # 산출물/로그/작업폴더
+      OUT_DIR: _out
+      LOG_DIR: _logs
+      SRC_DIR: src
+      DATA_DIR: data
+
     steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+      # 1) 체크아웃 (풀 SHA 고정 필수)
+      - name: Checkout
+        uses: actions/checkout@PINNED_SHA_CHECKOUT
 
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      # 2) Python 세팅 (풀 SHA 고정 필수)
+      - name: Setup Python
+        uses: actions/setup-python@PINNED_SHA_SETUP_PY
         with:
-          python-version: ${{ inputs.python_version }}
-          cache: pip
+          python-version: '3.12'
 
-      - name: Backtest pipeline (unpack → hotfix → install → run)
-        id: run
+      # 3) 기본 폴더 준비 + 컨텍스트 로그
+      - name: Prepare folders & echo context
+        shell: bash
         run: |
-          set -euo pipefail
-
-          # 0) 폴더 보장 + 컨텍스트
-          mkdir -p logs src data "${{ inputs.out_dir }}"
+          set -Eeuo pipefail
+          mkdir -p "$OUT_DIR" "$LOG_DIR" "$SRC_DIR" "$DATA_DIR"
           {
-            echo "Repo : $GITHUB_REPOSITORY"
-            echo "SHA  : $GITHUB_SHA"
-            echo "TZ   : $TZ"
-          } | tee logs/context.txt
-          python -V | tee -a logs/versions.txt
+            echo "Repo: $GITHUB_REPOSITORY"
+            echo "SHA : $GITHUB_SHA"
+            echo "TZ  : $TZ"
+          } | tee "$LOG_DIR/context.txt"
+          python -V | tee "$LOG_DIR/versions.txt"
 
-          # 1) 코드 ZIP 탐색 (루트/하위1단계)
-          shopt -s nullglob nocaseglob
-          CODE_ZIPS=( $(find . -maxdepth 2 -type f -iname "${{ inputs.code_glob }}") )
-          if [ ${#CODE_ZIPS[@]} -eq 0 ]; then
-            echo "ERROR: trend4u*.zip 을 찾지 못했습니다. 루트에 파일이 있는지 확인하세요."
-            echo "::group::repo root listing"; ls -la; echo "::endgroup::"
-            exit 1
-          fi
-          CODE_ZIP="${CODE_ZIPS[0]}"
-          echo "CODE_ZIP=$CODE_ZIP" | tee -a logs/context.txt
-          unzip -q -o "$CODE_ZIP" -d src
+      # 4) 코드 ZIP 자동 탐색/해체 + 패키지 핫픽스
+      - name: Unpack code zip (trend4u*.zip) to src/
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
-          # 2) 패키지 레이아웃 보정 및 __init__.py 핫픽스
-          PKG_DIR=""
-          if [ -d "src/trend4u/trend4p" ]; then
-            PKG_DIR="src/trend4u/trend4p"
-          elif [ -d "src/trend4p" ]; then
-            mkdir -p src/trend4u
-            mv src/trend4p src/trend4u/
-            PKG_DIR="src/trend4u/trend4p"
+          # 4-1) 코드 ZIP 결정 (입력 > 루트 검색)
+          WANT="${{ github.event.inputs.code_zip }}"
+          if [[ -n "${WANT}" && -f "${WANT}" ]]; then
+            CODE_ZIP="${WANT}"
           else
-            PKG_DIR="$(find src -type d -path '*/trend4p' | head -n1 || true)"
+            CODE_ZIP="$(ls -1 . | grep -E '^trend4u.*\.zip$' | head -n1 || true)"
           fi
-          if [ -z "${PKG_DIR}" ]; then
-            echo "ERROR: trend4p 패키지를 src/ 하위에서 찾지 못했습니다."
-            find src -maxdepth 3 -type d -print | sed 's/^/  /'
+
+          if [[ -z "${CODE_ZIP:-}" ]]; then
+            echo "ERROR: trend4u*.zip not found at repo root."
+            echo "현재 파일 목록:"; ls -la .
             exit 1
           fi
-          echo "PKG_DIR=$PKG_DIR" | tee -a logs/context.txt
+          echo "Using code zip: ${CODE_ZIP}" | tee -a "$LOG_DIR/steps.txt"
 
-          INIT="$PKG_DIR/__init__.py"
-          if [ -f "$INIT" ]; then
-            # 과거 오류: '__init__.py' 첫 줄에 '. __all__ = [...]' 로 시작 → SyntaxError
-            sed -i 's/^[[:space:]]*\.__all__/__all__/g' "$INIT"
+          # 4-2) 해체
+          unzip -q "${CODE_ZIP}" -d _code_tmp
+
+          # 4-3) 트리 정규화: src/가 zip 내부에 없으면 맞춰 넣기
+          if [[ -d _code_tmp/src ]]; then
+            rsync -a _code_tmp/src/ "$SRC_DIR"/
+          elif [[ -d _code_tmp/trend4u ]]; then
+            mkdir -p "$SRC_DIR"
+            rsync -a _code_tmp/trend4u/ "$SRC_DIR"/trend4u/
+          else
+            # 최상단이 trend4u/도 아니면 전부 src/로 이식
+            rsync -a _code_tmp/ "$SRC_DIR"/
+          fi
+          rm -rf _code_tmp
+
+          # 4-4) 패키지 레이아웃 보정
+          # trend4u 패키지 보장
+          if [[ ! -f "$SRC_DIR/trend4u/__init__.py" ]]; then
+            mkdir -p "$SRC_DIR/trend4u"
+            printf "__all__ = []\n" > "$SRC_DIR/trend4u/__init__.py"
           fi
 
-          export PYTHONPATH="$PWD/src:$PYTHONPATH"
+          # trend4p 서브패키지 보장 + __init__ 문법 핫픽스
+          mkdir -p "$SRC_DIR/trend4u/trend4p"
+          if [[ -f "$SRC_DIR/trend4u/trend4p/__init__.py" ]]; then
+            # 흔한 오류: '.__all__ = ...' 같은 잘못된 문법
+            if grep -q "^\.\s*__all__" "$SRC_DIR/trend4u/trend4p/__init__.py"; then
+              sed -i 's/^\.\s*__all__/__all__/g' "$SRC_DIR/trend4u/trend4p/__init__.py"
+            fi
+          else
+            cat > "$SRC_DIR/trend4u/trend4p/__init__.py" <<'PY'
+__all__ = ['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']
+PY
+          fi
 
-          # 3) 데이터 ZIP 탐색 및 해제
-          #    data_glob은 '패턴A|패턴B' 형태 허용
-          IFS='|' read -r -a DGL <<< "${{ inputs.data_glob }}"
-          DATA_ZIP=""
-          for pat in "${DGL[@]}"; do
-            hits=( $(find . -maxdepth 2 -type f -iname "$pat") )
-            if [ ${#hits[@]} -gt 0 ]; then
-              DATA_ZIP="${hits[0]}"
-              break
+          # run_4u.py 위치 표준화 (없으면 런치 스텁 생성)
+          if [[ ! -f "$SRC_DIR/trend4u/run_4u.py" ]]; then
+            cat > "$SRC_DIR/trend4u/run_4u.py" <<'PY'
+import os
+import sys
+
+# PYTHONPATH에 src 가 들어오므로 trend4u 패키지로 접근 가능
+from trend4u.trend4p.execution_4u import backtest
+
+def main():
+    data_dir = os.environ.get("DATA_DIR", "data")
+    out_dir  = os.environ.get("OUT_DIR", "_out")
+    os.makedirs(out_dir, exist_ok=True)
+    # 백테스트 엔트리포인트 시그니처가 다르면 여기서 맞춰 매핑
+    backtest(data_dir=data_dir, out_dir=out_dir)
+
+if __name__ == "__main__":
+    main()
+PY
+          fi
+
+          echo "==== SRC tree ====" | tee -a "$LOG_DIR/steps.txt"
+          (cd "$SRC_DIR" && find . -maxdepth 3 -type f | sort) | tee -a "$LOG_DIR/steps.txt"
+
+      # 5) 데이터 ZIP/CSV 수급 및 해체
+      - name: Unpack data (ETHUSDT 1min) to data/
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WANT="${{ github.event.inputs.data_zip }}"
+          CSV_GLOB="${{ github.event.inputs.data_csv_glob }}"
+
+          # 우선 ZIP을 찾는다 (입력 > 루트 검색)
+          if [[ -n "${WANT}" && -f "${WANT}" ]]; then
+            DATA_ZIP="${WANT}"
+          else
+            DATA_ZIP="$(ls -1 . | grep -E '^ETH.*1min.*(2025|2020).*\.zip$' | head -n1 || true)"
+          fi
+
+          if [[ -n "${DATA_ZIP:-}" ]]; then
+            echo "Using data zip: ${DATA_ZIP}" | tee -a "$LOG_DIR/steps.txt"
+            unzip -q "${DATA_ZIP}" -d "$DATA_DIR"
+          else
+            echo "data zip not found, try CSV fallback: ${CSV_GLOB}" | tee -a "$LOG_DIR/steps.txt"
+            shopt -s nullglob
+            CSV=($CSV_GLOB)
+            if [[ ${#CSV[@]} -gt 0 ]]; then
+              mkdir -p "$DATA_DIR"
+              for f in "${CSV[@]}"; do cp "$f" "$DATA_DIR/"; done
+            else
+              echo "ERROR: 데이터 ZIP/CSV 모두 찾지 못함."
+              echo "루트 파일 목록:"; ls -la .
+              exit 1
+            fi
+          fi
+
+          echo "==== DATA tree ====" | tee -a "$LOG_DIR/steps.txt"
+          (cd "$DATA_DIR" && ls -la) | tee -a "$LOG_DIR/steps.txt"
+
+          # CSV 최소 유효성
+          CSV_FOUND=$(find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' | head -n1 || true)
+          if [[ -z "${CSV_FOUND:-}" ]]; then
+            echo "ERROR: data/ 내 CSV가 없습니다."
+            exit 1
+          fi
+          head -n 5 "$CSV_FOUND" | tee "$LOG_DIR/sample_data_head.txt"
+
+      # 6) 의존성 설치 (레포/zip 내부에 requirements 있으면 우선)
+      - name: Install Python deps
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "requirements.txt" ]]; then
+            pip install -r requirements.txt
+          elif [[ -f "$SRC_DIR/requirements.txt" ]]; then
+            pip install -r "$SRC_DIR/requirements.txt"
+          elif [[ -f "pyproject.toml" ]]; then
+            pip install .
+          else
+            pip install numpy pandas matplotlib ta scikit-learn python-dateutil pytz
+          fi
+
+      # 7) 백테스트 실행
+      - name: Run backtest
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+        run: |
+          set -Eeuo pipefail
+          echo "PYTHONPATH=$PYTHONPATH" | tee -a "$LOG_DIR/steps.txt"
+          python -m trend4u.run_4u 2>&1 | tee "$LOG_DIR/backtest_stdout.txt"
+
+          # 대표 산출물 수집 (이름이 다르면 여기서 추가로 복사)
+          mkdir -p "$OUT_DIR"
+          # 흔히 생성하는 파일들 탐색/복사
+          for f in \
+            train_test_summary.json \
+            backtest_summary.json \
+            metrics.json \
+            equity_curve*.csv \
+            trades*.csv \
+            report*.html \
+            fig_*.png ; do
+            if compgen -G "$f" > /dev/null; then
+              cp $f "$OUT_DIR"/ || true
             fi
           done
-          if [ -z "$DATA_ZIP" ]; then
-            echo "ERROR: 데이터 zip(예: ETHUSDT_1min_2020_2025.zip) 을 찾지 못했습니다."
-            exit 1
-          fi
-          echo "DATA_ZIP=$DATA_ZIP" | tee -a logs/context.txt
-          unzip -q -o "$DATA_ZIP" -d data
-          CSV="$(find data -type f -name '*.csv' | head -n1 || true)"
-          if [ -z "$CSV" ]; then
-            echo "ERROR: data/ 아래에 CSV가 없습니다. ZIP 내용을 확인하세요."
-            exit 1
-          fi
-          echo "CSV=$CSV" | tee -a logs/context.txt
 
-          # 4) 의존성 설치 (repo/ 또는 src/ 기준 파일 자동 감지, 없으면 최소셋)
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          elif [ -f "src/requirements.txt" ]; then
-            pip install -r src/requirements.txt
-          else
-            pip install numpy pandas matplotlib scikit-learn ta python-dateutil pytz
+          # 모듈 내부에서 만든 산출물도 스캔
+          find . -maxdepth 3 -type f -name 'train_test_summary.json' -o -name 'backtest_summary.json' -o -name 'equity_curve*.csv' -o -name 'trades*.csv' -o -name 'report*.html' -o -name 'fig_*.png' | while read -r p; do
+            cp "$p" "$OUT_DIR"/ || true
+          done
+
+          # 산출물 유효성
+          if [[ -z "$(ls -A "$OUT_DIR" 2>/dev/null)" ]]; then
+            echo "WARN: 산출물을 찾지 못했습니다. 코드 내부의 출력 경로(out_dir)를 확인하세요." | tee -a "$LOG_DIR/steps.txt"
           fi
 
-          # 5) 실행: 모듈 우선 → 스크립트 백업
-          set +e
-          echo "== Try: python -m trend4u.run_4u ==" | tee -a logs/run_4u.log
-          python -m trend4u.run_4u --data "$CSV" --out "${{ inputs.out_dir }}" ${{ inputs.extra_args }} 2>&1 | tee -a logs/run_4u.log
-          RC=${PIPESTATUS[0]}
-
-          if [ $RC -ne 0 ]; then
-            echo "모듈 실행 실패(rc=$RC). 엔트리 스크립트를 탐색합니다..." | tee -a logs/run_4u.log
-            RUNNER=$(find src -maxdepth 3 -type f \( -name 'run_4u.py' -o -name 'backtest*.py' -o -name 'main.py' \) | head -n1 || true)
-            if [ -n "$RUNNER" ]; then
-              echo "== Try: python ${RUNNER} ==" | tee -a logs/run_4u.log
-              python "$RUNNER" --data "$CSV" --out "${{ inputs.out_dir }}" ${{ inputs.extra_args }} 2>&1 | tee -a logs/run_4u.log
-              RC=${PIPESTATUS[0]}
-            fi
-          fi
-          set -e
-
-          echo "EXIT_CODE=$RC" | tee -a logs/context.txt
-          # out/ 생성만 하고 파일이 하나도 없어도 다음 단계에서 경고만 나오게 함
-          exit $RC
-
-      - name: Upload artifacts (pinned)
+      # 8) 아티팩트 업로드 (풀 SHA 고정 필수)
+      - name: Upload artifacts (results)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@PINNED_SHA_UPLOAD
         with:
-          name: backtest-${{ github.run_id }}
+          name: out
           path: |
-            ${{ inputs.out_dir }}/**
-            logs/**
+            _out/**
+            _logs/**
           if-no-files-found: warn
-
-      - name: Job summary
-        if: always()
-        run: |
-          echo "### 4u Backtest — Summary" >> $GITHUB_STEP_SUMMARY
-          if [ -f "${{ inputs.out_dir }}/train_test_summary.json" ]; then
-            echo "- Found: \`${{ inputs.out_dir }}/train_test_summary.json\`" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- No \`train_test_summary.json\` generated." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "#### Context" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          cat logs/context.txt >> $GITHUB_STEP_SUMMARY || true
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
