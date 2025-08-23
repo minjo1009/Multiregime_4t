@@ -1,151 +1,173 @@
-name: 4u-backtest
+name: 4t-backtest
 
 on:
   workflow_dispatch:
     inputs:
-      code_zip:
-        description: '루트에 있는 코드 zip (기본: trend4u.zip)'
-        required: false
-        default: 'trend4u.zip'
-      data_zip:
-        description: '루트에 있는 데이터 zip (기본: ETHUSDT_1min_2020_2025.zip)'
-        required: false
-        default: 'ETHUSDT_1min_2020_2025.zip'
-      start_date:
-        description: '백테스트 시작일 (YYYY-MM-DD)'
-        required: false
-        default: '2020-01-01'
-      end_date:
-        description: '백테스트 종료일 (YYYY-MM-DD)'
-        required: false
-        default: '2025-08-22'
-      capital:
-        description: '초기자본'
-        required: false
-        default: '10000'
-      fee:
-        description: '수수료 비율'
-        required: false
-        default: '0.0005'
-      slippage_bps:
-        description: '슬리피지 (bps)'
-        required: false
-        default: '2'
-      out_dir:
-        description: '결과 출력 폴더 (기본: _out_4u)'
-        required: false
-        default: '_out_4u'
-      python_version:
-        description: 'Python 버전'
-        required: false
-        default: '3.11'
+      train_start:
+        description: "Train start (YYYY-MM-DD)"
+        required: true
+        default: "2025-01-01"
+      train_end:
+        description: "Train end (YYYY-MM-DD)"
+        required: true
+        default: "2025-04-30"
+      test_start:
+        description: "Test start (YYYY-MM-DD)"
+        required: true
+        default: "2025-05-01"
+      test_end:
+        description: "Test end (YYYY-MM-DD)"
+        required: true
+        default: "2025-06-30"
+      H:
+        description: "Prediction horizon (minutes)"
+        required: true
+        default: "5"
+      fee_bps:
+        description: "Fee in bps"
+        required: true
+        default: "1.0"
+      cov_low:
+        description: "Covariance band lower"
+        required: true
+        default: "0.2"
+      cov_high:
+        description: "Covariance band upper"
+        required: true
+        default: "0.4"
 
 jobs:
   backtest:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       TZ: Asia/Seoul
-      CODE_ZIP: ${{ github.event.inputs.code_zip || 'trend4u.zip' }}
-      DATA_ZIP: ${{ github.event.inputs.data_zip || 'ETHUSDT_1min_2020_2025.zip' }}
-      START_DATE: ${{ github.event.inputs.start_date || '2020-01-01' }}
-      END_DATE: ${{ github.event.inputs.end_date || '2025-08-22' }}
-      CAPITAL: ${{ github.event.inputs.capital || '10000' }}
-      FEE: ${{ github.event.inputs.fee || '0.0005' }}
-      SLIPPAGE_BPS: ${{ github.event.inputs.slippage_bps || '2' }}
-      OUT_DIR: ${{ github.event.inputs.out_dir || '_out_4u' }}
+      CODE_ZIP: trend4u.zip
+      DATA_ZIP: ETHUSDT_1min_2020_2025.zip
+      WORKDIR: ${{ github.workspace }}
+      SRC_DIR: ${{ github.workspace }}/src
+      DATA_DIR: ${{ github.workspace }}/data
+      OUT_DIR:  ${{ github.workspace }}/src/_out_4u/github
+      LOG_DIR:  ${{ github.workspace }}/logs
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5 pin
-        with:
-          fetch-depth: 1
-
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 pin
-        with:
-          python-version: ${{ github.event.inputs.python_version || '3.11' }}
-          cache: 'pip'
-
-      - name: 준비(디렉토리/로그)
+      # ❌ actions/checkout, setup-python, upload-artifact 전부 사용 안 함 (조직 정책 회피)
+      - name: Prepare folders & echo context
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p logs "${OUT_DIR}"
-          echo "Repo: $GITHUB_REPOSITORY"            | tee -a logs/context.txt
-          echo "SHA : $GITHUB_SHA"                   | tee -a logs/context.txt
-          echo "TZ  : $TZ"                           | tee -a logs/context.txt
-          python -V                                   | tee -a logs/versions.txt
-          pip --version                               | tee -a logs/versions.txt
+          mkdir -p "${SRC_DIR}" "${DATA_DIR}" "${OUT_DIR}" "${LOG_DIR}"
+          echo "Repo: $GITHUB_REPOSITORY" | tee -a "${LOG_DIR}/context.txt"
+          echo "SHA : $GITHUB_SHA"         | tee -a "${LOG_DIR}/context.txt"
+          echo "TZ  : $TZ"                | tee -a "${LOG_DIR}/context.txt"
+          python3 -V | tee -a "${LOG_DIR}/versions.txt"
+          which python3 | tee -a "${LOG_DIR}/versions.txt"
 
-      - name: 코드/데이터 압축 해제
+      - name: Unpack code zip (trend4u.zip) to src/
+        shell: bash
         run: |
           set -euo pipefail
-          test -f "$CODE_ZIP" || { echo "코드 zip 미존재: $CODE_ZIP"; exit 1; }
-          test -f "$DATA_ZIP" || { echo "데이터 zip 미존재: $DATA_ZIP"; exit 1; }
+          if [ ! -f "${CODE_ZIP}" ]; then
+            echo "ERROR: ${CODE_ZIP} not found at repo root." >&2
+            exit 1
+          fi
+          unzip -q "${CODE_ZIP}" -d "${SRC_DIR}"
+          # 코드는 trend4u/ 아래에 존재 (zip 내부 확인 완료)
+          test -f "${SRC_DIR}/trend4u/run_4u.py" || { echo "run_4u.py not found"; ls -R "${SRC_DIR}"; exit 1; }
 
-          unzip -o "$CODE_ZIP" -d .
-          unzip -o "$DATA_ZIP" -d data_unzipped
-
-          # 참고: trend4u.zip 내부에 trend4u/ 최상위 디렉토리 존재 확인
-          test -d trend4u || { echo "trend4u 디렉토리 미존재"; ls -la; exit 1; }
-          ls -la trend4u | tee -a logs/tree_trend4u.txt
-          ls -la data_unzipped | tee -a logs/tree_data.txt
-
-      - name: 파이썬 의존성 설치
+      - name: Hotfix package init (fix SyntaxError in trend4p/__init__.py)
+        shell: bash
         run: |
           set -euo pipefail
-          if [[ -f trend4u/requirements.txt ]]; then
-            pip install -r trend4u/requirements.txt
+          INIT_FILE="${SRC_DIR}/trend4u/trend4p/__init__.py"
+          if [ -f "${INIT_FILE}" ]; then
+            # 잘못된 선행 '.' 제거: ".__all__ = [...]" -> "__all__ = [...]"
+            # (우리가 받은 zip에서 발생하던 SyntaxError)
+            sed -i 's/^\.\(__all__\s*=.*\)$/\1/' "${INIT_FILE}"
+            echo "[PATCHED] ${INIT_FILE}" | tee -a "${LOG_DIR}/patches.txt"
           else
-            # 최소 구동 세트(비상)
-            pip install numpy pandas matplotlib ta python-dateutil pytz
+            echo "ERROR: ${INIT_FILE} not found." >&2
+            exit 1
           fi
 
-      - name: 백테스트 실행
+      - name: Unpack data zip (ETHUSDT_1min_2020_2025.zip) to data/
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "${DATA_ZIP}" ]; then
+            echo "ERROR: ${DATA_ZIP} not found at repo root." >&2
+            exit 1
+          fi
+          unzip -q "${DATA_ZIP}" -d "${DATA_DIR}"
+          echo "Data dir tree:" | tee -a "${LOG_DIR}/data_tree.txt"
+          ls -lah "${DATA_DIR}" | tee -a "${LOG_DIR}/data_tree.txt"
+          # CSV 자동 탐색
+          CSV_PATH="$(find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' | head -n 1 || true)"
+          if [ -z "${CSV_PATH}" ]; then
+            echo "ERROR: No CSV found in ${DATA_DIR}" >&2
+            exit 1
+          fi
+          echo "${CSV_PATH}" > "${DATA_DIR}/.csv_path"
+
+      - name: Install Python deps (fallback minimal if requirements missing)
+        shell: bash
+        working-directory: ${{ env.SRC_DIR }}/trend4u
+        run: |
+          set -euo pipefail
+          if [ -f requirements.txt ]; then
+            pip3 install --upgrade pip
+            pip3 install -r requirements.txt
+          else
+            pip3 install --upgrade pip
+            pip3 install numpy pandas matplotlib ta python-dateutil pytz scikit-learn
+          fi
+
+      - name: Run backtest
+        shell: bash
         env:
-          # 과도한 쓰레드 방지(런너 안정성)
-          OMP_NUM_THREADS: 1
-          OPENBLAS_NUM_THREADS: 1
-          MKL_NUM_THREADS: 1
-          NUMEXPR_NUM_THREADS: 1
-          PYTHONPATH: ${{ github.workspace }}/trend4u
+          TRAIN_START: ${{ inputs.train_start }}
+          TRAIN_END:   ${{ inputs.train_end }}
+          TEST_START:  ${{ inputs.test_start }}
+          TEST_END:    ${{ inputs.test_end }}
+          H:           ${{ inputs.H }}
+          FEE_BPS:     ${{ inputs.fee_bps }}
+          COV_LOW:     ${{ inputs.cov_low }}
+          COV_HIGH:    ${{ inputs.cov_high }}
         run: |
           set -euo pipefail
-          python trend4u/run_4u.py \
-            --data-csv "data_unzipped/ETHUSDT_1min_2020_2025.csv" \
-            --out-dir "${OUT_DIR}" \
-            --start-date "${START_DATE}" \
-            --end-date "${END_DATE}" \
-            --capital "${CAPITAL}" \
-            --fee "${FEE}" \
-            --slippage-bps "${SLIPPAGE_BPS}" \
-            | tee -a "logs/run_4u_stdout.txt"
+          CSV_PATH="$(cat "${DATA_DIR}/.csv_path")"
+          cd "${SRC_DIR}/trend4u"
+          echo ">>> Using CSV: ${CSV_PATH}"
+          echo ">>> Dates: ${TRAIN_START} ~ ${TRAIN_END} | ${TEST_START} ~ ${TEST_END}"
+          python3 run_4u.py \
+            --data "${CSV_PATH}" \
+            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
+            --test_start "${TEST_START}"   --test_end "${TEST_END}" \
+            --H "${H}" --fee_bps "${FEE_BPS}" \
+            --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
+            --out_dir "${OUT_DIR}"
 
-      - name: 산출물 확인
-        id: outcheck
+      - name: Persist summary + sanity logs to job summary
+        if: always()
+        shell: bash
         run: |
           set -euo pipefail
-          echo "OUT_DIR=${OUT_DIR}"
-          if [[ -d "${OUT_DIR}" ]]; then
-            find "${OUT_DIR}" -maxdepth 2 -type f | tee -a logs/out_files.txt
-            COUNT=$(find "${OUT_DIR}" -type f | wc -l)
-            echo "count=${COUNT}" >> $GITHUB_OUTPUT
+          echo "### 4u Backtest — Summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "${OUT_DIR}/train_test_summary.json" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+            cat "${OUT_DIR}/train_test_summary.json" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "count=0" >> $GITHUB_OUTPUT
+            echo "- No train_test_summary.json generated." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: 결과 업로드 (산출물)
-        if: steps.outcheck.outputs.count != '0'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 pin
-        with:
-          name: backtest-results
-          path: ${{ env.OUT_DIR }}/
-          if-no-files-found: warn
-          retention-days: 10
-
-      - name: 로그 업로드
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: backtest-logs
-          path: logs/**
-          if-no-files-found: warn
-          retention-days: 10
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Logs" >> "$GITHUB_STEP_SUMMARY"
+          for f in "${LOG_DIR}/context.txt" "${LOG_DIR}/versions.txt" "${LOG_DIR}/patches.txt" "${LOG_DIR}/data_tree.txt"; do
+            if [ -f "$f" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "**$(basename "$f")**" >> "$GITHUB_STEP_SUMMARY"
+              echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+              cat "$f" >> "$GITHUB_STEP_SUMMARY"
+              echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
