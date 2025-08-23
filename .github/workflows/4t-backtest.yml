@@ -1,14 +1,31 @@
-name: 4t-backtest
+name: 4u-backtest
 
 on:
   workflow_dispatch:
     inputs:
-      start_date:
-        description: '백테스트 시작일 (예: 2022-01-01)'
-        required: false
-      end_date:
-        description: '백테스트 종료일 (예: 2025-08-23)'
-        required: false
+      train_start:
+        description: 'Train start (YYYY-MM-DD)'
+        default: '2020-01-01'
+        required: true
+      train_end:
+        description: 'Train end (YYYY-MM-DD)'
+        default: '2024-12-31'
+        required: true
+      test_start:
+        description: 'Test start (YYYY-MM-DD)'
+        default: '2025-01-01'
+        required: true
+      test_end:
+        description: 'Test end (YYYY-MM-DD)'
+        default: '2025-06-30'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   backtest:
@@ -17,141 +34,171 @@ jobs:
       TZ: Asia/Seoul
       CODE_ZIP: trend4u.zip
       DATA_ZIP: ETHUSDT_1min_2020_2025.zip
-      CODE_DIR: code
-      DATA_DIR: data
+      LOG_DIR: ${{ github.workspace }}/_logs
+      OUT_DIR: ${{ github.workspace }}/_out
+      WORK_DIR: ${{ github.workspace }}/_work
+
     steps:
       - name: Checkout
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        # actions/checkout@v5 pinned (v5.0.0)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
         with:
           fetch-depth: 1
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - name: Setup Python
+        # actions/setup-python@v5 pinned (v5.6.0)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Prepare workspace (dirs, logs)
+      - name: Prepare folders (+ list root)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ./logs ./out
-          echo "Repo: $GITHUB_REPOSITORY"         | tee -a ./logs/meta.txt
-          echo "SHA : $GITHUB_SHA"                | tee -a ./logs/meta.txt
-          echo "TZ  : $TZ"                        | tee -a ./logs/meta.txt
-          pwd                                     | tee ./logs/pwd.txt
-          ls -al                                  | tee ./logs/ls_root.txt
+          mkdir -p "$LOG_DIR" "$OUT_DIR" "$WORK_DIR"
+          echo "Repo: $GITHUB_REPOSITORY" | tee -a "$LOG_DIR/meta.txt"
+          echo "SHA : $GITHUB_SHA"       | tee -a "$LOG_DIR/meta.txt"
+          echo "TZ  : $TZ"               | tee -a "$LOG_DIR/meta.txt"
+          ls -al . | tee -a "$LOG_DIR/root_ls.txt"
 
-      - name: Validate required files (zips at repo root)
+      - name: Unzip code & data
         shell: bash
         run: |
           set -euo pipefail
-          [[ -f "$CODE_ZIP" ]] || { echo "코드 zip($CODE_ZIP)이 루트에 없습니다"; exit 1; }
-          [[ -f "$DATA_ZIP" ]] || { echo "데이터 zip($DATA_ZIP)이 루트에 없습니다"; exit 1; }
+          # 코드/데이터 압축 해제 (조용히, 덮어쓰기)
+          if [[ -f "$CODE_ZIP" ]]; then
+            unzip -o -q "$CODE_ZIP" -d "$WORK_DIR/code"
+          else
+            echo "코드 ZIP($CODE_ZIP) 없음" | tee -a "$LOG_DIR/errors.txt"
+          fi
+          if [[ -f "$DATA_ZIP" ]]; then
+            unzip -o -q "$DATA_ZIP" -d "$WORK_DIR/data"
+          else
+            echo "데이터 ZIP($DATA_ZIP) 없음" | tee -a "$LOG_DIR/errors.txt"
+          fi
+          # 디렉터리 트리 기록
+          (echo '== CODE TREE =='; find "$WORK_DIR/code" -maxdepth 3 -type f 2>/dev/null || true;
+           echo '== DATA TREE =='; find "$WORK_DIR/data" -maxdepth 2 -type f 2>/dev/null || true) \
+           | tee -a "$LOG_DIR/tree.txt"
 
-      - name: Unzip code and data
+      - name: Resolve runner path & requirements
+        id: paths
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$CODE_DIR" "$DATA_DIR"
-          mkdir -p "$CODE_DIR" "$DATA_DIR"
-          unzip -q "$CODE_ZIP" -d "$CODE_DIR"
-          unzip -q "$DATA_ZIP" -d "$DATA_DIR" || true
-          echo "== CODE TREE =="  | tee -a ./logs/tree.txt
-          (cd "$CODE_DIR" && find . -maxdepth 4 -type f | sort) | tee -a ./logs/tree.txt
-          echo "== DATA HEAD =="  | tee -a ./logs/tree.txt
-          (cd "$DATA_DIR" && find . -maxdepth 2 -type f | head -n 50) | tee -a ./logs/tree.txt
+          # run_4u.py 탐색
+          RUNNER_SCRIPT="$(find "$WORK_DIR/code" -type f -name run_4u.py -print -quit || true)"
+          if [[ -z "${RUNNER_SCRIPT}" ]]; then
+            echo "run_4u.py를 찾지 못했습니다." | tee -a "$LOG_DIR/errors.txt"
+          fi
+          echo "runner=${RUNNER_SCRIPT}" >> "$GITHUB_OUTPUT"
+
+          # 데이터 CSV 추정 (ETHUSDT_1min_2020_2025.csv)
+          DATA_CSV="$(find "$WORK_DIR/data" -maxdepth 2 -type f -name 'ETHUSDT_1min_2020_2025.csv' -print -quit || true)"
+          if [[ -z "${DATA_CSV}" ]]; then
+            # fallback: 압축 안에 다른 이름이면 가장 큰 csv 사용
+            DATA_CSV="$(find "$WORK_DIR/data" -type f -name '*.csv' -printf '%s %p\n' 2>/dev/null | sort -nr | head -1 | awk '{print $2}')"
+          fi
+          echo "data_csv=${DATA_CSV}" >> "$GITHUB_OUTPUT"
+
+          # requirements.txt 경로 후보
+          REQ_FILE="$(find "$WORK_DIR/code" -maxdepth 3 -type f -name requirements.txt -print -quit || true)"
+          echo "req=${REQ_FILE}" >> "$GITHUB_OUTPUT"
+
+          # 편의를 위해 PYTHONPATH 추가 (trend4u 패키지 임포트 대비)
+          echo "PYTHONPATH=$WORK_DIR/code:$WORK_DIR/code/trend4u" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         shell: bash
-        working-directory: ${{ env.CODE_DIR }}
         run: |
           set -euo pipefail
-          python -V | tee -a ../logs/versions.txt
-          if [[ -f requirements.txt ]]; then
-            pip install -r requirements.txt
-          elif [[ -f pyproject.toml ]]; then
-            pip install .
+          python -V | tee -a "$LOG_DIR/versions.txt"
+          pip -V    | tee -a "$LOG_DIR/versions.txt"
+          if [[ -n "${{ steps.paths.outputs.req }}" && -f "${{ steps.paths.outputs.req }}" ]]; then
+            pip install -r "${{ steps.paths.outputs.req }}"
           else
-            pip install numpy pandas matplotlib ta python-dateutil pytz
+            # 최소 구동 세트 (scikit-learn은 MCC 계산용)
+            pip install numpy pandas matplotlib scikit-learn ta python-dateutil pytz
           fi
+          pip list | tee -a "$LOG_DIR/pip_list.txt"
 
-      - name: Run backtest (auto-discovery)
+      - name: Run backtest
+        id: runbt
         shell: bash
-        working-directory: ${{ env.CODE_DIR }}
-        env:
-          START_DATE: ${{ github.event.inputs.start_date }}
-          END_DATE:   ${{ github.event.inputs.end_date }}
-          DATA_DIR:   ${{ github.workspace }}/${{ env.DATA_DIR }}
-          OUT_DIR:    ${{ github.workspace }}/out
-          LOG_DIR:    ${{ github.workspace }}/logs
         run: |
           set -euo pipefail
-          mkdir -p "$OUT_DIR" "$LOG_DIR"
+          RUNNER="${{ steps.paths.outputs.runner }}"
+          DATA_CSV="${{ steps.paths.outputs.data_csv }}"
 
-          try_run() {
-            echo "[TRY] $*" | tee -a "$LOG_DIR/runner.txt"
-            set +e
-            bash -lc "$@" 2>&1 | tee -a "$LOG_DIR/backtest.out"
-            local rc=${PIPESTATUS[0]}
-            set -e
-            return $rc
-          }
-
-          # 1) backtest.sh at repo root
-          if [[ -f backtest.sh ]]; then
-            chmod +x backtest.sh
-            try_run "./backtest.sh" && exit 0
+          if [[ -z "$RUNNER" || ! -f "$RUNNER" ]]; then
+            echo "백테스트 스크립트를 찾지 못했습니다. 파일 구조를 확인하세요." | tee -a "$LOG_DIR/errors.txt"
+            # 파일 구조 힌트 제공
+            find "$WORK_DIR/code" -maxdepth 3 -type f | tee -a "$LOG_DIR/code_files.txt"
+            exit 2
+          fi
+          if [[ -z "$DATA_CSV" || ! -f "$DATA_CSV" ]]; then
+            echo "데이터 CSV를 찾지 못했습니다." | tee -a "$LOG_DIR/errors.txt"
+            find "$WORK_DIR/data" -maxdepth 2 -type f | tee -a "$LOG_DIR/data_files.txt"
+            exit 3
           fi
 
-          # 2) scripts/backtest.sh
-          if [[ -f scripts/backtest.sh ]]; then
-            chmod +x scripts/backtest.sh
-            try_run "scripts/backtest.sh" && exit 0
+          # 스크립트가 어떤 인자를 지원하는지 점검
+          set +e
+          HELP_OUT="$(python "$RUNNER" --help 2>&1)"
+          HELP_RC=$?
+          set -e
+          echo "$HELP_OUT" | tee -a "$LOG_DIR/help.txt"
+
+          ARGS=()
+          if echo "$HELP_OUT" | grep -q -- '--train-start'; then
+            ARGS+=( --train-start "${{ inputs.train_start }}" )
+          fi
+          if echo "$HELP_OUT" | grep -q -- '--train-end'; then
+            ARGS+=( --train-end   "${{ inputs.train_end }}" )
+          fi
+          if echo "$HELP_OUT" | grep -q -- '--test-start'; then
+            ARGS+=( --test-start  "${{ inputs.test_start }}" )
+          fi
+          if echo "$HELP_OUT" | grep -q -- '--test-end'; then
+            ARGS+=( --test-end    "${{ inputs.test_end }}" )
+          fi
+          if echo "$HELP_OUT" | grep -q -- '--data'; then
+            ARGS+=( --data "$DATA_CSV" )
+          fi
+          if echo "$HELP_OUT" | grep -q -- '--out'; then
+            ARGS+=( --out "$OUT_DIR" )
           fi
 
-          # 3) run_backtest.py
-          if [[ -f run_backtest.py ]]; then
-            try_run "python run_backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
-            try_run "python run_backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
-            try_run "python run_backtest.py" && exit 0
-          fi
+          echo "RUNNER: $RUNNER" | tee -a "$LOG_DIR/run_args.txt"
+          echo "DATA  : $DATA_CSV" | tee -a "$LOG_DIR/run_args.txt"
+          echo "OUT   : $OUT_DIR"  | tee -a "$LOG_DIR/run_args.txt"
+          echo "ARGS  : ${ARGS[*]:-<none>}" | tee -a "$LOG_DIR/run_args.txt"
 
-          # 4) backtest.py
-          if [[ -f backtest.py ]]; then
-            try_run "python backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
-            try_run "python backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
-            try_run "python backtest.py" && exit 0
-          fi
+          # 실행 (stdout/err 캡처)
+          set +e
+          python "$RUNNER" "${ARGS[@]}" 2>&1 | tee -a "$LOG_DIR/backtest.log"
+          BT_RC=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$BT_RC" >> "$GITHUB_OUTPUT"
+          # 일부 코드가 out 디렉터리를 내부적으로 만들지 않는 경우 대비
+          mkdir -p "$OUT_DIR"
 
-          # 5) main.py (contains 'backtest' keyword)
-          if [[ -f main.py ]]; then
-            if grep -i -q "backtest" main.py; then
-              try_run "python main.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
-              try_run "python main.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
-              try_run "python main.py" && exit 0
-            fi
-          fi
-
-          echo "백테스트 실행 스크립트를 찾지 못했습니다."
-          echo "아래 파일 목록을 확인하세요:" | tee -a "$LOG_DIR/runner.txt"
-          find . -maxdepth 3 -type f | sort | tee -a "$LOG_DIR/runner.txt"
-          exit 2
-
-      - name: Upload logs
+      - name: Upload OUT artifact
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        # actions/upload-artifact@v4 pinned (v4.6.2)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: backtest-logs
-          path: |
-            logs/**
-            code/logs/**
+          name: out-${{ github.run_number }}
+          path: ${{ env.OUT_DIR }}/
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Upload results (out/**)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload LOGS artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest-results
-          path: out/**
-          if-no-files-found: error
-          retention-days: 7
+          name: logs-${{ github.run_number }}
+          path: ${{ env.LOG_DIR }}/
+          if-no-files-found: warn
+          retention-days: 14
