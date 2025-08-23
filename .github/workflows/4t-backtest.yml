@@ -1,244 +1,151 @@
-name: 4T Backtest (self-contained, no marketplace actions)
+name: ETH-1m Backtest (no checkout action)
 
 on:
   workflow_dispatch:
-    inputs:
-      python:
-        description: "Python version (러너 기본 python3 사용: 무시 가능)"
-        required: false
-        default: "system"
-      code_zip:
-        description: "코드 zip 파일명(레포 루트)"
-        required: false
-        default: "trend4u.zip"
-      data_zip:
-        description: "데이터 zip 파일명(레포 루트, 없으면 건너뜀)"
-        required: false
-        default: "ETH_1min.zip"
+  push:
+    paths:
+      - 'trend4u.zip'
+      - 'ETHUSDT_1min_2020_2025.zip'
+      - '.github/workflows/backtest.yml'
 
 permissions:
   contents: read
 
 env:
   TZ: Asia/Seoul
-  CODE_ZIP: ${{ github.event.inputs.code_zip || 'trend4u.zip' }}
-  DATA_ZIP: ${{ github.event.inputs.data_zip || 'ETH_1min.zip' }}
+  CODE_ZIP: trend4u.zip
+  DATA_ZIP: ETHUSDT_1min_2020_2025.zip
   OUT_DIR: out
   LOG_DIR: logs
+  MPLBACKEND: Agg
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    steps:
-      - name: Print base env
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Repo      : $GITHUB_REPOSITORY"
-          echo "Commit    : $GITHUB_SHA"
-          echo "Workspace : $GITHUB_WORKSPACE"
-          echo "TZ        : $TZ"
+    timeout-minutes: 90
 
-      - name: Prepare workspace (no checkout)
+    steps:
+      - name: Prepare workspace (no marketplace actions)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/${{ env.LOG_DIR }}" "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}"
-          echo "Logs at:    $GITHUB_WORKSPACE/${{ env.LOG_DIR }}"
-          echo "Outputs at: $GITHUB_WORKSPACE/${{ env.OUT_DIR }}"
-          # 현재 커밋의 소스 zipball 다운로드 (checkout 액션 대체)
-          API_ZIP="https://api.github.com/repos/${GITHUB_REPOSITORY}/zipball/${GITHUB_SHA}"
-          echo "Downloading source zipball for current SHA..."
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "X-GitHub-Api-Version: 2022-11-28" "$API_ZIP" -o source.zip
+          mkdir -p "$LOG_DIR" "$OUT_DIR"
+          echo "Repo: $GITHUB_REPOSITORY"    | tee -a "$LOG_DIR/versions.txt"
+          echo "SHA : $GITHUB_SHA"           | tee -a "$LOG_DIR/versions.txt"
+          echo "TZ  : $TZ"                   | tee -a "$LOG_DIR/versions.txt"
+          # 현재 커밋 zipball 직접 다운로드(체크아웃 액션 불필요)
+          curl -sSL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/zipball/${GITHUB_SHA}" -o source.zip
           unzip -q source.zip
-          ROOT_DIR="$(ls -d ${GITHUB_REPOSITORY#*/}-*/ || true)"
+          ROOT_DIR="$(ls -td -- */ 2>/dev/null | head -n1 || true)"
           if [[ -z "${ROOT_DIR:-}" ]]; then
-            echo "❌ Failed to expand repo archive directory name."
+            echo "::error::failed to locate top-level dir after unzip"
+            find . -maxdepth 2 -type d -print
             exit 1
           fi
-          echo "Expanded root: $ROOT_DIR"
-          # 작업 디렉토리로 이동
+          ROOT_DIR="${ROOT_DIR%/}"
           mv "$ROOT_DIR" repo
           cd repo
-          echo "$(pwd)" > ../${{ env.LOG_DIR }}/pwd.txt
-          echo "Repo tree (top-level):" | tee ../${{ env.LOG_DIR }}/tree_top.txt
-          ls -la | tee -a ../${{ env.LOG_DIR }}/tree_top.txt
-
-          # 루트에 존재해야 하는 코드/데이터 zip 복사(있는 경우)
-          for Z in "${CODE_ZIP}" "${DATA_ZIP}"; do
-            if [[ -f "../$Z" ]]; then
-              cp "../$Z" "./$Z"
-            fi
-          done
+          echo "PWD=$(pwd)" > "../$LOG_DIR/pwd.txt"
 
       - name: Python venv & deps
         shell: bash
         working-directory: repo
         run: |
           set -euo pipefail
-          python3 --version | tee -a ../${{ env.LOG_DIR }}/versions.txt
+          python3 --version | tee -a "../$LOG_DIR/versions.txt"
           python3 -m venv .venv
           source .venv/bin/activate
           python -m pip install --upgrade pip wheel >/dev/null
-          if [[ -f requirements.txt ]]; then
-            pip install -r requirements.txt
-          elif [[ -f pyproject.toml ]]; then
-            pip install .
-          else
-            pip install numpy pandas matplotlib ta python-dateutil pytz
-          fi
-          python -V | tee -a ../${{ env.LOG_DIR }}/versions.txt
-          pip list | tee ../${{ env.LOG_DIR }}/pip_list.txt
+          # 기본 셋(레포에 별도 관리 없으면 이걸로 충분)
+          pip install numpy pandas matplotlib scikit-learn ta python-dateutil pytz >/dev/null
+          python -V | tee -a "../$LOG_DIR/versions.txt"
+          pip list | tee "../$LOG_DIR/pip_list.txt"
 
       - name: Unzip code & data
         shell: bash
         working-directory: repo
         run: |
           set -euo pipefail
-          source .venv/bin/activate
-          shopt -s nullglob
-          # 코드 zip
-          if [[ -f "${CODE_ZIP}" ]]; then
-            echo "Unzipping code: ${CODE_ZIP}"
-            mkdir -p code
-            unzip -q "${CODE_ZIP}" -d code
-          else
-            echo "⚠️ code zip not found at repo root: ${CODE_ZIP}"
+          # 코드/데이터 zip은 레포 루트에 있어야 함
+          test -f "$CODE_ZIP" || { echo "::error::missing $CODE_ZIP at repo root"; exit 2; }
+          unzip -oq "$CODE_ZIP" -d code
+          if [ -f "$DATA_ZIP" ]; then
+            unzip -oq "$DATA_ZIP" -d data
           fi
-          # 데이터 zip
-          if [[ -f "${DATA_ZIP}" ]]; then
-            echo "Unzipping data: ${DATA_ZIP}"
-            mkdir -p data
-            unzip -q "${DATA_ZIP}" -d data
-          else
-            echo "ℹ️ data zip not found: ${DATA_ZIP} (skip)"
+          # 데이터 CSV 탐색(정확 파일명 우선, 없으면 첫 CSV)
+          CSV="data/ETHUSDT_1min_2020_2025.csv"
+          if [ ! -f "$CSV" ]; then
+            CSV="$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)"
           fi
-          echo "Tree snapshot:" | tee ../${{ env.LOG_DIR }}/tree_after_unzip.txt
-          find . -maxdepth 2 -type d -print | sort | tee -a ../${{ env.LOG_DIR }}/tree_after_unzip.txt
-          find . -maxdepth 2 -type f -name "*.py" | sort | tee ../${{ env.LOG_DIR }}/py_files.txt || true
+          if [ -z "${CSV:-}" ]; then
+            echo "::error::no CSV found in data/. put ETHUSDT_1min_2020_2025.zip at repo root"
+            exit 3
+          fi
+          echo "CSV=$CSV" | tee -a "../$LOG_DIR/tree_data.txt"
+          echo "[code tree]"  | tee "../$LOG_DIR/tree_code.txt"
+          find code -maxdepth 3 -type f | sed 's#^# - #' | tee -a "../$LOG_DIR/tree_code.txt"
 
-      - name: Auto-detect backtest entry & run
+      - name: Run backtest (forced, multi-try)
         shell: bash
         working-directory: repo
-        env:
-          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
           source .venv/bin/activate
-
-          # 공통 환경변수: 코드/데이터 루트 추정
-          CODE_ROOT="."
-          DATA_ROOT="."
-          if [[ -d "code" ]]; then CODE_ROOT="code"; fi
-          if [[ -d "data" ]]; then DATA_ROOT="data"; fi
-          echo "CODE_ROOT=$CODE_ROOT" | tee ../${{ env.LOG_DIR }}/env_guess.txt
-          echo "DATA_ROOT=$DATA_ROOT" | tee -a ../${{ env.LOG_DIR }}/env_guess.txt
-
-          # 우선순위 엔트리 후보
-          declare -a CANDIDATES=(
-            "backtest.py"
-            "run_backtest.py"
-            "scripts/backtest.py"
-            "src/backtest.py"
+          mkdir -p "../$OUT_DIR"
+          # 엔트리 후보(우선순위): run_4u.py > run_4t.py > trend4u/backtest.py > backtest.py > run_backtest.py
+          mapfile -t CANDS < <(
+            { find code -type f -name 'run_4u.py' ;
+              find code -type f -name 'run_4t.py' ;
+              find code -type f -path '*/trend4u/backtest.py' ;
+              find code -type f -name 'backtest.py' ;
+              find code -type f -name 'run_backtest.py' ; } 2>/dev/null | awk '!seen[$0]++'
           )
-
-          SELECTED=""
-          for f in "${CANDIDATES[@]}"; do
-            if [[ -f "$f" ]]; then SELECTED="$f"; break; fi
-            if [[ -f "$CODE_ROOT/$f" ]]; then SELECTED="$CODE_ROOT/$f"; break; fi
-          done
-
-          if [[ -z "${SELECTED}" ]]; then
-            # 마지막 안전장치: __main__ 있는 *.py 자동 탐색
-            SELECTED="$(grep -RIl --include="*.py" '__main__' "$CODE_ROOT" . 2>/dev/null | head -n 1 || true)"
+          if [ "${#CANDS[@]}" -eq 0 ]; then
+            echo "::error::no entry script found in code/ (expected run_4u.py or backtest.py variants)"
+            find code -maxdepth 3 -type f -name '*.py' | sed 's#^# - #'
+            exit 4
           fi
+          ENTRY="${CANDS[0]}"
+          echo "ENTRY=$ENTRY" | tee -a "../$LOG_DIR/run_cmd.txt"
 
-          if [[ -z "${SELECTED}" ]]; then
-            echo "❌ 백테스트 실행 스크립트를 찾지 못했습니다."
-            echo "다음 중 하나 이름으로 루트 또는 code/ 에 파일을 두세요:"
-            printf ' - backtest.py\n - run_backtest.py\n - scripts/backtest.py\n - src/backtest.py\n'
-            echo "레포 루트 2단계 트리:"
-            find . -maxdepth 2 -print
-            # 도움 로그 남기고 실패
-            echo "NO_ENTRY=1" > ../${{ env.OUT_DIR }}/summary.txt
-            exit 2
-          fi
-
-          echo "▶ 실행 엔트리: $SELECTED"
-          # 가벼운 러너: 공통 인자 표준화
-          RUN_CMD=( python "$SELECTED" )
-          # 관례 인자 지원: --data-dir / --code-dir / --out-dir 중 존재하면 전달
-          HELP_TXT="$(python "$SELECTED" --help 2>&1 || true)"
-          [[ "$HELP_TXT" == *"--data-dir"* ]] && RUN_CMD+=( --data-dir "$DATA_ROOT" )
-          [[ "$HELP_TXT" == *"--code-dir"* ]] && RUN_CMD+=( --code-dir "$CODE_ROOT" )
-          [[ "$HELP_TXT" == *"--out-dir"*  ]] && RUN_CMD+=( --out-dir "../${{ env.OUT_DIR }}" )
-
-          echo "RUN_CMD: ${RUN_CMD[*]}" | tee ../${{ env.LOG_DIR }}/run_cmd.txt
-
+          # 다중 인자 패턴 시도
+          try() { echo "[TRY] $*" | tee -a "../$LOG_DIR/run_cmd.txt"; "$@"; }
           set +e
-          "${RUN_CMD[@]}" 2>&1 | tee ../${{ env.LOG_DIR }}/backtest_run.log
-          RET=${PIPESTATUS[0]}
+          try python "$ENTRY" --data "$CSV" --out "../$OUT_DIR"
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            try python "$ENTRY" --data "$CSV" --output "../$OUT_DIR"
+            RC=$?
+          fi
+          if [ $RC -ne 0 ]; then
+            try python "$ENTRY" --input "$CSV" --out "../$OUT_DIR"
+            RC=$?
+          fi
+          if [ $RC -ne 0 ]; then
+            try python "$ENTRY"
+            RC=$?
+          fi
           set -e
-          echo "Exit code: $RET" | tee -a ../${{ env.LOG_DIR }}/backtest_run.log
 
-          # out 디렉토리 보장 + 기본 요약 생성
-          mkdir -p ../${{ env.OUT_DIR }}
-          if [[ ! -s ../${{ env.OUT_DIR }}/summary.txt ]]; then
-            echo "ENTRY=$SELECTED" > ../${{ env.OUT_DIR }}/summary.txt
-            echo "EXIT_CODE=$RET" >> ../${{ env.OUT_DIR }}/summary.txt
-            # 결과 산출물이 하나도 없다면 더미 생성(경고 방지)
-            if ! compgen -G "../${{ env.OUT_DIR }}/*" > /dev/null; then
-              echo "No user artifacts produced; creating placeholder." >> ../${{ env.OUT_DIR }}/summary.txt
-              echo "placeholder=$(date -Iseconds)" > ../${{ env.OUT_DIR }}/placeholder.txt
-            fi
+          # 산출물 보장
+          if ! compgen -G "../$OUT_DIR/*" > /dev/null; then
+            echo "No artifacts produced. Creating placeholder." | tee -a "../$LOG_DIR/run_cmd.txt"
+            echo "PLACEHOLDER $(date -Is)" > "../$OUT_DIR/SUMMARY.txt"
           fi
+          echo "EXIT_CODE=$RC" >> "../$OUT_DIR/SUMMARY.txt"
+          [ $RC -eq 0 ] || exit $RC
 
-          # 실패 시에도 워크플로우는 성공/실패를 명확히 표기
-          if [[ $RET -ne 0 ]]; then
-            echo "❗ 백테스트 스크립트가 비정상 종료했습니다 (code=$RET)."
-            exit $RET
-          fi
-
-      - name: Job summary
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "## Backtest Job Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Out dir  : \`${{ env.OUT_DIR }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Logs dir : \`${{ env.LOG_DIR }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### versions.txt" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat ${{ env.LOG_DIR }}/versions.txt || true >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### run_cmd" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat ${{ env.LOG_DIR }}/run_cmd.txt || true >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### summary.txt" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat ${{ env.OUT_DIR }}/summary.txt || true >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-      # (선택) 결과를 브랜치에 커밋/푸시하고 싶다면 주석 해제 + permissions.contents: write 로 변경
-      # - name: Commit results to branch
-      #   if: ${{ always() }}
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     BR="backtest-results"
-      #     git config --global user.email "actions@users.noreply.github.com"
-      #     git config --global user.name "github-actions"
-      #     git init pushrepo
-      #     cd pushrepo
-      #     git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
-      #     git checkout -b "$BR"
-      #     mkdir -p "${{ env.OUT_DIR }}" "${{ env.LOG_DIR }}"
-      #     cp -r "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}"/* "${{ env.OUT_DIR }}" 2>/dev/null || true
-      #     cp -r "$GITHUB_WORKSPACE/${{ env.LOG_DIR }}"/* "${{ env.LOG_DIR }}" 2>/dev/null || true
-      #     git add -A
-      #     git commit -m "Backtest results for ${GITHUB_SHA::7}"
-      #     git push -u origin "$BR" --force
+      - name: Upload results (pinned SHA)
+        # v4 upload-artifact, full-length SHA pinned
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backtest-${{ github.run_id }}
+          path: |
+            out/**
+            logs/**
+          if-no-files-found: warn
+          retention-days: 7
