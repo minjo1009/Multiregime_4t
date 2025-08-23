@@ -1,151 +1,157 @@
-name: ETH-1m Backtest (no checkout action)
+name: 4t-backtest
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'trend4u.zip'
-      - 'ETHUSDT_1min_2020_2025.zip'
-      - '.github/workflows/backtest.yml'
-
-permissions:
-  contents: read
-
-env:
-  TZ: Asia/Seoul
-  CODE_ZIP: trend4u.zip
-  DATA_ZIP: ETHUSDT_1min_2020_2025.zip
-  OUT_DIR: out
-  LOG_DIR: logs
-  MPLBACKEND: Agg
-  PYTHONUNBUFFERED: "1"
+    inputs:
+      start_date:
+        description: '백테스트 시작일 (예: 2022-01-01)'
+        required: false
+      end_date:
+        description: '백테스트 종료일 (예: 2025-08-23)'
+        required: false
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
+    env:
+      TZ: Asia/Seoul
+      CODE_ZIP: trend4u.zip
+      DATA_ZIP: ETHUSDT_1min_2020_2025.zip
+      CODE_DIR: code
+      DATA_DIR: data
     steps:
-      - name: Prepare workspace (no marketplace actions)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$LOG_DIR" "$OUT_DIR"
-          echo "Repo: $GITHUB_REPOSITORY"    | tee -a "$LOG_DIR/versions.txt"
-          echo "SHA : $GITHUB_SHA"           | tee -a "$LOG_DIR/versions.txt"
-          echo "TZ  : $TZ"                   | tee -a "$LOG_DIR/versions.txt"
-          # 현재 커밋 zipball 직접 다운로드(체크아웃 액션 불필요)
-          curl -sSL \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/zipball/${GITHUB_SHA}" -o source.zip
-          unzip -q source.zip
-          ROOT_DIR="$(ls -td -- */ 2>/dev/null | head -n1 || true)"
-          if [[ -z "${ROOT_DIR:-}" ]]; then
-            echo "::error::failed to locate top-level dir after unzip"
-            find . -maxdepth 2 -type d -print
-            exit 1
-          fi
-          ROOT_DIR="${ROOT_DIR%/}"
-          mv "$ROOT_DIR" repo
-          cd repo
-          echo "PWD=$(pwd)" > "../$LOG_DIR/pwd.txt"
-
-      - name: Python venv & deps
-        shell: bash
-        working-directory: repo
-        run: |
-          set -euo pipefail
-          python3 --version | tee -a "../$LOG_DIR/versions.txt"
-          python3 -m venv .venv
-          source .venv/bin/activate
-          python -m pip install --upgrade pip wheel >/dev/null
-          # 기본 셋(레포에 별도 관리 없으면 이걸로 충분)
-          pip install numpy pandas matplotlib scikit-learn ta python-dateutil pytz >/dev/null
-          python -V | tee -a "../$LOG_DIR/versions.txt"
-          pip list | tee "../$LOG_DIR/pip_list.txt"
-
-      - name: Unzip code & data
-        shell: bash
-        working-directory: repo
-        run: |
-          set -euo pipefail
-          # 코드/데이터 zip은 레포 루트에 있어야 함
-          test -f "$CODE_ZIP" || { echo "::error::missing $CODE_ZIP at repo root"; exit 2; }
-          unzip -oq "$CODE_ZIP" -d code
-          if [ -f "$DATA_ZIP" ]; then
-            unzip -oq "$DATA_ZIP" -d data
-          fi
-          # 데이터 CSV 탐색(정확 파일명 우선, 없으면 첫 CSV)
-          CSV="data/ETHUSDT_1min_2020_2025.csv"
-          if [ ! -f "$CSV" ]; then
-            CSV="$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)"
-          fi
-          if [ -z "${CSV:-}" ]; then
-            echo "::error::no CSV found in data/. put ETHUSDT_1min_2020_2025.zip at repo root"
-            exit 3
-          fi
-          echo "CSV=$CSV" | tee -a "../$LOG_DIR/tree_data.txt"
-          echo "[code tree]"  | tee "../$LOG_DIR/tree_code.txt"
-          find code -maxdepth 3 -type f | sed 's#^# - #' | tee -a "../$LOG_DIR/tree_code.txt"
-
-      - name: Run backtest (forced, multi-try)
-        shell: bash
-        working-directory: repo
-        run: |
-          set -euo pipefail
-          source .venv/bin/activate
-          mkdir -p "../$OUT_DIR"
-          # 엔트리 후보(우선순위): run_4u.py > run_4t.py > trend4u/backtest.py > backtest.py > run_backtest.py
-          mapfile -t CANDS < <(
-            { find code -type f -name 'run_4u.py' ;
-              find code -type f -name 'run_4t.py' ;
-              find code -type f -path '*/trend4u/backtest.py' ;
-              find code -type f -name 'backtest.py' ;
-              find code -type f -name 'run_backtest.py' ; } 2>/dev/null | awk '!seen[$0]++'
-          )
-          if [ "${#CANDS[@]}" -eq 0 ]; then
-            echo "::error::no entry script found in code/ (expected run_4u.py or backtest.py variants)"
-            find code -maxdepth 3 -type f -name '*.py' | sed 's#^# - #'
-            exit 4
-          fi
-          ENTRY="${CANDS[0]}"
-          echo "ENTRY=$ENTRY" | tee -a "../$LOG_DIR/run_cmd.txt"
-
-          # 다중 인자 패턴 시도
-          try() { echo "[TRY] $*" | tee -a "../$LOG_DIR/run_cmd.txt"; "$@"; }
-          set +e
-          try python "$ENTRY" --data "$CSV" --out "../$OUT_DIR"
-          RC=$?
-          if [ $RC -ne 0 ]; then
-            try python "$ENTRY" --data "$CSV" --output "../$OUT_DIR"
-            RC=$?
-          fi
-          if [ $RC -ne 0 ]; then
-            try python "$ENTRY" --input "$CSV" --out "../$OUT_DIR"
-            RC=$?
-          fi
-          if [ $RC -ne 0 ]; then
-            try python "$ENTRY"
-            RC=$?
-          fi
-          set -e
-
-          # 산출물 보장
-          if ! compgen -G "../$OUT_DIR/*" > /dev/null; then
-            echo "No artifacts produced. Creating placeholder." | tee -a "../$LOG_DIR/run_cmd.txt"
-            echo "PLACEHOLDER $(date -Is)" > "../$OUT_DIR/SUMMARY.txt"
-          fi
-          echo "EXIT_CODE=$RC" >> "../$OUT_DIR/SUMMARY.txt"
-          [ $RC -eq 0 ] || exit $RC
-
-      - name: Upload results (pinned SHA)
-        # v4 upload-artifact, full-length SHA pinned
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
-          name: backtest-${{ github.run_id }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+
+      - name: Prepare workspace (dirs, logs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ./logs ./out
+          echo "Repo: $GITHUB_REPOSITORY"         | tee -a ./logs/meta.txt
+          echo "SHA : $GITHUB_SHA"                | tee -a ./logs/meta.txt
+          echo "TZ  : $TZ"                        | tee -a ./logs/meta.txt
+          pwd                                     | tee ./logs/pwd.txt
+          ls -al                                  | tee ./logs/ls_root.txt
+
+      - name: Validate required files (zips at repo root)
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f "$CODE_ZIP" ]] || { echo "코드 zip($CODE_ZIP)이 루트에 없습니다"; exit 1; }
+          [[ -f "$DATA_ZIP" ]] || { echo "데이터 zip($DATA_ZIP)이 루트에 없습니다"; exit 1; }
+
+      - name: Unzip code and data
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$CODE_DIR" "$DATA_DIR"
+          mkdir -p "$CODE_DIR" "$DATA_DIR"
+          unzip -q "$CODE_ZIP" -d "$CODE_DIR"
+          unzip -q "$DATA_ZIP" -d "$DATA_DIR" || true
+          echo "== CODE TREE =="  | tee -a ./logs/tree.txt
+          (cd "$CODE_DIR" && find . -maxdepth 4 -type f | sort) | tee -a ./logs/tree.txt
+          echo "== DATA HEAD =="  | tee -a ./logs/tree.txt
+          (cd "$DATA_DIR" && find . -maxdepth 2 -type f | head -n 50) | tee -a ./logs/tree.txt
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ env.CODE_DIR }}
+        run: |
+          set -euo pipefail
+          python -V | tee -a ../logs/versions.txt
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          elif [[ -f pyproject.toml ]]; then
+            pip install .
+          else
+            pip install numpy pandas matplotlib ta python-dateutil pytz
+          fi
+
+      - name: Run backtest (auto-discovery)
+        shell: bash
+        working-directory: ${{ env.CODE_DIR }}
+        env:
+          START_DATE: ${{ github.event.inputs.start_date }}
+          END_DATE:   ${{ github.event.inputs.end_date }}
+          DATA_DIR:   ${{ github.workspace }}/${{ env.DATA_DIR }}
+          OUT_DIR:    ${{ github.workspace }}/out
+          LOG_DIR:    ${{ github.workspace }}/logs
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR" "$LOG_DIR"
+
+          try_run() {
+            echo "[TRY] $*" | tee -a "$LOG_DIR/runner.txt"
+            set +e
+            bash -lc "$@" 2>&1 | tee -a "$LOG_DIR/backtest.out"
+            local rc=${PIPESTATUS[0]}
+            set -e
+            return $rc
+          }
+
+          # 1) backtest.sh at repo root
+          if [[ -f backtest.sh ]]; then
+            chmod +x backtest.sh
+            try_run "./backtest.sh" && exit 0
+          fi
+
+          # 2) scripts/backtest.sh
+          if [[ -f scripts/backtest.sh ]]; then
+            chmod +x scripts/backtest.sh
+            try_run "scripts/backtest.sh" && exit 0
+          fi
+
+          # 3) run_backtest.py
+          if [[ -f run_backtest.py ]]; then
+            try_run "python run_backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
+            try_run "python run_backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
+            try_run "python run_backtest.py" && exit 0
+          fi
+
+          # 4) backtest.py
+          if [[ -f backtest.py ]]; then
+            try_run "python backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
+            try_run "python backtest.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
+            try_run "python backtest.py" && exit 0
+          fi
+
+          # 5) main.py (contains 'backtest' keyword)
+          if [[ -f main.py ]]; then
+            if grep -i -q "backtest" main.py; then
+              try_run "python main.py --data \"$DATA_DIR\" --out \"$OUT_DIR\" --start \"$START_DATE\" --end \"$END_DATE\"" && exit 0
+              try_run "python main.py --data \"$DATA_DIR\" --out \"$OUT_DIR\"" && exit 0
+              try_run "python main.py" && exit 0
+            fi
+          fi
+
+          echo "백테스트 실행 스크립트를 찾지 못했습니다."
+          echo "아래 파일 목록을 확인하세요:" | tee -a "$LOG_DIR/runner.txt"
+          find . -maxdepth 3 -type f | sort | tee -a "$LOG_DIR/runner.txt"
+          exit 2
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backtest-logs
           path: |
-            out/**
             logs/**
+            code/logs/**
           if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload results (out/**)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backtest-results
+          path: out/**
+          if-no-files-found: error
           retention-days: 7
