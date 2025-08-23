@@ -1,222 +1,154 @@
-name: backtest
+name: 4t-backtest
 
 on:
   workflow_dispatch:
     inputs:
-      data_zip:
-        description: '데이터 ZIP 파일명 (레포 루트)'
-        required: false
-        default: 'ETHUSDT_1min_2020_2025.zip'
       code_zip:
-        description: '코드 ZIP 파일명 (레포 루트)'
-        required: false
-        default: 'trend4u.zip'
+        description: "코드 ZIP (repo 루트) 파일명"
+        default: "trend4u.zip"
+        required: true
+      data_zip:
+        description: "데이터 ZIP (repo 루트) 파일명"
+        default: "ETHUSDT_1min_2020_2025.zip"
+        required: true
+      train_start:
+        description: "훈련 시작 YYYY-MM-DD"
+        default: "2023-01-01"
+        required: true
+      train_end:
+        description: "훈련 종료 YYYY-MM-DD"
+        default: "2024-12-31"
+        required: true
+      test_start:
+        description: "테스트 시작 YYYY-MM-DD"
+        default: "2025-01-01"
+        required: true
+      test_end:
+        description: "테스트 종료 YYYY-MM-DD"
+        default: "2025-06-30"
+        required: true
+  push:
+    paths:
+      - "trend4u.zip"
+      - "ETHUSDT_1min_2020_2025.zip"
+      - ".github/workflows/4t-backtest.yml"
 
 permissions:
   contents: read
 
-concurrency:
-  group: backtest-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  TZ: Asia/Seoul
+  OUT_DIR: out
+  LOG_DIR: logs
 
 jobs:
-  run:
+  backtest:
     runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Seoul
-      CODE_ZIP: ${{ github.event.inputs.code_zip || 'trend4u.zip' }}
-      DATA_ZIP: ${{ github.event.inputs.data_zip || 'ETHUSDT_1min_2020_2025.zip' }}
-      OUT_DIR: _out
-      LOG_DIR: _logs
+
     steps:
+      # ✅ 모든 액션은 “풀 SHA”로 고정 (조직 정책 충족)
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
 
-      - name: Print context
-        run: |
-          set -euo pipefail
-          echo "Repo: $GITHUB_REPOSITORY" | tee -a context.txt
-          echo "SHA : $GITHUB_SHA" | tee -a context.txt
-          echo "TZ  : $TZ" | tee -a context.txt
-          mkdir -p "$LOG_DIR" "$OUT_DIR"
-          mv context.txt "$LOG_DIR/00_context.txt"
-
-      - name: Validate required files
-        run: |
-          set -euo pipefail
-          ls -al
-          [[ -f "$CODE_ZIP" ]] || { echo "::error file=$CODE_ZIP::코드 ZIP이 레포 루트에 없습니다."; exit 1; }
-          [[ -f "$DATA_ZIP" ]] || { echo "::error file=$DATA_ZIP::데이터 ZIP이 레포 루트에 없습니다."; exit 1; }
-
-      - name: Setup Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
 
-      - name: Unpack code & data
+      - name: Prepare workspace (dirs, meta)
+        shell: bash
         run: |
           set -euo pipefail
-          unzip -q "$CODE_ZIP" -d code_raw
-          unzip -q "$DATA_ZIP" -d data_raw
-          # 코드 루트 폴더 추정 (ZIP 안에 단일 상위폴더면 그 폴더, 아니면 code_raw)
-          CODE_DIR=$(python - << 'PY'
-import os
-root='code_raw'
-kids=[k for k in os.listdir(root) if not k.startswith('.')]
-print(os.path.join(root,kids[0]) if len(kids)==1 and os.path.isdir(os.path.join(root,kids[0])) else root)
-PY
-)
-          echo "CODE_DIR=$CODE_DIR" | tee -a "$LOG_DIR/10_paths.txt"
-          # 데이터 파일 경로 추정 (우선순위: ETHUSDT_1min_2020_2025.csv → *.csv)
-          DATA_CSV=$(python - << 'PY'
-import os,glob
-cands=['data_raw/ETHUSDT_1min_2020_2025.csv']+glob.glob('data_raw/**/*.csv',recursive=True)+glob.glob('data_raw/*.csv')
-print(cands[0] if cands else '')
-PY
-)
-          if [[ -z "$DATA_CSV" ]]; then
-            echo "::warning::CSV 데이터 파일을 찾지 못했습니다. 백테스트 스크립트가 내부에서 읽어올 수도 있습니다."
-          else
-            echo "DATA_CSV=$DATA_CSV" | tee -a "$LOG_DIR/10_paths.txt"
-          fi
-          echo "OUT_DIR=$OUT_DIR" | tee -a "$LOG_DIR/10_paths.txt"
+          mkdir -p "$LOG_DIR" "$OUT_DIR"
+          echo "Repo: $GITHUB_REPOSITORY" | tee -a "$LOG_DIR/meta.txt"
+          echo "SHA : $GITHUB_SHA"         | tee -a "$LOG_DIR/meta.txt"
+          echo "TZ  : $TZ"                 | tee -a "$LOG_DIR/meta.txt"
+          python -V   | tee -a "$LOG_DIR/versions.txt"
+          pip -V      | tee -a "$LOG_DIR/versions.txt"
+          ls -al      | tee "$LOG_DIR/root-ls.txt"
 
-          # 코드 루트로 이동용 env 파일 (다음 스텝에서 source)
-          echo "export CODE_DIR=\"$CODE_DIR\"" >> $GITHUB_ENV
-          echo "export DATA_CSV=\"$DATA_CSV\"" >> $GITHUB_ENV
-
-      - name: Install deps (graceful)
-        working-directory: ${{ env.CODE_DIR }}
-        run: |
-          set -euo pipefail
-          python -V | tee -a "../$LOG_DIR/20_versions.txt"
-          if [[ -f requirements.txt ]]; then
-            pip install -r requirements.txt
-          elif [[ -f pyproject.toml ]]; then
-            pip install .
-          else
-            # 최소 구동 세트 (지표/시간/차트)
-            pip install numpy pandas matplotlib ta python-dateutil pytz
-          fi
-
-      - name: Locate backtest entry
-        id: locate
-        working-directory: ${{ env.CODE_DIR }}
-        run: |
-          set -euo pipefail
-          # 후보: backtest*.py, run_backtest*.py, main*.py, runner*.py, scripts/* 등
-          mapfile -t CANDS < <(git ls-files '*.py' 2>/dev/null || true)
-          if [[ ${#CANDS[@]} -eq 0 ]]; then
-            # ZIP이 git-tracked가 아니므로 파일시스템 검색
-            mapfile -t CANDS < <(ls -1 **/*.py *.py 2>/dev/null || true)
-          fi
-
-          pick_script() {
-            for pat in 'backtest' 'run_backtest' 'runner' 'main'; do
-              for f in "${CANDS[@]}"; do
-                [[ "$f" =~ \.venv/|site-packages/ ]] && continue
-                [[ "$f" == *"$pat"*".py" ]] && { echo "$f"; return 0; }
-              done
-            done
-            # 마지막 시도로, __main__ 있는 파일
-            for f in "${CANDS[@]}"; do
-              head -n 200 "$f" | grep -q "__name__ == ['\"]__main__['\"]" && { echo "$f"; return 0; }
-            done
-            return 1
-          }
-
-          ENTRY=$(pick_script || true)
-          if [[ -z "$ENTRY" ]]; then
-            echo "::warning::엔트리 파이썬 스크립트를 자동탐색하지 못했습니다. 패키지 실행을 시도합니다."
-          else
-            echo "ENTRY=$ENTRY" | tee -a "../$LOG_DIR/30_entry.txt"
-          fi
-          echo "entry=$ENTRY" >> $GITHUB_OUTPUT
-
-      - name: Run backtest (best-effort runners)
-        working-directory: ${{ env.CODE_DIR }}
+      - name: Unzip code & data
+        shell: bash
         env:
-          DATA_CSV: ${{ env.DATA_CSV }}
-          OUT_DIR: ${{ env.OUT_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
+          CODE_ZIP: ${{ inputs.code_zip || 'trend4u.zip' }}
+          DATA_ZIP: ${{ inputs.data_zip || 'ETHUSDT_1min_2020_2025.zip' }}
         run: |
           set -euo pipefail
-          mkdir -p "../$OUT_DIR" "../$LOG_DIR"
-          # 공통 인수 셋업
-          ARGS1="--data \"$DATA_CSV\" --out ../$OUT_DIR"
-          ARGS2="\"$DATA_CSV\" ../$OUT_DIR"
-          ARGS3="--out ../$OUT_DIR"
+          echo "CODE_ZIP=$CODE_ZIP" | tee -a "$LOG_DIR/unzip.txt"
+          echo "DATA_ZIP=$DATA_ZIP" | tee -a "$LOG_DIR/unzip.txt"
 
-          # 실행 시나리오: (1) 탐색된 ENTRY 직접 실행 → (2) 패키지 모듈 실행 → (3) scripts 디렉토리 내 실행
-          ok=0
-          if [[ -n "${{ steps.locate.outputs.entry }}" ]]; then
-            ENTRY="${{ steps.locate.outputs.entry }}"
-            echo "[try] python $ENTRY $ARGS1" | tee -a "../$LOG_DIR/40_run.txt"
-            bash -lc "python \"$ENTRY\" $ARGS1" && ok=1 || true
-            if [[ $ok -eq 0 ]]; then
-              echo "[fallback] python $ENTRY $ARGS2" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python \"$ENTRY\" $ARGS2" && ok=1 || true
-            fi
-            if [[ $ok -eq 0 ]]; then
-              echo "[fallback] python $ENTRY $ARGS3" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python \"$ENTRY\" $ARGS3" && ok=1 || true
-            fi
+          if [[ ! -f "$CODE_ZIP" ]]; then
+            echo "::error::코드 zip이 루트에 없습니다: $CODE_ZIP"; exit 2
+          fi
+          if [[ ! -f "$DATA_ZIP" ]]; then
+            echo "::error::데이터 zip이 루트에 없습니다: $DATA_ZIP"; exit 2
           fi
 
-          if [[ $ok -eq 0 ]]; then
-            # 패키지 실행 시도 (trend4u, trend4t 둘 다 시도)
-            for MOD in "trend4u" "trend4t" ; do
-              echo "[try] python -m $MOD $ARGS1" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python -m $MOD $ARGS1" && ok=1 && break || true
-              echo "[fallback] python -m $MOD $ARGS2" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python -m $MOD $ARGS2" && ok=1 && break || true
-              echo "[fallback] python -m $MOD $ARGS3" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python -m $MOD $ARGS3" && ok=1 && break || true
-            done
+          # 코드 압축 해제 → ./trend4u/ (zip 내부 최상위 폴더도 trend4u/)
+          unzip -o "$CODE_ZIP" -d . | tee -a "$LOG_DIR/unzip.txt"
+
+          # 데이터 압축 해제 → ./data/ETHUSDT_1min_2020_2025.csv
+          mkdir -p data
+          unzip -o "$DATA_ZIP" -d data | tee -a "$LOG_DIR/unzip.txt"
+
+          echo "== tree =="
+          (command -v tree >/dev/null && tree -a -L 2 || ls -Ral) | tee "$LOG_DIR/tree.txt"
+
+      - name: Install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f trend4u/requirements.txt ]]; then
+            pip install --upgrade pip
+            pip install -r trend4u/requirements.txt | tee -a "$LOG_DIR/pip.txt"
+          else
+            # 최소 구동 세트
+            pip install numpy pandas scikit-learn matplotlib ta python-dateutil pytz | tee -a "$LOG_DIR/pip.txt"
           fi
 
-          if [[ $ok -eq 0 && -d scripts ]]; then
-            for s in scripts/*.py; do
-              [[ -f "$s" ]] || continue
-              echo "[try] python $s $ARGS1" | tee -a "../$LOG_DIR/40_run.txt"
-              bash -lc "python \"$s\" $ARGS1" && ok=1 && break || true
-            done
+      - name: Run backtest (trend4u/run_4u.py)
+        shell: bash
+        env:
+          TRAIN_START: ${{ inputs.train_start || '2023-01-01' }}
+          TRAIN_END:   ${{ inputs.train_end   || '2024-12-31' }}
+          TEST_START:  ${{ inputs.test_start  || '2025-01-01' }}
+          TEST_END:    ${{ inputs.test_end    || '2025-06-30' }}
+        run: |
+          set -euo pipefail
+          CSV="data/ETHUSDT_1min_2020_2025.csv"
+          if [[ ! -f "$CSV" ]]; then
+            echo "::error::CSV가 없습니다: $CSV"; ls -al data; exit 3
           fi
+          python trend4u/run_4u.py \
+            --data "$CSV" \
+            --train_start "$TRAIN_START" \
+            --train_end   "$TRAIN_END" \
+            --test_start  "$TEST_START" \
+            --test_end    "$TEST_END" \
+            --out_dir "$OUT_DIR" \
+            2>&1 | tee "$LOG_DIR/run.txt"
 
-          if [[ $ok -eq 0 ]]; then
-            echo "::error::백테스트 엔트리 실행에 실패했습니다. _logs/40_run.txt를 확인하세요."
-            exit 1
-          fi
+          echo "생성물 확인:" | tee -a "$LOG_DIR/post.txt"
+          ls -al "$OUT_DIR" || true | tee -a "$LOG_DIR/post.txt"
 
-          # 결과물 없으면 기본 리포트라도 생성
-          if [[ -z "$(ls -A ../$OUT_DIR 2>/dev/null || true)" ]]; then
-            echo "no explicit outputs; generating basic summary" | tee -a "../$LOG_DIR/50_post.txt"
-            python - <<'PY' "../$LOG_DIR/50_post.txt" "../$OUT_DIR/README.txt"
-import os,sys,datetime
-log=sys.argv[1]; out=sys.argv[2]
-os.makedirs(os.path.dirname(out),exist_ok=True)
-open(out,'w').write(f"Backtest finished at {datetime.datetime.now()}\nCheck logs in _logs\n")
-open(log,'a').write("Wrote fallback README.txt\n")
-PY
-          fi
-
-      - name: Upload OUT
+      - name: Upload results artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: backtest-out
-          path: ${{ github.workspace }}/${{ env.OUT_DIR }}/
+          name: backtest-results
+          path: |
+            ${{ env.OUT_DIR }}/**
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30
 
-      - name: Upload LOGS
+      - name: Upload logs artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: backtest-logs
-          path: ${{ github.workspace }}/${{ env.LOG_DIR }}/
-          if-no-files-found: warn
+          path: |
+            ${{ env.LOG_DIR }}/**
+          if-no-files-found: ignore
           retention-days: 14
