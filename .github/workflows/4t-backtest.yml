@@ -1,173 +1,222 @@
-name: 4t-backtest
+name: 4u Backtest (ZIP → run_4u.py)
 
 on:
   workflow_dispatch:
     inputs:
+      code_zip:
+        description: '레포 루트에 있는 코드 ZIP (기본: trend4u.zip)'
+        default: 'trend4u.zip'
+        required: false
+      data_zip:
+        description: '레포 루트에 있는 데이터 ZIP (기본: ETHUSDT_1min_2020_2025.zip)'
+        default: 'ETHUSDT_1min_2020_2025.zip'
+        required: false
       train_start:
-        description: "Train start (YYYY-MM-DD)"
-        required: true
-        default: "2025-01-01"
+        description: '훈련 시작'
+        default: '2023-01-01'
       train_end:
-        description: "Train end (YYYY-MM-DD)"
-        required: true
-        default: "2025-04-30"
+        description: '훈련 끝'
+        default: '2024-12-31'
       test_start:
-        description: "Test start (YYYY-MM-DD)"
-        required: true
-        default: "2025-05-01"
+        description: '테스트 시작'
+        default: '2025-01-01'
       test_end:
-        description: "Test end (YYYY-MM-DD)"
-        required: true
-        default: "2025-06-30"
+        description: '테스트 끝'
+        default: '2025-06-30'
       H:
-        description: "Prediction horizon (minutes)"
-        required: true
-        default: "5"
+        description: '홀드 기간(H-step)'
+        default: '5'
       fee_bps:
-        description: "Fee in bps"
-        required: true
-        default: "1.0"
+        description: '수수료 (bps)'
+        default: '1.0'
       cov_low:
-        description: "Covariance band lower"
-        required: true
-        default: "0.2"
+        description: '커버리지 하한'
+        default: '0.2'
       cov_high:
-        description: "Covariance band upper"
-        required: true
-        default: "0.4"
+        description: '커버리지 상한'
+        default: '0.4'
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Seoul
-      CODE_ZIP: trend4u.zip
-      DATA_ZIP: ETHUSDT_1min_2020_2025.zip
-      WORKDIR: ${{ github.workspace }}
-      SRC_DIR: ${{ github.workspace }}/src
-      DATA_DIR: ${{ github.workspace }}/data
-      OUT_DIR:  ${{ github.workspace }}/src/_out_4u/github
-      LOG_DIR:  ${{ github.workspace }}/logs
 
     steps:
-      # ❌ actions/checkout, setup-python, upload-artifact 전부 사용 안 함 (조직 정책 회피)
-      - name: Prepare folders & echo context
+      # ===== 0) 작업 폴더/로그 준비 =====
+      - name: Prepare folders & context
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${SRC_DIR}" "${DATA_DIR}" "${OUT_DIR}" "${LOG_DIR}"
-          echo "Repo: $GITHUB_REPOSITORY" | tee -a "${LOG_DIR}/context.txt"
-          echo "SHA : $GITHUB_SHA"         | tee -a "${LOG_DIR}/context.txt"
-          echo "TZ  : $TZ"                | tee -a "${LOG_DIR}/context.txt"
-          python3 -V | tee -a "${LOG_DIR}/versions.txt"
-          which python3 | tee -a "${LOG_DIR}/versions.txt"
+          mkdir -p logs out src data
+          {
+            echo "Repo : $GITHUB_REPOSITORY"
+            echo "SHA  : $GITHUB_SHA"
+            echo "TZ   : $TZ"
+          } | tee -a logs/context.txt
 
-      - name: Unpack code zip (trend4u.zip) to src/
+      # ===== 1) (외부 Action 없이) 수동 체크아웃 =====
+      - name: Checkout repository (no actions)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          git -C "$tmpdir" init
+          git -C "$tmpdir" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git -C "$tmpdir" fetch --no-tags --depth=1 origin "${{ github.sha }}"
+          git -C "$tmpdir" checkout --progress --force "${{ github.sha }}"
+          rsync -a "$tmpdir"/ ./ 
+          rm -rf "$tmpdir"
+          echo "Checked out to $PWD" | tee -a logs/context.txt
+          echo "Repo files:" | tee -a logs/context.txt
+          ls -al | tee -a logs/context.txt
+
+      # ===== 2) 코드 ZIP 해제 (trend4u/ 폴더가 ZIP 내부에 존재) =====
+      - name: Unpack code zip → src/
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${CODE_ZIP}" ]; then
-            echo "ERROR: ${CODE_ZIP} not found at repo root." >&2
+          CODE_ZIP="${{ github.event.inputs.code_zip || 'trend4u.zip' }}"
+          if [[ ! -f "$CODE_ZIP" ]]; then
+            # 루트에 없으면 탐색(2단계 깊이)
+            FOUND="$(find . -maxdepth 2 -type f -name 'trend4u*.zip' -print -quit || true)"
+            if [[ -n "$FOUND" ]]; then CODE_ZIP="$FOUND"; fi
+          fi
+          if [[ ! -f "$CODE_ZIP" ]]; then
+            echo "ERROR: $CODE_ZIP not found at repo root." | tee -a logs/errors.txt
+            echo "❌ trend4u.zip을 레포 루트에 커밋하세요." >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-          unzip -q "${CODE_ZIP}" -d "${SRC_DIR}"
-          # 코드는 trend4u/ 아래에 존재 (zip 내부 확인 완료)
-          test -f "${SRC_DIR}/trend4u/run_4u.py" || { echo "run_4u.py not found"; ls -R "${SRC_DIR}"; exit 1; }
+          echo "Using code zip: $CODE_ZIP" | tee -a logs/context.txt
+          unzip -q "$CODE_ZIP" -d src
+          # 정상 구조 확인
+          if [[ ! -d src/trend4u/trend4p ]]; then
+            echo "ERROR: src/trend4u/trend4p not found after unzip." | tee -a logs/errors.txt
+            find src -maxdepth 3 -type d | tee -a logs/errors.txt
+            exit 1
+          fi
 
+      # ===== 3) trend4p 패키지 __init__ 핫픽스 (.__all__ → __all__) =====
       - name: Hotfix package init (fix SyntaxError in trend4p/__init__.py)
         shell: bash
         run: |
           set -euo pipefail
-          INIT_FILE="${SRC_DIR}/trend4u/trend4p/__init__.py"
-          if [ -f "${INIT_FILE}" ]; then
-            # 잘못된 선행 '.' 제거: ".__all__ = [...]" -> "__all__ = [...]"
-            # (우리가 받은 zip에서 발생하던 SyntaxError)
-            sed -i 's/^\.\(__all__\s*=.*\)$/\1/' "${INIT_FILE}"
-            echo "[PATCHED] ${INIT_FILE}" | tee -a "${LOG_DIR}/patches.txt"
+          INIT="src/trend4u/trend4p/__init__.py"
+          if [[ -f "$INIT" ]]; then
+            if grep -q '^\.__all__' "$INIT"; then
+              sed -i 's/^\.__all__/__all__/' "$INIT"
+              echo "Patched __init__.py (removed leading dot)." | tee -a logs/fixes.txt
+            fi
           else
-            echo "ERROR: ${INIT_FILE} not found." >&2
-            exit 1
+            echo "__init__.py missing, creating minimal one." | tee -a logs/fixes.txt
+            echo "__all__ = ['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']" > "$INIT"
           fi
+          echo "Verified __init__.py:"
+          sed -n '1,2p' "$INIT" | tee -a logs/fixes.txt
 
-      - name: Unpack data zip (ETHUSDT_1min_2020_2025.zip) to data/
+      # ===== 4) 데이터 ZIP 해제 =====
+      - name: Unpack data zip → data/
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${DATA_ZIP}" ]; then
-            echo "ERROR: ${DATA_ZIP} not found at repo root." >&2
+          DATA_ZIP="${{ github.event.inputs.data_zip || 'ETHUSDT_1min_2020_2025.zip' }}"
+          if [[ ! -f "$DATA_ZIP" ]]; then
+            FOUND="$(find . -maxdepth 2 -type f -name 'ETH*1min*2025*.zip' -print -quit || true)"
+            if [[ -n "$FOUND" ]]; then DATA_ZIP="$FOUND"; fi
+          fi
+          if [[ ! -f "$DATA_ZIP" ]]; then
+            echo "ERROR: $DATA_ZIP not found at repo root." | tee -a logs/errors.txt
+            echo "❌ 데이터 ZIP을 레포 루트에 커밋하세요." >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-          unzip -q "${DATA_ZIP}" -d "${DATA_DIR}"
-          echo "Data dir tree:" | tee -a "${LOG_DIR}/data_tree.txt"
-          ls -lah "${DATA_DIR}" | tee -a "${LOG_DIR}/data_tree.txt"
-          # CSV 자동 탐색
-          CSV_PATH="$(find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' | head -n 1 || true)"
-          if [ -z "${CSV_PATH}" ]; then
-            echo "ERROR: No CSV found in ${DATA_DIR}" >&2
+          echo "Using data zip: $DATA_ZIP" | tee -a logs/context.txt
+          unzip -q "$DATA_ZIP" -d data
+          DATA_CSV="$(ls -1 data/*.csv | head -n1 || true)"
+          if [[ -z "${DATA_CSV:-}" ]]; then
+            echo "ERROR: CSV not found inside data zip." | tee -a logs/errors.txt
             exit 1
           fi
-          echo "${CSV_PATH}" > "${DATA_DIR}/.csv_path"
+          echo "DATA_CSV=$DATA_CSV" | tee -a logs/context.txt
 
-      - name: Install Python deps (fallback minimal if requirements missing)
+      # ===== 5) 파이썬/의존성 설치 =====
+      - name: Install Python deps
         shell: bash
-        working-directory: ${{ env.SRC_DIR }}/trend4u
         run: |
           set -euo pipefail
-          if [ -f requirements.txt ]; then
-            pip3 install --upgrade pip
-            pip3 install -r requirements.txt
+          python3 -V | tee -a logs/versions.txt
+          python3 -m pip install --upgrade pip >/dev/null
+          if [[ -f src/trend4u/requirements.txt ]]; then
+            python3 -m pip install -r src/trend4u/requirements.txt
+          elif [[ -f requirements.txt ]]; then
+            python3 -m pip install -r requirements.txt
           else
-            pip3 install --upgrade pip
-            pip3 install numpy pandas matplotlib ta python-dateutil pytz scikit-learn
+            # 최소 구동 세트
+            python3 -m pip install numpy pandas scikit-learn matplotlib python-dateutil pytz
           fi
 
+      # ===== 6) 백테스트 실행 (run_4u.py를 CLI로 호출) =====
       - name: Run backtest
         shell: bash
         env:
-          TRAIN_START: ${{ inputs.train_start }}
-          TRAIN_END:   ${{ inputs.train_end }}
-          TEST_START:  ${{ inputs.test_start }}
-          TEST_END:    ${{ inputs.test_end }}
-          H:           ${{ inputs.H }}
-          FEE_BPS:     ${{ inputs.fee_bps }}
-          COV_LOW:     ${{ inputs.cov_low }}
-          COV_HIGH:    ${{ inputs.cov_high }}
+          TRAIN_START: ${{ github.event.inputs.train_start }}
+          TRAIN_END:   ${{ github.event.inputs.train_end }}
+          TEST_START:  ${{ github.event.inputs.test_start }}
+          TEST_END:    ${{ github.event.inputs.test_end }}
+          H:           ${{ github.event.inputs.H }}
+          FEE_BPS:     ${{ github.event.inputs.fee_bps }}
+          COV_LOW:     ${{ github.event.inputs.cov_low }}
+          COV_HIGH:    ${{ github.event.inputs.cov_high }}
         run: |
           set -euo pipefail
-          CSV_PATH="$(cat "${DATA_DIR}/.csv_path")"
-          cd "${SRC_DIR}/trend4u"
-          echo ">>> Using CSV: ${CSV_PATH}"
-          echo ">>> Dates: ${TRAIN_START} ~ ${TRAIN_END} | ${TEST_START} ~ ${TEST_END}"
-          python3 run_4u.py \
-            --data "${CSV_PATH}" \
-            --train_start "${TRAIN_START}" --train_end "${TRAIN_END}" \
-            --test_start "${TEST_START}"   --test_end "${TEST_END}" \
-            --H "${H}" --fee_bps "${FEE_BPS}" \
-            --cov_low "${COV_LOW}" --cov_high "${COV_HIGH}" \
-            --out_dir "${OUT_DIR}"
+          export PYTHONPATH="src/trend4u:${PYTHONPATH:-}"
+          RUNPY="$(find src -maxdepth 2 -name 'run_4u.py' -print -quit)"
+          if [[ -z "${RUNPY:-}" ]]; then
+            echo "ERROR: run_4u.py not found under src/." | tee -a logs/errors.txt
+            find src -maxdepth 3 -type f -name 'run_4u.py' | tee -a logs/errors.txt
+            exit 1
+          fi
+          echo "Using entrypoint: $RUNPY" | tee -a logs/context.txt
 
-      - name: Persist summary + sanity logs to job summary
-        if: always()
+          # 데이터 CSV 경로 복구
+          DATA_CSV="$(ls -1 data/*.csv | head -n1)"
+          mkdir -p out
+
+          set -x
+          python3 "$RUNPY" \
+            --data "$DATA_CSV" \
+            --train_start "$TRAIN_START" --train_end "$TRAIN_END" \
+            --test_start "$TEST_START"   --test_end  "$TEST_END" \
+            --H "$H" --fee_bps "$FEE_BPS" \
+            --cov_low "$COV_LOW" --cov_high "$COV_HIGH" \
+            --out_dir out
+          set +x
+
+      # ===== 7) 결과 요약(요약 없을 때도 깨지지 않음) =====
+      - name: Persist summary to job summary
         shell: bash
         run: |
           set -euo pipefail
-          echo "### 4u Backtest — Summary" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "${OUT_DIR}/train_test_summary.json" ]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-            cat "${OUT_DIR}/train_test_summary.json" >> "$GITHUB_STEP_SUMMARY"
-            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f out/train_test_summary.json ]]; then
+            echo "### 4u Backtest — Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`train_test_summary.json\` generated." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            jq . out/train_test_summary.json >> $GITHUB_STEP_SUMMARY || cat out/train_test_summary.json >> $GITHUB_STEP_SUMMARY
           else
-            echo "- No train_test_summary.json generated." >> "$GITHUB_STEP_SUMMARY"
+            echo "### 4u Backtest — Summary" >> $GITHUB_STEP_SUMMARY
+            echo "- No train_test_summary.json generated." >> $GITHUB_STEP_SUMMARY
           fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Logs" >> "$GITHUB_STEP_SUMMARY"
-          for f in "${LOG_DIR}/context.txt" "${LOG_DIR}/versions.txt" "${LOG_DIR}/patches.txt" "${LOG_DIR}/data_tree.txt"; do
-            if [ -f "$f" ]; then
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "**$(basename "$f")**" >> "$GITHUB_STEP_SUMMARY"
-              echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-              cat "$f" >> "$GITHUB_STEP_SUMMARY"
-              echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**context.txt**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat logs/context.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**versions.txt**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat logs/versions.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
