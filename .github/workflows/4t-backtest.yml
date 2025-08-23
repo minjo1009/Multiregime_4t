@@ -1,57 +1,198 @@
-name: backtest
+name: Backtest (trend4u + ETH 1m)
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    paths:
+      - 'trend4u.zip'
+      - '*.zip'
+      - '*.csv'
+      - '.github/workflows/backtest.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  run-backtest:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       TZ: Asia/Seoul
-      CODE_ZIP: trend4u.zip
-      DATA_ZIP: ETH_1min.zip
+      MPLBACKEND: Agg
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # pinned SHA
+      # === SHA 고정 (보안 정책 대응) ===
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Setup Python
-        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # pinned SHA
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Prepare directories
-        run: mkdir -p logs out code data
-
-      - name: Unpack code and data
+      # === 기본 디렉토리/파일 준비 ===
+      - name: Prepare workspace
+        shell: bash
         run: |
-          unzip -o "$CODE_ZIP" -d code
-          unzip -o "$DATA_ZIP" -d data
+          set -euo pipefail
+          mkdir -p code data out logs
+          echo "[INFO] root files:"
+          ls -alh || true
 
-      - name: Install dependencies
+          # ---- 필수 파일 존재 확인
+          if [[ ! -f trend4u.zip ]]; then
+            echo "::error::trend4u.zip not found at repo root"; exit 2
+          fi
+
+          # ---- 코드 언팩 (code/ 아래로 강제)
+          unzip -oq trend4u.zip -d code
+          # 단일상위폴더면 code/src 로 정규화
+          if [ "$(find code -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]; then
+            mv "$(find code -mindepth 1 -maxdepth 1 -type d)" code/src
+          else
+            mkdir -p code/src && shopt -s dotglob && mv code/* code/src/ || true
+          fi
+
+          # ---- 데이터: zip 우선, 없으면 csv 사용
+          ETH_ZIP="$(ls -1 *.zip 2>/dev/null | grep -Ei 'ETH.*(1m|1min).*\.zip$' | head -n1 || true)"
+          if [[ -n "$ETH_ZIP" ]]; then
+            unzip -oq "$ETH_ZIP" -d data
+          fi
+          # 루트/기타 위치 csv를 data/로 모음
+          find . -maxdepth 1 -type f -iname '*.csv' -print0 | xargs -0 -I{} bash -c 'mv -f "{}" data/ || true'
+          # code/src 내부에 실수로 들어간 csv도 data/로 승격
+          find code/src -type f -iname '*.csv' -print0 | xargs -0 -I{} bash -c 'dst="data/$(basename "{}")"; mv -f "{}" "$dst" || true'
+
+          echo "[INFO] code tree:" | tee logs/tree_code.txt
+          (cd code/src && find . -maxdepth 3 -type f | sed 's#^\./##') | tee -a logs/tree_code.txt
+          echo "[INFO] data tree:" | tee logs/tree_data.txt
+          (cd data && find . -maxdepth 2 -type f | sed 's#^\./##') | tee -a logs/tree_data.txt
+
+      # === 의존성 설치: requirements.txt 있으면 그대로, 없으면 최소셋 ===
+      - name: Install deps
+        shell: bash
+        working-directory: code/src
         run: |
-          cd code/trend4u
+          set -euo pipefail
+          mkdir -p ../logs
+          python -V | tee -a ../logs/versions.txt
           if [[ -f requirements.txt ]]; then
             pip install -r requirements.txt
           elif [[ -f pyproject.toml ]]; then
             pip install .
           else
-            pip install numpy pandas matplotlib ta python-dateutil pytz
+            pip install -U pip
+            # 최소 실행셋 (네이티브 빌드 없는 것만)
+            pip install numpy pandas matplotlib scikit-learn python-dateutil pytz
           fi
 
-      - name: Run backtest
-        working-directory: code/trend4u
+      # === 강제 런처 생성: 엔트리 자동탐지 + 다중 패턴 호출 ===
+      - name: Create CI launcher
+        shell: bash
+        working-directory: code/src
         run: |
-          echo "Python version:" > ../../logs/versions.txt
-          python -V >> ../../logs/versions.txt
-          python run_4u.py --data ../../data/ETHUSDT_1min.csv --out ../../out
+          set -euo pipefail
+          cat > ci_entry.py <<'PY'
+import os, sys, subprocess, glob, shutil, json
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR", ROOT.parent / "data")).resolve()
+OUT_DIR  = Path(os.getenv("OUT_DIR", ROOT.parent / "out")).resolve()
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# 1) 엔트리 후보 우선순위 (정우님 팩 맞춤)
+CANDS = [
+    "trend4u/run_4u.py", "run_4u.py",
+    "scripts/backtest.py", "backtest.py", "run_backtest.py"
+]
+# 그 외 백테스트 유사 파일
+CANDS += sorted([p for p in glob.glob("**/*backtest*.py", recursive=True)], key=len)
+
+entry = None
+for c in CANDS:
+    p = (ROOT / c)
+    if p.is_file():
+        entry = p
+        break
+if entry is None:
+    print("::error::No backtest entry script found in code/src")
+    sys.exit(20)
+
+# 2) 데이터 후보 결정 (ETH 1m csv 우선)
+def pick_data():
+    pats = ["*ETH*1m*.csv", "*ETH*1min*.csv", "*.csv"]
+    for pat in pats:
+        files = sorted(DATA_DIR.glob(pat))
+        if files:
+            return files[0]
+    # 폴더만 있고 csv 없으면 폴더 경로 전달
+    return DATA_DIR
+
+DATA_ARG = pick_data()
+
+# 3) 호출 시나리오 순차 시도
+cmds = [
+    [sys.executable, str(entry), "--data", str(DATA_ARG), "--out", str(OUT_DIR)],
+    [sys.executable, str(entry), "--input", str(DATA_ARG), "--out", str(OUT_DIR)],
+    [sys.executable, str(entry), "--data", str(DATA_ARG)],
+    [sys.executable, str(entry)],
+]
+ok = False
+for cmd in cmds:
+    print("[TRY]", " ".join(map(str, cmd)), flush=True)
+    try:
+        r = subprocess.run(cmd, cwd=str(ROOT), check=False)
+        if r.returncode == 0:
+            ok = True
+            break
+    except Exception as e:
+        print("[WARN]", e, flush=True)
+
+if not ok:
+    print("::error::Entry execution failed. See logs above.")
+    sys.exit(30)
+
+# 4) 산출물 없으면 최소 요약 생성
+has_any = any(OUT_DIR.rglob("*"))
+if not has_any:
+    (OUT_DIR / "SUMMARY.txt").write_text("Backtest ran but produced no files.", encoding="utf-8")
+
+print("[OK] Done. Artifacts in:", OUT_DIR, flush=True)
+PY
+
+      # === 런처로 강제 실행 ===
+      - name: Run backtest (forced)
+        shell: bash
+        working-directory: code/src
+        run: |
+          set -euo pipefail
+          export DATA_DIR="$GITHUB_WORKSPACE/data"
+          export OUT_DIR="$GITHUB_WORKSPACE/out"
+          python ci_entry.py 2>&1 | tee -a ../logs/run.log
+
+      # === 산출물 수집 (out/와 logs/는 항상 존재) ===
+      - name: Gather results
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          rsync -a code/src/out/ out/ 2>/dev/null || true
+          rsync -a code/src/trend4u/out/ out/ 2>/dev/null || true
+          cp -r code/logs out/_logs 2>/dev/null || true
+          echo "[INFO] final out tree:" ; (cd out && find . -maxdepth 3 -type f | sed 's#^\./##' || true)
+
+      # === 아티팩트 업로드 (SHA pinned) ===
       - name: Upload artifacts
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # pinned SHA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest-results
+          name: backtest-${{ github.run_id }}
           path: |
             out/**
-            logs/**
+          if-no-files-found: warn
+          retention-days: 7
