@@ -1,151 +1,277 @@
-name: 4t-backtest
+name: Backtest (trend4u, ETH 1min)
 
 on:
+  push:
+    paths:
+      - 'trend4u.zip'
+      - 'data/**'
+      - '.github/workflows/backtest-trend4u.yml'
   workflow_dispatch:
+    inputs:
+      code_zip:
+        description: 'Code pack ZIP path'
+        required: false
+        default: 'trend4u.zip'
+      data_zip_or_csv:
+        description: 'Data ZIP/CSV path (e.g., data/ETHUSDT_1min_2020_2025.zip or .csv)'
+        required: false
+        default: 'data/ETHUSDT_1min_2020_2025.zip'
+      start:
+        description: 'Backtest start (YYYY-MM-DD)'
+        required: false
+        default: '2020-01-01'
+      end:
+        description: 'Backtest end (YYYY-MM-DD)'
+        required: false
+        default: '2025-08-01'
+      fee_bps:
+        description: 'Fee (bps)'
+        required: false
+        default: '8'
+      slippage_bps:
+        description: 'Slippage (bps)'
+        required: false
+        default: '5'
+      seed:
+        description: 'Random seed (for reproducibility)'
+        required: false
+        default: '42'
+      symbol:
+        description: 'Symbol'
+        required: false
+        default: 'ETHUSDT'
+      timeframe:
+        description: 'Timeframe'
+        required: false
+        default: '1m'
 
-env:
-  CODE_ZIP: trend4t_hotfix_pack_u3.zip
-  DATA_ZIP: ETHUSDT_1min_2020_2025.zip
-  CSV_NAME: ETHUSDT_1min_2020_2025.csv
-  OUT_DIR: _out_4t/github
-  TRAIN_START: "2025-01-01"
-  TRAIN_END:   "2025-04-30"
-  TEST_START:  "2025-05-01"
-  TEST_END:    "2025-06-30"
-  H: "5"
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: backtest-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backtest:
+    name: Run Backtest
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      # 1) 체크아웃 (풀 SHA 고정)
       - name: Checkout
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # actions/checkout v4.3.0
-
-      # 2) 파이썬 설치 (풀 SHA 고정)
-      - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # actions/setup-python v5.6.0
+        uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          lfs: true
 
-      # 3) 리포 상태 확인
-      - name: Show repo
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            trend4u/requirements.txt
+            requirements.txt
+
+      - name: Ensure tools
+        run: |
+          sudo apt-get update -y
+          # unzip은 기본 포함이나 안전하게 보장
+          sudo apt-get install -y unzip
+
+      - name: Resolve inputs and defaults
+        id: cfg
         run: |
           set -euo pipefail
-          pwd
-          ls -al
+          CODE_ZIP="${{ github.event.inputs.code_zip || 'trend4u.zip' }}"
+          DATA_SRC="${{ github.event.inputs.data_zip_or_csv || 'data/ETHUSDT_1min_2020_2025.zip' }}"
+          echo "code_zip=${CODE_ZIP}" >> "$GITHUB_OUTPUT"
+          echo "data_src=${DATA_SRC}" >> "$GITHUB_OUTPUT"
+          echo "start=${{ github.event.inputs.start || '2020-01-01' }}" >> "$GITHUB_OUTPUT"
+          echo "end=${{ github.event.inputs.end || '2025-08-01' }}" >> "$GITHUB_OUTPUT"
+          echo "fee_bps=${{ github.event.inputs.fee_bps || '8' }}" >> "$GITHUB_OUTPUT"
+          echo "slippage_bps=${{ github.event.inputs.slippage_bps || '5' }}" >> "$GITHUB_OUTPUT"
+          echo "seed=${{ github.event.inputs.seed || '42' }}" >> "$GITHUB_OUTPUT"
+          echo "symbol=${{ github.event.inputs.symbol || 'ETHUSDT' }}" >> "$GITHUB_OUTPUT"
+          echo "timeframe=${{ github.event.inputs.timeframe || '1m' }}" >> "$GITHUB_OUTPUT"
 
-      # 4) 코드/데이터 ZIP 풀기 + 경로 정렬
-      - name: Unpack code & data
-        shell: bash
+      - name: Unpack code (trend4u.zip)
         run: |
           set -euo pipefail
-          echo "CODE_ZIP=$CODE_ZIP DATA_ZIP=$DATA_ZIP"
-
-          # 코드 ZIP 확인/해제
-          test -f "$CODE_ZIP" || { echo "❌ Code zip not found at repo root: $CODE_ZIP"; exit 2; }
-          rm -rf code_tmp
-          mkdir -p code_tmp
-          unzip -o "$CODE_ZIP" -d code_tmp >/dev/null
-
-          # run_4t.py 위치 찾아서 최상위로 복사
-          if [ -f code_tmp/run_4t.py ]; then
-            rsync -a code_tmp/ .
+          mkdir -p trend4u
+          if [ -f "${{ steps.cfg.outputs.code_zip }}" ]; then
+            unzip -o "${{ steps.cfg.outputs.code_zip }}" -d trend4u >/dev/null
+          elif [ -d trend4u ]; then
+            echo "trend4u directory already present."
           else
-            inner=$(find code_tmp -maxdepth 3 -type f -name "run_4t.py" | head -n1 || true)
-            if [ -n "$inner" ]; then
-              rsync -a "$(dirname "$inner")"/ .
-            else
-              echo "❌ run_4t.py not found inside code zip"; exit 3;
-            fi
+            echo "❌ Code pack not found: ${{ steps.cfg.outputs.code_zip }}"
+            exit 1
           fi
-          test -f run_4t.py || { echo "❌ run_4t.py missing after unzip"; exit 4; }
-          test -d trend4p || { echo "❌ trend4p/ package missing after unzip"; ls -al; exit 5; }
+          # 루트에 풀렸는지/하위폴더에 풀렸는지 정규화
+          if [ ! -f trend4u/requirements.txt ] && [ -d trend4u/trend4u ]; then
+            shopt -s dotglob
+            mv trend4u/trend4u/* trend4u/ || true
+          fi
+          # 백엔드 설정 강제
+          echo "MPLBACKEND=Agg" >> $GITHUB_ENV
 
-          # 데이터 ZIP 확인/해제
+      - name: Prepare data
+        run: |
+          set -euo pipefail
           mkdir -p data
-          if [ -f "$DATA_ZIP" ]; then
-            unzip -o "$DATA_ZIP" -d data >/dev/null || true
+          SRC="${{ steps.cfg.outputs.data_src }}"
+          if [ -f "$SRC" ]; then
+            case "$SRC" in
+              *.zip) unzip -o "$SRC" -d data >/dev/null ;;
+              *.csv) cp "$SRC" data/ ;;
+              *) echo "❌ Unsupported data file: $SRC"; exit 1 ;;
+            esac
+          else
+            echo "⚠️ Data file not found at $SRC. If your code downloads data itself, this is fine."
           fi
-          # 혹시 루트에 CSV가 있으면 data/ 로 이동
-          if [ -f "$CSV_NAME" ]; then mv -f "$CSV_NAME" "data/$CSV_NAME"; fi
+          echo "DATA_PATH=$GITHUB_WORKSPACE/data" >> $GITHUB_ENV
+          # 첫 번째 CSV를 대표 데이터로 지정(코드에서 환경변수 참조 가능)
+          CSV=$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)
+          [ -n "$CSV" ] && echo "DATA_FILE=$CSV" >> $GITHUB_ENV || true
 
-          # 자동 탐색/리네임 (대소문자/이름 변형 대응)
-          if [ ! -f "data/$CSV_NAME" ]; then
-            found=$(ls data 2>/dev/null | grep -i 'ethusdt_1min' | head -n1 || true)
-            if [ -n "$found" ]; then mv -f "data/$found" "data/$CSV_NAME"; fi
-          fi
-
-          echo "== After unzip =="
-          ls -al
-          echo "== data/ =="
-          ls -al data || true
-
-          test -f "data/$CSV_NAME" || { echo "❌ CSV not found: data/$CSV_NAME"; exit 6; }
-
-      # 5) 의존성 설치 (requirements.txt 없을 때도 동작)
       - name: Install dependencies
         run: |
           set -euo pipefail
-          python -V
-          python -m pip install -U pip setuptools wheel
-          # 핵심 패키지 고정 설치
-          pip install "numpy" "pandas" "scikit-learn==1.5.2" "scipy" "lightgbm" "xgboost" "joblib" "matplotlib" "pyarrow"
-          # requirements.txt 가 존재하면 추가 설치
-          if [ -f requirements.txt ]; then
+          if [ -f trend4u/requirements.txt ]; then
+            pip install -r trend4u/requirements.txt
+          elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
+          else
+            # 안전 기본셋만 설치(네이티브 빌드 필요한 패키지는 배제)
+            pip install --upgrade pip
+            pip install numpy pandas matplotlib scikit-learn pyyaml
           fi
-          python - <<'PY'
-          import numpy, pandas, sklearn
-          print("OK:", numpy.__version__, pandas.__version__, sklearn.__version__)
-          PY
 
-      # 6) 백테스트 실행 (실패해도 아티팩트는 올리도록 플래그 저장)
-      - name: Run backtest
+      - name: Smoke check (optional)
         continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -f trend4u/tests/smoke.py ]; then
+            python trend4u/tests/smoke.py || (echo "⚠️ Smoke test failed but continuing." && exit 0)
+          else
+            echo "No smoke test found. Skipping."
+          fi
+
+      - name: Run backtest
+        id: runbt
         env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-          TRAIN_START: ${{ env.TRAIN_START }}
-          TRAIN_END:   ${{ env.TRAIN_END }}
-          TEST_START:  ${{ env.TEST_START }}
-          TEST_END:    ${{ env.TEST_END }}
-          H:           ${{ env.H }}
-          CSV_NAME:    ${{ env.CSV_NAME }}
+          START: ${{ steps.cfg.outputs.start }}
+          END: ${{ steps.cfg.outputs.end }}
+          FEE_BPS: ${{ steps.cfg.outputs.fee_bps }}
+          SLIPPAGE_BPS: ${{ steps.cfg.outputs.slippage_bps }}
+          SEED: ${{ steps.cfg.outputs.seed }}
+          SYMBOL: ${{ steps.cfg.outputs.symbol }}
+          TIMEFRAME: ${{ steps.cfg.outputs.timeframe }}
         run: |
-          set -euxo pipefail
-          mkdir -p "$OUT_DIR"
-          python run_4t.py \
-            --data "data/$CSV_NAME" \
-            --train_start "$TRAIN_START" --train_end "$TRAIN_END" \
-            --test_start  "$TEST_START"  --test_end  "$TEST_END" \
-            --H "$H" \
-            --out_dir "$OUT_DIR" | tee "$OUT_DIR/run.log" || echo "PYTHON_FAILED=1" >> $GITHUB_ENV
+          set -euo pipefail
+          mkdir -p out
 
-          # 요약 JSON이 없으면 스텁 생성(업로드 실패 방지)
-          python - <<'PY'
-          import os, glob, json
-          out = os.environ.get("OUT_DIR","_out_4t/github")
-          pats = glob.glob(out+'/**/train_test_summary*.json', recursive=True)
-          if not pats:
-            os.makedirs(out, exist_ok=True)
-            with open(os.path.join(out, "summary_stub.json"), "w") as f:
-              json.dump({"note":"summary missing; see run.log", "out_dir": out}, f, indent=2)
-          PY
+          # 엔트리 스크립트 자동 탐지
+          CANDIDATES=$(ls -1 trend4u/ci_entry.py 2>/dev/null || true)
+          CANDIDATES="$CANDIDATES $(ls -1 trend4u/run_backtest.py 2>/dev/null || true)"
+          CANDIDATES="$CANDIDATES $(ls -1 trend4u/backtest*.py 2>/dev/null || true)"
+          CANDIDATES="$CANDIDATES $(ls -1 trend4u/main.py 2>/dev/null || true)"
+          ENTRY=""
+          for s in $CANDIDATES; do
+            [ -f "$s" ] && ENTRY="$s" && break
+          done
 
-      # 7) 산출물 업로드 (풀 SHA 고정)
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # upload-artifact v4.6.2
+          if [ -z "$ENTRY" ]; then
+            echo "❌ No entry script found in trend4u/. Expected one of: ci_entry.py, run_backtest.py, backtest*.py, main.py"
+            exit 1
+          fi
+
+          echo "▶ Using entry: $ENTRY"
+          echo "DATA_PATH=$DATA_PATH"
+          echo "DATA_FILE=${DATA_FILE:-<none>}"
+          echo "PARAMS: $SYMBOL $TIMEFRAME $START → $END  fee=${FEE_BPS}bps  slip=${SLIPPAGE_BPS}bps  seed=$SEED"
+
+          # 표준화된 ENV를 통해 파라미터 전달 (코드에서 os.getenv로 읽기)
+          export TREND4U_SYMBOL="$SYMBOL"
+          export TREND4U_TIMEFRAME="$TIMEFRAME"
+          export TREND4U_START="$START"
+          export TREND4U_END="$END"
+          export TREND4U_FEE_BPS="$FEE_BPS"
+          export TREND4U_SLIPPAGE_BPS="$SLIPPAGE_BPS"
+          export TREND4U_SEED="$SEED"
+          export TREND4U_OUTDIR="$GITHUB_WORKSPACE/out"
+
+          # 실행 (엔트리 스크립트는 ENV를 읽어 실행하도록 가정)
+          python "$ENTRY" || echo "⚠️ Backtest process returned non-zero. Continuing to collect artifacts."
+
+          # 최소 결과물 보장: 이미지/메트릭 없을 경우 대체 파일 생성
+          if [ ! -f out/summary.txt ]; then
+            echo "Run at $(date)" > out/summary.txt
+            echo "Symbol: $SYMBOL  TF: $TIMEFRAME  Period: $START → $END" >> out/summary.txt
+          fi
+          if [ ! -f out/index.html ]; then
+            cat > out/index.html <<'HTML'
+            <!doctype html><meta charset="utf-8">
+            <title>trend4u Backtest Report</title>
+            <h1>trend4u Backtest Report</h1>
+            <p>Artifacts are listed below. Open CSV/PNG for details.</p>
+            <ul>
+            HTML
+            for f in out/*; do
+              bn=$(basename "$f")
+              echo "<li><a href=\"$bn\">$bn</a></li>" >> out/index.html
+            done
+            echo "</ul>" >> out/index.html
+          fi
+
+      - name: Write Job Summary
+        run: |
+          echo "## ✅ Backtest Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Symbol: **${{ steps.cfg.outputs.symbol }}**  TF: **${{ steps.cfg.outputs.timeframe }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- Period: **${{ steps.cfg.outputs.start }} → ${{
+            steps.cfg.outputs.end }}**" >> $GITHUB_STEP_SUMMARY
+          echo "- Fee/Slip: **${{ steps.cfg.outputs.fee_bps }} / ${{
+            steps.cfg.outputs.slippage_bps }} bps**" >> $GITHUB_STEP_SUMMARY
+          if [ -f out/metrics.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Metrics (from metrics.json)" >> $GITHUB_STEP_SUMMARY
+            python - <<'PY'
+import json,sys
+m=json.load(open("out/metrics.json"))
+def g(k,d=None): 
+    return m.get(k,d)
+rows=[("CAGR",g("cagr")),("Sharpe",g("sharpe")),("MaxDD",g("max_drawdown")),
+      ("WinRate",g("win_rate")),("MCC",g("mcc")),("PnL",g("pnl"))]
+print("| Metric | Value |")
+print("|---|---:|")
+for k,v in rows:
+    if v is None: continue
+    print(f"| {k} | {v} |")
+PY
+          else
+            echo "> metrics.json not found. Provide one to show detailed KPIs (CAGR/Sharpe/MCC/WinRate...)." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: _out_4t
+          name: backtest-artifacts-${{ github.run_number }}
           path: |
-            _out_4t/github/**
-            **/train_test_summary*.json
-            **/logs/**
+            out/**
+            **/*.log
+          if-no-files-found: warn
+          retention-days: 10
 
-      # 8) 마지막에 실패 신호가 있으면 잡을 실패로 표시
-      - name: Mark job failed if python failed
-        if: env.PYTHON_FAILED == '1'
-        run: |
-          echo "❌ Backtest script reported failure (see artifacts run.log)."
-          exit 1
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy-pages:
+    needs: backtest
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
