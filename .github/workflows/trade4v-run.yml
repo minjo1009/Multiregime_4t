@@ -2,25 +2,25 @@ name: trade4v-run
 on:
   workflow_dispatch:
     inputs:
-      project_zip: { description: "project zip", default: "trade4v.zip", required: true }
-      data_zip:    { description: "ETH 1m zip in repo", default: "ETHUSDT_1min_2025H1.zip", required: true }
-      train_range: { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
-      test_range:  { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
-      H:           { description: "H forward bars", default: "11", required: true }
-      fee_bps:     { description: "one-way fee bps (0.1% = 10)", default: "10", required: true }
-      regime:      { description: "vol,z_low,z_high (or vol,z_thr)", default: "64,1.0,2.0", required: true }
-      goal:        { description: "objective (e.g., pnl,300-700)", default: "pnl,300-700", required: true }
-      goal_maps:   { description: "per-regime bounds (e.g., 0:150-400,1:180-320,2:60-180)", default: "0:150-400,1:180-320,2:60-180", required: true }
-      cal:         { description: "cal_frac,cal_bins", default: "0.40,200", required: true }
+      project_zip:  { description: "project zip in repo", default: "trade4v.zip", required: true }
+      data_zip:     { description: "ETH 1m zip OR csv in repo", default: "ETHUSDT_1min_2020_2025.csv", required: true }
+      train_range:  { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
+      test_range:   { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
+      H:            { description: "base H (used if H_map missing)", default: "15", required: true }
+      H_map:        { description: "per-regime H, e.g., 0:9,1:11,2:15", default: "0:9,1:11,2:15", required: true }
+      regime:       { description: "vol,z_low,z_high (or vol,z_thr)", default: "64,1.0,2.0", required: true }
+      goal:         { description: "objective (e.g., pnl,300-700)", default: "pnl,300-700", required: true }
+      goal_maps:    { description: "per-regime monthly bounds", default: "0:20-80,1:30-120,2:300-700", required: true }
+      params:       { description: "pack: cal;fee;gate;ev;size;filters;deoverlap", default: "cal=0.40,200;fee=10;gate=soft,0.1,20;ev=1.5;size=kelly,0.02,1.0;filters=0,20,0;deoverlap=1", required: true }
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@v5
         with: { python-version: "3.11" }
 
       - name: Unzip project
@@ -31,62 +31,128 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r trade4v/requirements.txt
 
-      - name: Prepare ETH 1m data
+      - name: Resolve & normalize ETH 1m (zip or csv)
+        shell: bash
         run: |
-          unzip -q "${{ github.event.inputs.data_zip }}" -d data
+          set -euo pipefail
+          DATA_IN="${{ github.event.inputs.data_zip }}"
+          if [[ -f "$DATA_IN" ]]; then
+            FOUND="$DATA_IN"
+          else
+            FOUND=$(find . -maxdepth 2 -type f \( -iname "*.zip" -o -iname "*.csv" \) \
+                     | grep -iE 'eth.*(1min|1m)|ethusdt.*(1min|1m)' \
+                     | head -n 1 || true)
+          fi
+          if [[ -z "${FOUND:-}" ]]; then
+            echo "❌ No data file found."; ls -la; exit 1
+          fi
+          echo "✅ Using data file: $FOUND"
+          mkdir -p data
+          if [[ "$FOUND" == *.zip ]]; then unzip -q "$FOUND" -d data; else cp "$FOUND" data/; fi
           python - <<'PY'
           import glob, pandas as pd, numpy as np
-          srcs = sorted(glob.glob("data/*.csv")); assert srcs, "No CSV in data zip"
-          df = pd.read_csv(srcs[0])
+          src = sorted(glob.glob("data/*.csv"))[0]
+          df = pd.read_csv(src)
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
+          if tcol is None: raise SystemExit("No time/open_time/ts column found")
           s = df[tcol]
           if np.issubdtype(s.dtype, np.number):
-            med=float(s.iloc[len(s)//2]); unit='ms' if med>1e11 else 's'
-            df["time"] = pd.to_datetime(s, unit=unit, utc=True)
+              med = float(s.iloc[len(s)//2]); unit = "ms" if med > 1e11 else "s"
+              df["time"] = pd.to_datetime(s, unit=unit, utc=True)
           else:
-            df["time"] = pd.to_datetime(s, utc=True)
-          for c in ["open","high","low","close"]: 
-            assert c in df.columns, f"Missing {c}"
+              df["time"] = pd.to_datetime(s, utc=True)
+          for c in ["open","high","low","close"]:
+              assert c in df.columns, f"Missing {c}"
           if "volume" not in df.columns:
-            cand=[c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
-            assert cand, "Missing volume"; df["volume"]=df[cand[0]]
+              cand = [c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
+              assert cand, "Missing volume"; df["volume"] = df[cand[0]]
           df[["time","open","high","low","close","volume"]].to_csv("normalized.csv", index=False)
           PY
           echo "DATA_PATH=normalized.csv" >> $GITHUB_ENV
 
-      - name: Parse ranges
+      - name: Parse ranges & params
         shell: bash
         run: |
+          set -euo pipefail
           IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
           IFS=',' read -r TEST_S  TEST_E  <<< "${{ github.event.inputs.test_range }}"
           echo "TRAIN_S=$TRAIN_S" >> $GITHUB_ENV
           echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
           echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
           echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
+          # defaults
+          CAL="0.40,200"; FEE_BPS="10"
+          GATE_MODE="soft"; THIN_FACTOR="0.1"; THIN_FLOOR="20"
+          EV_FLOOR_MULT="1.5"
+          SIZE_MODE="kelly"; RISK_BUDGET="0.02"; SIZE_MAX="1.0"
+          MIN_RANGE_BP="0"; RANGE_K="20"; SPIKE_BPS="0"
+          DOVL="1"
+          # parse packed params: cal=0.40,200;fee=10;gate=soft,0.1,20;ev=1.5;size=kelly,0.02,1.0;filters=0,20,0;deoverlap=1
+          PARAMS="${{ github.event.inputs.params }}"
+          IFS=';' read -ra KV <<< "$PARAMS"
+          for pair in "${KV[@]}"; do
+            key="${pair%%=*}"; val="${pair#*=}"
+            case "$key" in
+              cal) CAL="$val" ;;
+              fee) FEE_BPS="$val" ;;
+              gate) IFS=',' read -r GATE_MODE THIN_FACTOR THIN_FLOOR <<< "$val" ;;
+              ev) EV_FLOOR_MULT="$val" ;;
+              size) IFS=',' read -r SIZE_MODE RISK_BUDGET SIZE_MAX <<< "$val" ;;
+              filters) IFS=',' read -r MIN_RANGE_BP RANGE_K SPIKE_BPS <<< "$val" ;;
+              deoverlap) DOVL="$val" ;;
+            esac
+          done
+          {
+            echo "CAL=$CAL"
+            echo "FEE_BPS=$FEE_BPS"
+            echo "GATE_MODE=$GATE_MODE"
+            echo "THIN_FACTOR=$THIN_FACTOR"
+            echo "THIN_FLOOR=$THIN_FLOOR"
+            echo "EV_FLOOR_MULT=$EV_FLOOR_MULT"
+            echo "SIZE_MODE=$SIZE_MODE"
+            echo "RISK_BUDGET=$RISK_BUDGET"
+            echo "SIZE_MAX=$SIZE_MAX"
+            echo "MIN_RANGE_BP=$MIN_RANGE_BP"
+            echo "RANGE_K=$RANGE_K"
+            echo "SPIKE_BPS=$SPIKE_BPS"
+            echo "DOVL=$DOVL"
+          } >> $GITHUB_ENV
 
-      - name: Run backtest (EV+quota, soft gating)
+      - name: Run backtest (v1.5.1 EV-floor + sizing + H_map)
         env: { PYTHONWARNINGS: "ignore::FutureWarning" }
+        shell: bash
         run: |
+          set -euo pipefail
+          DOVL_FLAG=""
+          if [[ "${DOVL}" == "1" ]]; then DOVL_FLAG="--deoverlap"; fi
           python trade4v/run_4u.py \
-            --data        "${{ env.DATA_PATH }}" \
-            --train_start "${{ env.TRAIN_S }}" \
-            --train_end   "${{ env.TRAIN_E }}" \
-            --test_start  "${{ env.TEST_S }}" \
-            --test_end    "${{ env.TEST_E }}" \
-            --H           ${{ github.event.inputs.H }} \
-            --fee_bps     ${{ github.event.inputs.fee_bps }} \
+            --data        "${DATA_PATH}" \
+            --train_start "${TRAIN_S}" \
+            --train_end   "${TRAIN_E}" \
+            --test_start  "${TEST_S}" \
+            --test_end    "${TEST_E}" \
+            --H           "${{ github.event.inputs.H }}" \
+            --H_map       "${{ github.event.inputs.H_map }}" \
+            --fee_bps     "${FEE_BPS}" \
             --regime      "${{ github.event.inputs.regime }}" \
             --goal        "${{ github.event.inputs.goal }}" \
             --goal_maps   "${{ github.event.inputs.goal_maps }}" \
-            --cal         "${{ github.event.inputs.cal }}" \
-            --deoverlap \
-            --gate_mode soft \
-            --thin_factor 0.2 \
-            --thin_floor 30 \
+            --cal         "${CAL}" \
+            ${DOVL_FLAG} \
+            --gate_mode   "${GATE_MODE}" \
+            --thin_factor "${THIN_FACTOR}" \
+            --thin_floor  "${THIN_FLOOR}" \
+            --ev_floor_mult "${EV_FLOOR_MULT}" \
+            --size_mode   "${SIZE_MODE}" \
+            --risk_budget "${RISK_BUDGET}" \
+            --size_max    "${SIZE_MAX}" \
+            --min_range_bp "${MIN_RANGE_BP}" \
+            --range_k     "${RANGE_K}" \
+            --spike_bps   "${SPIKE_BPS}" \
             --max_train_rows 200000 \
             --out_dir _out_4u/github
 
       - name: Upload outputs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v4
         with: { name: trade4v-out, path: _out_4u/github/ }
