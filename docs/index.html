@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro v2.1 (Schema v1)</title>
+  <title>Trade4V Viewer Pro v2.2 (Schema v1)</title>
   <style>
     :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; }
     html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -28,17 +28,18 @@
     th:first-child, td:first-child { text-align:left; }
     .pos { color: var(--good); } .neg { color: var(--bad); }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+  <!-- Pinned versions -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0" integrity="" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js" integrity="" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" integrity="" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro v2.1</h1>
+    <h1>Trade4V Viewer Pro v2.2</h1>
     <div class="section">
-      <div class="muted">파일 드래그 앤 드롭 (창 아무 곳이나 가능)</div>
+      <div class="muted">파일 드래그 앤 드롭 (창 어디든 가능)</div>
       <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
       <div style="height:8px"></div>
       <div class="row"><input class="input" type="file" id="predsFile" accept=".csv" /><input class="input" type="file" id="metricsFile" accept="application/json" /></div>
@@ -129,8 +130,24 @@
 <div id="toast" class="toast" style="display:none"></div>
 
 <script>
-Chart.register(window['chartjs-plugin-zoom']);
-let RAW=null, MET=null, FILT=null, ALL=null;
+// ===== Chart.js safe plugin registration =====
+(function(){
+  try{
+    const zoom = window["chartjs-plugin-zoom"] || window.ChartZoom || window.chartjsPluginZoom;
+    if(zoom && window.Chart && window.Chart.register){
+      window.Chart.register(zoom);
+      console.log("[viewer] zoom plugin registered");
+    }else{
+      console.warn("[viewer] zoom plugin not found; charts will render without zoom.");
+    }
+  }catch(e){
+    console.warn("[viewer] zoom plugin registration failed:", e);
+  }
+})();
+</script>
+
+<script>
+let RAW=null, MET=null, FILT=null, ALL=null, charts={};
 const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
 const synonyms = {
   time: ["time","timestamp","open_time","date"],
@@ -164,7 +181,6 @@ function mapHeaders(rows){
   const keys = Object.keys(first);
   const up = k=> k.toLowerCase().replace(/\s+/g,'');
   const dict = {};
-  // Build mapping
   for(const req in synonyms){
     const cands = synonyms[req];
     for(const k of keys){
@@ -175,16 +191,12 @@ function mapHeaders(rows){
       if(dict[req]) break;
     }
   }
-  // Apply mapping
   return rows.map(r=>{
     const o={};
     for(const req of Object.keys(synonyms)){
       const k = dict[req];
-      if(k !== undefined){
-        o[req] = r[k];
-      }
+      if(k !== undefined){ o[req] = r[k]; }
     }
-    // keep extras
     for(const k in r){ if(!(k in o)) o[k]=r[k]; }
     return o;
   });
@@ -192,9 +204,7 @@ function mapHeaders(rows){
 
 function adaptRows(rows){
   if(!rows || rows.length===0) return rows;
-  // trim header whitespace
   rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
-  // try synonym mapping
   rows = mapHeaders(rows);
   const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
   let out = rows.map(r=>({...r}));
@@ -255,7 +265,11 @@ function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smoo
   return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries, deciles:dec, tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
 }
 
-let charts={};
+function mkChart(id, cfg){
+  if(charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id), cfg);
+}
+
 function draw(d){
   const $ = id=> document.getElementById(id);
   $("#k_trades").innerText = d.trades;
@@ -275,11 +289,7 @@ function draw(d){
   (on("showHist")?show:hide)("panelHist");
   (on("showDD")?show:hide)("panelDD");
 
-  function mkChart(key, cfg){
-    if(charts[key]) charts[key].destroy();
-    charts[key] = new Chart(document.getElementById(key), cfg);
-  }
-
+  // Equity
   if(on("showEquity")){
     const labels = d.series.map(s=> s.t);
     const data = d.series.map(s=> s.cum);
@@ -292,7 +302,7 @@ function draw(d){
       type:'line',
       data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
       options:{ parsing:false, scales:{ x:{ type:'time' } },
-        plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } }
+        plugins:{ zoom: (Chart.registry.plugins.get('zoom')? { zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } : {}) }
       }
     });
   }
@@ -405,6 +415,7 @@ async function handleFiles(files){
 
 async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
 
+// Inputs
 document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
 document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
 document.getElementById("btnForceRefresh").addEventListener("click", refresh);
@@ -425,7 +436,6 @@ document.querySelectorAll(".preset .btn").forEach(btn=>{
     if(label==="1M") s = minusDays(30);
     if(label==="3M") s = minusDays(90);
     if(label==="YTD"){ s = new Date(last.getFullYear(),0,1); }
-    // set pickers to local
     const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
     document.getElementById("start").value = toLocal(s);
     document.getElementById("end").value   = toLocal(e);
@@ -433,7 +443,7 @@ document.querySelectorAll(".preset .btn").forEach(btn=>{
   });
 });
 document.getElementById("btnApplyRange").addEventListener("click", refresh);
-document.getElementById("btnResetZoom").addEventListener("click", ()=>{ if(charts.equity) charts.equity.resetZoom(); });
+document.getElementById("btnResetZoom").addEventListener("click", ()=>{ try{ charts.equity.resetZoom(); }catch(e){} });
 document.getElementById("btnResetAll").addEventListener("click", ()=>{
   document.getElementById("rid0").checked=true;
   document.getElementById("rid1").checked=true;
@@ -454,7 +464,7 @@ document.getElementById("btnResetAll").addEventListener("click", ()=>{
   refresh();
 });
 
-// Window-wide drag & drop (document-level)
+// Window-wide drag & drop
 ["dragenter","dragover","dragleave","drop"].forEach(evt=>{
   document.addEventListener(evt, e=>{
     if(evt!=="drop"){ e.preventDefault(); }
