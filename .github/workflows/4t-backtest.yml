@@ -1,216 +1,128 @@
-name: 4u Backtest (no external actions)
+name: 4u Backtest (pure bash)
 
 on:
   workflow_dispatch:
     inputs:
-      code_zip:
-        description: '코드 ZIP 경로 (예: trend4u.zip). 비우면 레포 src/ 또는 trend4u/ 사용'
-        required: false
-        default: ''
-      data_zip:
-        description: '데이터 ZIP 경로 (예: ETHUSDT_1min_2020_2025.zip)'
-        required: false
-        default: ''
-      data_csv:
-        description: '데이터 CSV 경로 (ZIP 대신 단일 CSV로 실행시)'
-        required: false
-        default: ''
-      tz:
-        description: '타임존'
-        required: false
-        default: 'Asia/Seoul'
       run_args:
-        description: '추가 실행 인수 (예: --start 2023-01-01 --end 2025-01-01)'
+        description: '추가 실행 인수 (예: --start 2024-01-01 --end 2025-01-01)'
         required: false
         default: ''
       results_branch:
-        description: '결과 커밋할 브랜치'
+        description: '결과 커밋 브랜치'
         required: false
         default: 'backtest-results'
+
+permissions:
+  contents: write   # 결과 브랜치 푸시용
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
     env:
-      TZ: ${{ inputs.tz }}
+      TZ: Asia/Seoul
       SRC_DIR: ${{ github.workspace }}/src
       DATA_DIR: ${{ github.workspace }}/data
       OUT_DIR:  ${{ github.workspace }}/_out
       LOG_DIR:  ${{ github.workspace }}/_logs
       RESULTS_BRANCH: ${{ inputs.results_branch }}
     steps:
-      # 0) 레포 체크아웃: 외부 액션 없이 git만으로 현재 SHA를 가져온다
-      - name: Checkout repository (pure git)
+      - name: Checkout (no external action)
         shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          SHA:  ${{ github.sha }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
           mkdir -p "$LOG_DIR"
-          echo "Repo : $GITHUB_REPOSITORY"  | tee -a "$LOG_DIR/context.txt"
-          echo "SHA  : $GITHUB_SHA"         | tee -a "$LOG_DIR/context.txt"
-          echo "TZ   : $TZ"                 | tee -a "$LOG_DIR/context.txt"
+          echo "Repo: $REPO"         | tee -a "$LOG_DIR/context.txt"
+          echo "SHA : $SHA"          | tee -a "$LOG_DIR/context.txt"
+          echo "TZ  : $TZ"           | tee -a "$LOG_DIR/context.txt"
 
           git init
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git -c protocol.version=2 fetch --depth=1 origin "${GITHUB_SHA}"
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          git -c protocol.version=2 fetch --depth=1 origin "$SHA"
           git checkout --force FETCH_HEAD
 
-      # 1) 폴더 준비
       - name: Prepare folders
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$SRC_DIR" "$DATA_DIR" "$OUT_DIR" "$LOG_DIR"
-          echo "pwd=$(pwd)"        | tee -a "$LOG_DIR/steps.txt"
-          echo "tree (top-level):" | tee -a "$LOG_DIR/steps.txt"
-          ls -la | tee -a "$LOG_DIR/steps.txt"
+          echo "[root ls]"; ls -la | tee -a "$LOG_DIR/steps.txt"
 
-      # 2) 코드 ZIP 언팩 + 폴백 로직
-      - name: Unpack code zip (trend4u*.zip) to src/ with fallback
+      - name: Unpack code (trend4u.zip) → src/
         shell: bash
-        env:
-          WANT: ${{ inputs.code_zip }}
         run: |
           set -Eeuo pipefail
-          CODE_ZIP=""
-
-          if [[ -n "${WANT}" && -f "${WANT}" ]]; then
-            CODE_ZIP="${WANT}"
-          else
-            # 루트에서 자동 탐색 (trend4u*.zip)
-            CODE_ZIP="$(ls -1 | grep -E '^trend4u.*\.zip$' | head -n1 || true)"
-          fi
-
-          if [[ -n "${CODE_ZIP:-}" ]]; then
-            echo "Using code zip: ${CODE_ZIP}" | tee -a "$LOG_DIR/steps.txt"
-            rm -rf _code_tmp
-            mkdir -p _code_tmp
-            unzip -q "${CODE_ZIP}" -d _code_tmp
-            if [[ -d _code_tmp/src ]]; then
-              rsync -a _code_tmp/src/ "$SRC_DIR"/
-            elif [[ -d _code_tmp/trend4u ]]; then
-              mkdir -p "$SRC_DIR"
+          if [[ -f trend4u.zip ]]; then
+            echo "Using trend4u.zip" | tee -a "$LOG_DIR/steps.txt"
+            rm -rf _code_tmp && mkdir -p _code_tmp
+            unzip -q trend4u.zip -d _code_tmp
+            # 네가 준 구조: 최상위가 trend4u/
+            if [[ -d _code_tmp/trend4u ]]; then
               rsync -a _code_tmp/trend4u/ "$SRC_DIR"/trend4u/
+            elif [[ -d _code_tmp/src ]]; then
+              rsync -a _code_tmp/src/ "$SRC_DIR"/
             else
               rsync -a _code_tmp/ "$SRC_DIR"/
             fi
             rm -rf _code_tmp
+          elif [[ -d src ]]; then
+            rsync -a src/ "$SRC_DIR"/
+          elif [[ -d trend4u ]]; then
+            rsync -a trend4u/ "$SRC_DIR"/trend4u/
           else
-            echo "No code zip found; falling back to repo source." | tee -a "$LOG_DIR/steps.txt"
-            if [[ -d src ]]; then
-              rsync -a src/ "$SRC_DIR"/
-            elif [[ -d trend4u ]]; then
-              mkdir -p "$SRC_DIR"
-              rsync -a trend4u/ "$SRC_DIR"/trend4u/
-            else
-              echo "ERROR: neither trend4u.zip nor src/ nor trend4u/ present." | tee -a "$LOG_DIR/steps.txt"
-              exit 1
-            end
+            echo "::error::trend4u.zip, src/, trend4u/ 중 아무것도 없음"
+            exit 1
           fi
 
-          echo "SRC tree snapshot:" | tee -a "$LOG_DIR/steps.txt"
-          (cd "$SRC_DIR" && ls -la && find . -maxdepth 2 -type f | sort | tee -a "$LOG_DIR/steps.txt")
-
-      # 3) 핫픽스 (과거 SyntaxError 등 자동 수선)
-      - name: Hotfix package init / runner shim
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          # trend4p/__init__.py 의 .__all__ -> __all__
-          if [[ -f "$SRC_DIR/trend4u/trend4p/__init__.py" ]]; then
-            sed -i "1s/^\.__all__/__all__/" "$SRC_DIR/trend4u/trend4p/__init__.py" || true
-          fi
-          # run_4u 모듈 없으면 셔임 생성
-          if [[ ! -f "$SRC_DIR/trend4u/run_4u.py" ]]; then
-            mkdir -p "$SRC_DIR/trend4u"
-            cat > "$SRC_DIR/trend4u/run_4u.py" <<'PY'
-import sys, os
-# 데이터 디렉토리/출력 디렉토리 기본값
-DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.getcwd(), "data"))
-OUT_DIR  = os.environ.get("OUT_DIR",  os.path.join(os.getcwd(), "_out"))
-os.makedirs(OUT_DIR, exist_ok=True)
-# 실행 엔트리: trend4p.execution_4u.backtest(backtest_config) 호출 시도
-try:
-    from trend4u.trend4p.execution_4u import backtest
-except Exception as e:
-    print("[runner] cannot import trend4u.trend4p.execution_4u.backtest:", e)
-    sys.exit(1)
-
-def main():
-    # 최소 실행: 데이터 디렉토리 내 첫 CSV 파일로 백테스트
-    import glob, json
-    csvs = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")))
-    if not csvs:
-        print("[runner] no CSV found in", DATA_DIR)
-        sys.exit(2)
-    cfg = {"csv_path": csvs[0], "out_dir": OUT_DIR}
-    try:
-        res = backtest(cfg)
-    except TypeError:
-        # 다른 시그니처 대비
-        res = backtest(csvs[0], OUT_DIR)
-    # 결과 요약 저장 (있으면)
-    summ = {"ok": True, "csv": csvs[0], "out_dir": OUT_DIR}
-    with open(os.path.join(OUT_DIR, "backtest_summary.json"), "w") as f:
-        json.dump(summ, f, ensure_ascii=False, indent=2)
-
-if __name__ == "__main__":
-    main()
-PY
-          fi
-
-      # 4) 데이터 ZIP/CSV 준비 (ZIP -> data/, CSV 직접 사용, 다운로드 폴백)
-      - name: Prepare data
-        shell: bash
-        env:
-          WANT_ZIP: ${{ inputs.data_zip }}
-          WANT_CSV: ${{ inputs.data_csv }}
-        run: |
-          set -Eeuo pipefail
-          DATA_ZIP=""
-          # 우선 입력값
-          if [[ -n "${WANT_ZIP}" && -f "${WANT_ZIP}" ]]; then
-            DATA_ZIP="${WANT_ZIP}"
-          fi
-          # 루트 자동 탐색
-          if [[ -z "${DATA_ZIP}" ]]; then
-            CAND="$(ls -1 | grep -E '^(ETH|ETHUSDT).*1min.*(2025|2020).*\.zip$' | head -n1 || true)"
-            [[ -n "${CAND}" ]] && DATA_ZIP="${CAND}"
-          fi
-          # CSV 직접 지정 시
-          if [[ -n "${WANT_CSV}" && -f "${WANT_CSV}" ]]; then
-            mkdir -p "$DATA_DIR"
-            cp -f "${WANT_CSV}" "$DATA_DIR"/
-          fi
-          # ZIP 있으면 언팩
-          if [[ -n "${DATA_ZIP}" ]]; then
-            echo "Using data zip: ${DATA_ZIP}" | tee -a "$LOG_DIR/steps.txt"
-            unzip -q "${DATA_ZIP}" -d "$DATA_DIR"
-          elif [[ -z "${WANT_CSV}" ]]; then
-            # 시크릿 URL 폴백 (선택)
-            if [[ -n "${DATA_DOWNLOAD_URL:-}" ]]; then
-              echo "Downloading data from secret URL..." | tee -a "$LOG_DIR/steps.txt"
-              curl -fsSL -o /tmp/data.zip "${DATA_DOWNLOAD_URL}"
-              unzip -q /tmp/data.zip -d "$DATA_DIR"
-            else
-              echo "WARNING: No data provided. If your code 생성 로직이 내부에서 다운로드한다면 무시해도 됨." | tee -a "$LOG_DIR/steps.txt"
+          # trend4p/__init__.py 과거 문법오류 핫픽스 (. __all__ → __all__)
+          INIT="$SRC_DIR/trend4u/trend4p/__init__.py"
+          if [[ -f "$INIT" ]]; then
+            sed -i '1s/^[[:space:]]*\.[[:space:]]*__all__/__all__/' "$INIT" || true
+            if ! grep -q "__all__" "$INIT"; then
+              printf "__all__=['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']\n" >> "$INIT"
             fi
           fi
-          echo "DATA tree snapshot:" | tee -a "$LOG_DIR/steps.txt"
-          (cd "$DATA_DIR" && ls -la || true)
 
-      # 5) Python 설치 (시스템 파이썬 사용) + deps
-      - name: Install Python deps
+          echo "[src tree]"
+          (cd "$SRC_DIR" && find . -maxdepth 3 -type f | sort | tee -a "$LOG_DIR/src_tree.txt")
+
+      - name: Prepare data (ETHUSDT_1min_2020_2025.zip or CSV)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -f ETHUSDT_1min_2020_2025.zip ]]; then
+            echo "Using ETHUSDT_1min_2020_2025.zip" | tee -a "$LOG_DIR/steps.txt"
+            unzip -q ETHUSDT_1min_2020_2025.zip -d "$DATA_DIR"
+          else
+            # 루트 CSV 폴백
+            shopt -s nullglob
+            CSV=(ETHUSDT_1min_2020_2025.csv *.csv)
+            if [[ ${#CSV[@]} -gt 0 ]]; then
+              mkdir -p "$DATA_DIR"
+              cp -f "${CSV[@]}" "$DATA_DIR"/
+            else
+              echo "::warning::데이터 ZIP/CSV가 없습니다. 코드가 내부에서 다운로드하지 않으면 결과가 비어 있을 수 있음."
+            fi
+          fi
+          echo "[data tree]"
+          (cd "$DATA_DIR" && ls -la || true) | tee -a "$LOG_DIR/steps.txt"
+          head -n 5 "$(find "$DATA_DIR" -type f -name '*.csv' | head -n1)" 2>/dev/null | tee "$LOG_DIR/sample_data_head.txt" || true
+
+      - name: Install deps (python3 -m pip)
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 --version | tee -a "$LOG_DIR/versions.txt"
-          if [[ -f "requirements.txt" ]]; then
+          if [[ -f requirements.txt ]]; then
             python3 -m pip install --upgrade pip
             python3 -m pip install -r requirements.txt
           elif [[ -f "$SRC_DIR/requirements.txt" ]]; then
             python3 -m pip install --upgrade pip
             python3 -m pip install -r "$SRC_DIR/requirements.txt"
-          elif [[ -f "pyproject.toml" ]]; then
+          elif [[ -f pyproject.toml ]]; then
             python3 -m pip install --upgrade pip
             python3 -m pip install .
           else
@@ -218,7 +130,6 @@ PY
             python3 -m pip install numpy pandas matplotlib ta scikit-learn python-dateutil pytz
           fi
 
-      # 6) 백테스트 실행
       - name: Run backtest
         shell: bash
         env:
@@ -229,68 +140,56 @@ PY
           export PYTHONPATH="${PYTHONPATH:-${GITHUB_WORKSPACE}/src}"
           echo "PYTHONPATH=$PYTHONPATH" | tee -a "$LOG_DIR/steps.txt"
 
-          # 가장 일반적인 엔트리: 모듈 실행
+          # 표준 엔트리
           set +e
           python3 -m trend4u.run_4u ${{ inputs.run_args }} 2>&1 | tee "$LOG_DIR/backtest_stdout.txt"
           rc=${PIPESTATUS[0]}
           set -e
-          echo "backtest exit code: $rc" | tee -a "$LOG_DIR/steps.txt"
-          if [[ $rc -ne 0 ]]; then
-            echo "Backtest failed (exit $rc). See _logs/backtest_stdout.txt" >&2
-            exit $rc
-          fi
+          echo "exit_code=$rc" | tee -a "$LOG_DIR/steps.txt"
+          echo "$rc" > "$LOG_DIR/exit_code.txt"
 
-      # 7) 결과/로그 수집
-      - name: Collect artifacts to _out/
+      - name: Collect artifacts → _out/
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "$OUT_DIR"
-          # 흔한 산출물 패턴을 스캔해서 복사
-          find . -maxdepth 3 -type f \( \
+          find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \( \
             -name 'train_test_summary.json' -o \
             -name 'backtest_summary.json' -o \
             -name 'equity_curve*.csv' -o \
             -name 'trades*.csv' -o \
             -name 'report*.html' -o \
             -name 'fig_*.png' \
-          \) -print0 | while IFS= read -r -d '' p; do
-            cp "$p" "$OUT_DIR"/ || true
-          done
+          \) -print0 | while IFS= read -r -d '' p; do cp "$p" "$OUT_DIR"/ || true; done
+          echo "[out tree]"; (cd "$OUT_DIR" && ls -la | tee -a "$LOG_DIR/steps.txt") || true
 
-          echo "No train_test_summary.json generated." > "$OUT_DIR/_summary_note.txt"
-          echo "OUT tree snapshot:" | tee -a "$LOG_DIR/steps.txt"
-          (cd "$OUT_DIR" && ls -la | tee -a "$LOG_DIR/steps.txt")
-
-      # 8) 결과 브랜치로 커밋/푸시 (upload-artifact 대체)
-      - name: Publish results to branch
+      - name: Publish results to branch (no external action)
         if: always()
         shell: bash
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
-          BR="${RESULTS_BRANCH}"
-          RUN_ID="${GITHUB_RUN_ID}"
-          RUN_DIR="_runs/${RUN_ID}"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BR="$RESULTS_BRANCH"
+          RUN_DIR="_runs/${GITHUB_RUN_ID}"
+          TMP="$(mktemp -d)"
+          mkdir -p "$TMP/${RUN_DIR}"
+          rsync -a "$OUT_DIR"/ "$TMP/${RUN_DIR}/" || true
+          rsync -a "$LOG_DIR"/ "$TMP/${RUN_DIR}/logs/" || true
 
-          # 새로운 작업 트리로 결과만 커밋
-          TMP_DIR="$(mktemp -d)"
-          rsync -a "$OUT_DIR"/ "$TMP_DIR/${RUN_DIR}/"
-          rsync -a "$LOG_DIR"/ "$TMP_DIR/${RUN_DIR}/logs/"
-          ( cd "$TMP_DIR"
+          ( cd "$TMP"
             git init
-            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git fetch origin "$BR" || true
             git checkout -B "$BR"
-            mkdir -p "${RUN_DIR}"
             git add .
-            git commit -m "Backtest results for run ${RUN_ID} (SHA ${GITHUB_SHA})" || true
+            git commit -m "Backtest run ${GITHUB_RUN_ID} (SHA ${GITHUB_SHA})" || true
             git push -f origin "$BR"
           )
-          echo "Results pushed to branch: ${BR}  path: ${RUN_DIR}" | tee -a "$LOG_DIR/steps.txt"
+          echo "pushed: $BR / $RUN_DIR" | tee -a "$LOG_DIR/steps.txt"
 
-      # 9) 요약 출력 (Job Summary)
       - name: Job summary
         if: always()
         shell: bash
@@ -298,11 +197,14 @@ PY
           set -Eeuo pipefail
           {
             echo "## 4u Backtest — Summary"
-            if [[ ! -f "$OUT_DIR/train_test_summary.json" && ! -f "$OUT_DIR/backtest_summary.json" ]]; then
+            if [[ -f "$OUT_DIR/train_test_summary.json" ]]; then
+              echo ""
+              echo "\`\`\`json"; sed -n '1,200p' "$OUT_DIR/train_test_summary.json"; echo "\`\`\`"
+            else
               echo "- No train_test_summary.json generated."
             fi
-            echo
+            echo ""
             echo "### Logs"
-            echo "- **context.txt**";  echo '```'; cat "$LOG_DIR/context.txt" || true; echo '```'
-            echo "- **versions.txt**"; echo '```'; cat "$LOG_DIR/versions.txt" || true; echo '```'
+            echo "- **context.txt**";  echo '```'; sed -n '1,120p' "$LOG_DIR/context.txt" 2>/dev/null; echo '```'
+            echo "- **exit_code**: $(cat "$LOG_DIR/exit_code.txt" 2>/dev/null || echo 'n/a')"
           } >> "$GITHUB_STEP_SUMMARY"
