@@ -18,9 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with: { python-version: "3.11" }
 
       - name: Unzip project
@@ -81,14 +82,12 @@ jobs:
           echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
           echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
           echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
-          # defaults
           CAL="0.40,200"; FEE_BPS="10"
           GATE_MODE="soft"; THIN_FACTOR="0.1"; THIN_FLOOR="20"
           EV_FLOOR_MULT="1.5"
           SIZE_MODE="kelly"; RISK_BUDGET="0.02"; SIZE_MAX="1.0"
           MIN_RANGE_BP="0"; RANGE_K="20"; SPIKE_BPS="0"
           DOVL="1"
-          # parse packed params: cal=0.40,200;fee=10;gate=soft,0.1,20;ev=1.5;size=kelly,0.02,1.0;filters=0,20,0;deoverlap=1
           PARAMS="${{ github.event.inputs.params }}"
           IFS=';' read -ra KV <<< "$PARAMS"
           for pair in "${KV[@]}"; do
@@ -154,5 +153,5 @@ jobs:
             --out_dir _out_4u/github
 
       - name: Upload outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with: { name: trade4v-out, path: _out_4u/github/ }
