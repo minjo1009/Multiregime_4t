@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro (Schema v1)</title>
+  <title>Trade4V Viewer Pro v2 (Schema v1)</title>
   <style>
-    :root { --bg:#0b1220; --panel:#111827; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; }
+    :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; }
     html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     .wrap { display:flex; height:100%; }
-    .side { width:320px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
+    .side { width:340px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
     .main { flex:1; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto; }
     h1 { margin:0 0 12px; font-size:18px; font-weight:600; }
     .section { margin-bottom:16px; }
@@ -19,13 +19,14 @@
     .card { background: var(--card); border:1px solid #1f2937; border-radius:12px; padding:12px; }
     .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:10px; }
     .muted { color: var(--muted); font-size:12px; }
-    .switch { display:flex; align-items:center; gap:8px; }
     .kpi { font-size:22px; font-weight:700; }
-    .sep { height:1px; background:#1f2937; margin:12px 0; }
-    .badge { font-size:11px; background:#0b1220; padding:2px 6px; border-radius:6px; border:1px solid #1f2937; }
-    a.link { color:#93c5fd; text-decoration:none; }
-    a.link:hover { text-decoration:underline; }
     .drpz { border:2px dashed #334155; border-radius:12px; padding:12px; text-align:center; color:#9ca3af; }
+    .preset .btn { font-size:12px; padding:6px 8px; }
+    .toast { position:fixed; right:16px; bottom:16px; background:#111827; border:1px solid #374151; border-radius:10px; padding:10px 12px; color:#e5e7eb; opacity:0.95; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:6px 8px; border-bottom:1px solid #1f2937; font-size:12px; text-align:right; }
+    th:first-child, td:first-child { text-align:left; }
+    .pos { color: var(--good); } .neg { color: var(--bad); }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -35,12 +36,13 @@
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro</h1>
+    <h1>Trade4V Viewer Pro v2</h1>
     <div class="section">
-      <div class="muted">파일 드래그 앤 드롭</div>
+      <div class="muted">파일 드래그 앤 드롭 (창 어디든 드롭 가능)</div>
       <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
       <div style="height:8px"></div>
       <div class="row"><input class="input" type="file" id="predsFile" accept=".csv" /><input class="input" type="file" id="metricsFile" accept="application/json" /></div>
+      <div class="muted" id="status">-</div>
     </div>
     <div class="section">
       <div class="muted">URL로 불러오기 (raw 링크)</div>
@@ -48,9 +50,19 @@
       <input class="input" id="metricsURL" placeholder="metrics.json raw URL">
       <div class="row"><button class="btn" id="btnLoadURL">불러오기</button><span id="loadMsg" class="muted"></span></div>
     </div>
-    <div class="sep"></div>
+    <div class="section preset">
+      <div class="muted">기간 빠른 선택</div>
+      <div class="row">
+        <button class="btn" data-range="1D">1D</button>
+        <button class="btn" data-range="1W">1W</button>
+        <button class="btn" data-range="1M">1M</button>
+        <button class="btn" data-range="3M">3M</button>
+        <button class="btn" data-range="YTD">YTD</button>
+        <button class="btn" data-range="ALL">ALL</button>
+      </div>
+    </div>
     <div class="section">
-      <div class="muted">기간 선택</div>
+      <div class="muted">기간 수동 선택</div>
       <div class="row">
         <input class="input" id="start" type="datetime-local">
         <input class="input" id="end" type="datetime-local">
@@ -58,42 +70,38 @@
       <div class="row">
         <button class="btn" id="btnApplyRange">적용</button>
         <button class="btn" id="btnResetZoom">줌 리셋</button>
+        <button class="btn" id="btnResetAll">전체 리셋</button>
       </div>
     </div>
     <div class="section">
       <div class="muted">레짐 필터</div>
       <div class="row">
-        <label class="switch"><input type="checkbox" id="rid0" checked> R0</label>
-        <label class="switch"><input type="checkbox" id="rid1" checked> R1</label>
-        <label class="switch"><input type="checkbox" id="rid2" checked> R2</label>
+        <label><input type="checkbox" id="rid0" checked> R0</label>
+        <label><input type="checkbox" id="rid1" checked> R1</label>
+        <label><input type="checkbox" id="rid2" checked> R2</label>
       </div>
     </div>
     <div class="section">
       <div class="muted">표시 요소</div>
       <div class="row" style="flex-direction:column; align-items:flex-start;">
-        <label class="switch"><input type="checkbox" id="showEquity" checked> 누적 PnL 라인</label>
-        <label class="switch"><input type="checkbox" id="showBars" checked> 일별 PnL 바</label>
-        <label class="switch"><input type="checkbox" id="showScatter" checked> EV vs 실현 산포</label>
-        <label class="switch"><input type="checkbox" id="showHist" checked> EV 히스토그램</label>
+        <label><input type="checkbox" id="showEquity" checked> 누적 PnL 라인</label>
+        <label><input type="checkbox" id="showBars" checked> 일별 PnL 바</label>
+        <label><input type="checkbox" id="showScatter" checked> EV vs 실현 산포</label>
+        <label><input type="checkbox" id="showHist" checked> EV 히스토그램</label>
+        <label><input type="checkbox" id="showDD" checked> 드로우다운</label>
       </div>
     </div>
     <div class="section">
-      <div class="muted">세부</div>
-      <div class="row">
-        <label>스무딩(롤링):
-          <select id="smooth" class="input">
-            <option value="1">x1</option>
-            <option value="5">x5</option>
-            <option value="15">x15</option>
-          </select>
-        </label>
-        <button class="btn" id="btnExport">analytics.json 저장</button>
-      </div>
+      <div class="muted">스무딩(Equity)</div>
+      <select id="smooth" class="input">
+        <option value="1">x1</option>
+        <option value="5">x5</option>
+        <option value="15">x15</option>
+      </select>
     </div>
-    <div class="sep"></div>
     <div class="section">
       <div class="muted">스키마</div>
-      <div id="schemaInfo" class="badge">-</div>
+      <div id="schemaInfo" class="muted">-</div>
     </div>
   </aside>
 
@@ -108,47 +116,54 @@
     </div>
     <div id="panelEquity" class="card"><canvas id="equity" height="120"></canvas></div>
     <div id="panelBars" class="card"><canvas id="barPnL" height="120"></canvas></div>
-    <div id="panelScatter" class="card"><canvas id="scatter" height="120"></canvas></div>
+    <div id="panelDD" class="card"><canvas id="drawdown" height="120"></canvas></div>
+    <div id="panelScatter" class="card"><canvas id="scatter" height="140"></canvas></div>
     <div id="panelHist" class="card"><canvas id="hist" height="120"></canvas></div>
+    <div class="card">
+      <div class="muted">EV Deciles</div>
+      <table id="deciles"><thead><tr><th>Bucket</th><th>Count</th><th>EV Sum</th><th>Realized Sum</th><th>Eff</th></tr></thead><tbody></tbody></table>
+    </div>
   </main>
 </div>
 
+<div id="toast" class="toast" style="display:none"></div>
+
 <script>
 Chart.register(window['chartjs-plugin-zoom']);
-let RAW=null, MET=null, FILT=null;
+let RAW=null, MET=null, FILT=null, ALL=null;
 const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
 
-function fmtPct(x){ if(!isFinite(x)) return "-"; return (x*100).toFixed(1)+"%"; }
-function fmtNum(x, d=4){ if(!isFinite(x)) return "-"; return Number(x).toFixed(d); }
-function toISO(dt){ return dt.toISOString().slice(0,16); }
+function toast(msg){
+  const t=document.getElementById('toast'); t.innerText=msg; t.style.display='block';
+  setTimeout(()=>{ t.style.display='none'; }, 2500);
+}
+function setStatus(msg){ document.getElementById('status').innerText = msg; }
 
-// Schema adapter (v1 stable, forward compatible)
+function safeParseTime(v){
+  if(typeof v === 'number'){ return new Date(v); }
+  if(typeof v === 'string'){
+    // add 'Z' if no timezone
+    if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
+    return new Date(v);
+  }
+  return new Date(v);
+}
 function adaptRows(rows){
   if(!rows || rows.length===0) return rows;
-  const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
-  let out=rows.map(r=>({...r}));
-  if(!has("ev_final") && has("ev_net")){
-    out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
-  }
-  // Ensure required
+  const norm = rows.map(obj=>{
+    const r={}; for(const k in obj){ r[k.trim()] = obj[k]; }
+    return r;
+  });
+  const has = k=> Object.prototype.hasOwnProperty.call(norm[0], k);
+  let out = norm.map(r=>({...r}));
+  if(!has("ev_final") && has("ev_net")) out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
   const miss = needCols.filter(c=> !(c in out[0]));
   if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
   return out;
 }
-
-function parseCSV(file){
-  return new Promise((res,rej)=>{ Papa.parse(file,{ header:true, dynamicTyping:true, complete:r=>res(r.data), error:rej }); });
-}
-async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
-
-function setSchemaBadge(){
-  const v = (MET && MET.viewer_schema) ? MET.viewer_schema : "v1?";
-  document.getElementById("schemaInfo").innerText = "viewer_schema: "+v;
-}
-
 function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
   const p = rows.map(r=>({ ...r,
-    time: new Date(r.time),
+    time: safeParseTime(r.time),
     regime_id: Number(r.regime_id),
     H_row: Number(r.H_row||1),
     ev_final: Number(r.ev_final||0),
@@ -158,9 +173,10 @@ function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smoo
     net_event: Number(r.net_event||0),
   })).filter(r=> ridMask[r.regime_id]);
   const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
+
   const selected = p2.filter(r=> r.entry_flag===1);
   const withSize = selected.map(r=> ({...r, pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
-  // KPIs
+
   const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
   const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
   const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
@@ -169,78 +185,100 @@ function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smoo
   const wins = withSize.filter(r=> r.gross_event>0).length;
   const hit = selected.length? wins/selected.length : 0;
   const evPos = p2.length? p2.filter(r=> r.ev_final>=0).length/p2.length : 0;
-  // Equity (exit-time impulses)
+
   const impulses = withSize.map(r=> ({ t:r.exit, v:r.pnl })).sort((a,b)=>a.t-b.t);
-  let cum=0; let series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
-  if(smooth>1 && series.length>smooth){
-    const sm=[]; for(let i=0;i<series.length;i++){const a=Math.max(0,i-smooth+1); const chunk=series.slice(a,i+1); sm.push({t:series[i].t, cum: chunk.reduce((x,y)=>x+y.cum,0)/chunk.length});} series=sm;
-  }
-  // Daily bars
-  const dayMap = {};
-  withSize.forEach(r=>{
-    const key = r.exit.toISOString().slice(0,10);
-    dayMap[key] = (dayMap[key]||0) + r.pnl;
-  });
+  let cum=0; const series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
+
+  const dayMap={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); dayMap[k]=(dayMap[k]||0)+r.pnl; });
   const days = Object.keys(dayMap).sort().map(k=> ({ day:k, pnl: dayMap[k] }));
-  // Scatter
+
   const scatter = withSize.map(r=> ({ x:r.ev_final, y:r.pnl }));
-  // Hist EV
+
   const evs = p2.map(r=> r.ev_final);
-  return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs };
+
+  // Drawdown
+  let peak = 0, eq=0, ddSeries=[];
+  series.forEach(s=>{ eq=s.cum; peak=Math.max(peak, eq); ddSeries.push({t:s.t, dd: peak - eq}); });
+
+  // Deciles
+  const evSel = selected.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
+  const buckets = 10;
+  let cuts=[]; for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
+  function bucketOf(v){ let b=0; while(b<cuts.length && v>cuts[b]) b++; return b; }
+  const agg = Array.from({length:buckets},()=>({cnt:0, ev:0, real:0}));
+  withSize.forEach(r=>{ const b = bucketOf(r.ev_final); agg[b].cnt++; agg[b].ev += r.ev_final; agg[b].real += r.pnl; });
+  const dec = agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
+
+  return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries, deciles:dec, tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
 }
 
-let eqChart=null, barChart=null, scChart=null, histChart=null;
+let charts={};
 function draw(d){
-  document.getElementById("k_trades").innerText = d.trades;
-  document.getElementById("k_hit").innerText = fmtPct(d.hit);
-  document.getElementById("k_pnl").innerText = fmtNum(d.pnl);
-  document.getElementById("k_evpos").innerText = fmtPct(d.evPos);
-  document.getElementById("k_eff").innerText = fmtNum(d.eff);
-  document.getElementById("k_effw").innerText = fmtNum(d.effW);
+  const $ = id=> document.getElementById(id);
+  $("#k_trades").innerText = d.trades;
+  $("#k_hit").innerText = (d.hit*100).toFixed(1)+"%";
+  $("#k_pnl").innerText = d.pnl.toFixed(4);
+  $("#k_evpos").innerText = (d.evPos*100).toFixed(1)+"%";
+  $("#k_eff").innerText = d.eff.toFixed(3);
+  $("#k_effw").innerText = d.effW.toFixed(3);
 
-  const showEquity = document.getElementById("showEquity").checked;
-  const showBars   = document.getElementById("showBars").checked;
-  const showScatter= document.getElementById("showScatter").checked;
-  const showHist   = document.getElementById("showHist").checked;
+  const show = id=> document.getElementById(id).style.display = 'block';
+  const hide = id=> document.getElementById(id).style.display = 'none';
+  const on = id=> document.getElementById(id).checked;
 
-  document.getElementById("panelEquity").style.display = showEquity ? "block":"none";
-  document.getElementById("panelBars").style.display   = showBars   ? "block":"none";
-  document.getElementById("panelScatter").style.display= showScatter? "block":"none";
-  document.getElementById("panelHist").style.display   = showHist   ? "block":"none";
+  (on("showEquity")?show:hide)("panelEquity");
+  (on("showBars")?show:hide)("panelBars");
+  (on("showScatter")?show:hide)("panelScatter");
+  (on("showHist")?show:hide)("panelHist");
+  (on("showDD")?show:hide)("panelDD");
 
-  if(showEquity){
+  function mkChart(key, cfg){
+    if(charts[key]) charts[key].destroy();
+    charts[key] = new Chart(document.getElementById(key), cfg);
+  }
+
+  if(on("showEquity")){
     const labels = d.series.map(s=> s.t);
     const data = d.series.map(s=> s.cum);
-    if(eqChart) eqChart.destroy();
-    eqChart = new Chart(document.getElementById("equity"), {
+    const smooth = parseInt(document.getElementById("smooth").value||"1",10);
+    let smData=data;
+    if(smooth>1 && data.length>smooth){
+      smData=[]; for(let i=0;i<data.length;i++){ const a=Math.max(0, i-smooth+1); const chunk=data.slice(a,i+1); smData.push(chunk.reduce((x,y)=>x+y,0)/chunk.length); }
+    }
+    mkChart('equity', {
       type:'line',
-      data:{ labels, datasets:[{ label:'Cumulative PnL', data, pointRadius:0 }]},
-      options:{ parsing:false, scales:{ x:{ type:'time' } }, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' } } } }
+      data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
+      options:{ parsing:false, scales:{ x:{ type:'time' } },
+        plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } }
+      }
     });
   }
 
-  if(showBars){
-    const labels = d.days.map(x=> x.day);
-    const data   = d.days.map(x=> x.pnl);
-    if(barChart) barChart.destroy();
-    barChart = new Chart(document.getElementById("barPnL"), {
+  if(on("showBars")){
+    mkChart('barPnL', {
       type:'bar',
-      data:{ labels, datasets:[{ label:'Daily PnL', data }]},
-      options:{ parsing:false, scales:{ x:{ ticks:{ maxRotation:0 } } } }
+      data:{ labels: d.days.map(x=> x.day), datasets:[{ label:'Daily PnL', data: d.days.map(x=> x.pnl) }]},
+      options:{ scales:{ x:{ ticks:{ maxRotation:0 } } } }
     });
   }
 
-  if(showScatter){
-    if(scChart) scChart.destroy();
-    scChart = new Chart(document.getElementById("scatter"), {
+  if(on("showDD")){
+    mkChart('drawdown', {
+      type:'line',
+      data:{ labels: d.ddSeries.map(s=> s.t), datasets:[{ label:'Drawdown', data: d.ddSeries.map(s=> s.dd), pointRadius:0 }]},
+      options:{ parsing:false, scales:{ x:{ type:'time' } } }
+    });
+  }
+
+  if(on("showScatter")){
+    mkChart('scatter', {
       type:'scatter',
       data:{ datasets:[{ label:'EV vs Realized', data: d.scatter }]},
-      options:{ scales:{ x:{ title:{display:true,text:'EV(final)'} }, y:{ title:{display:true,text:'Realized(net*size)'} } } }
+      options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} } }
     });
   }
 
-  if(showHist){
-    // Simple histogram bins
+  if(on("showHist")){
     const evs = d.evs.slice().sort((a,b)=>a-b);
     const bins = 30; const min = evs.length? evs[0]:0; const max = evs.length? evs[evs.length-1]:1;
     const step = (max-min)/(bins||1) || 1;
@@ -248,13 +286,17 @@ function draw(d){
     const counts = Array.from({length:bins}, ()=>0);
     evs.forEach(v=>{ const idx = Math.max(0, Math.min(bins-1, Math.floor((v-min)/step))); counts[idx]++; });
     const centers = edges.map((e,i)=> e + step/2);
-    if(histChart) histChart.destroy();
-    histChart = new Chart(document.getElementById("hist"), {
-      type:'bar',
-      data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]},
-      options:{ scales:{ x:{ title:{display:true,text:'EV'}, ticks:{ display:false } } } }
-    });
+    mkChart('hist', { type:'bar', data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]}, options:{ scales:{ x:{ ticks:{ display:false }}} } });
   }
+
+  // Deciles
+  const tb = document.querySelector("#deciles tbody"); tb.innerHTML="";
+  d.deciles.forEach(g=>{
+    const tr=document.createElement("tr");
+    const eff = (g.ev>0)? (g.real/g.ev) : 0;
+    tr.innerHTML = `<td>${g.bucket}</td><td>${g.cnt}</td><td>${g.ev.toFixed(4)}</td><td class="${g.real>=0?'pos':'neg'}">${g.real.toFixed(4)}</td><td>${eff.toFixed(3)}</td>`;
+    tb.appendChild(tr);
+  });
 }
 
 function getFilters(){
@@ -268,63 +310,107 @@ function getFilters(){
 }
 
 function refresh(){
-  if(!RAW || !MET) return;
+  if(!ALL) return;
   const { start, end, ridMask, smooth } = getFilters();
-  const d = derive(RAW, start, end, ridMask, smooth);
+  const d = derive(ALL.rows, start, end, ridMask, smooth);
   FILT = d;
-  setSchemaBadge();
+  document.getElementById("schemaInfo").innerText = "viewer_schema: " + (ALL.metrics?.viewer_schema || "v1?");
   draw(d);
+}
+
+function afterLoad(){
+  if(!RAW && !MET){ setStatus("-"); return; }
+  const name1 = ALL?.names?.preds || "-";
+  const name2 = ALL?.names?.metrics || "-";
+  setStatus(`로드됨: ${name1} / ${name2}`);
+  // preset ALL range into pickers
+  try{
+    const rows = ALL.rows;
+    if(rows && rows.length){
+      const t0 = safeParseTime(rows[0].time);
+      const t1 = safeParseTime(rows[rows.length-1].time);
+      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+      document.getElementById("start").value = toLocal(t0);
+      document.getElementById("end").value   = toLocal(t1);
+    }
+  }catch(err){}
+  refresh();
 }
 
 async function handleFiles(files){
   const arr = Array.from(files||[]);
-  const metricsFile = arr.find(f=> f.name.endsWith(".json"));
-  const predsFile   = arr.find(f=> f.name.endsWith(".csv"));
-  if(predsFile){
-    let rows = await parseCSV(predsFile);
-    RAW = adaptRows(rows);
+  if(arr.length===0) return;
+  let changed=false;
+  for(const f of arr){
+    if(f.name.endsWith(".csv")){
+      const r = await new Promise((res,rej)=> Papa.parse(f,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}));
+      RAW = adaptRows(r); changed=true;
+      ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
+    }else if(f.name.endsWith(".json")){
+      const text = await f.text(); MET = JSON.parse(text); changed=true;
+      ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
+    }else{
+      toast("지원하지 않는 파일: "+f.name);
+    }
   }
-  if(metricsFile){
-    MET = JSON.parse(await metricsFile.text());
-  }
-  refresh();
+  if(changed) afterLoad();
 }
+
+async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
 
 document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
 document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
-["rid0","rid1","rid2","showEquity","showBars","showScatter","showHist","smooth"].forEach(id=>{
+["rid0","rid1","rid2","showEquity","showBars","showScatter","showHist","showDD","smooth"].forEach(id=>{
   document.getElementById(id).addEventListener("change", refresh);
 });
 document.getElementById("btnApplyRange").addEventListener("click", refresh);
-document.getElementById("btnResetZoom").addEventListener("click", ()=>{ if(eqChart) eqChart.resetZoom(); });
+document.getElementById("btnResetZoom").addEventListener("click", ()=>{ if(charts.equity) charts.equity.resetZoom(); });
+document.getElementById("btnResetAll").addEventListener("click", ()=>{
+  document.getElementById("rid0").checked=true;
+  document.getElementById("rid1").checked=true;
+  document.getElementById("rid2").checked=true;
+  document.getElementById("showEquity").checked=true;
+  document.getElementById("showBars").checked=true;
+  document.getElementById("showScatter").checked=true;
+  document.getElementById("showHist").checked=true;
+  document.getElementById("showDD").checked=true;
+  document.getElementById("smooth").value="1";
+  if(ALL?.rows?.length){
+    const t0 = safeParseTime(ALL.rows[0].time);
+    const t1 = safeParseTime(ALL.rows[ALL.rows.length-1].time);
+    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+    document.getElementById("start").value = toLocal(t0);
+    document.getElementById("end").value   = toLocal(t1);
+  }
+  refresh();
+});
 
-const drop = document.getElementById("drop");
-drop.addEventListener("dragover", e=>{ e.preventDefault(); drop.style.background="#0b1220"; });
-drop.addEventListener("dragleave", e=>{ drop.style.background=""; });
-drop.addEventListener("drop", e=>{ e.preventDefault(); drop.style.background=""; handleFiles(e.dataTransfer.files); });
+// Window-wide drag & drop
+["dragenter","dragover","dragleave","drop"].forEach(evt=>{
+  window.addEventListener(evt, e=>{
+    if(evt!=="drop"){ e.preventDefault(); }
+  }, false);
+});
+window.addEventListener("dragover", e=>{ e.preventDefault(); document.getElementById("drop").style.background="#0b1220"; });
+window.addEventListener("dragleave", e=>{ document.getElementById("drop").style.background=""; });
+window.addEventListener("drop", e=>{
+  e.preventDefault(); document.getElementById("drop").style.background="";
+  const items = e.dataTransfer?.files;
+  if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
+});
 
 document.getElementById("btnLoadURL").addEventListener("click", async ()=>{
   const u1 = document.getElementById("predsURL").value.trim();
   const u2 = document.getElementById("metricsURL").value.trim();
   document.getElementById("loadMsg").innerText = "불러오는 중...";
   try{
-    if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); }
-    if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); }
+    if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); ALL = ALL || {}; ALL.rows=RAW; ALL.names=ALL.names||{}; ALL.names.preds=u1; }
+    if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); ALL = ALL || {}; ALL.metrics=MET; ALL.names=ALL.names||{}; ALL.names.metrics=u2; }
     document.getElementById("loadMsg").innerText = "완료";
-    refresh();
+    afterLoad();
   }catch(err){
     document.getElementById("loadMsg").innerText = "실패: "+err.message;
   }
-});
-
-document.getElementById("btnExport").addEventListener("click", ()=>{
-  if(!FILT){ alert("데이터가 없습니다."); return; }
-  const blob = new Blob([JSON.stringify(FILT, null, 2)], {type:"application/json"});
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "analytics.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
 });
 </script>
 </body>
