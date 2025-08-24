@@ -1,238 +1,165 @@
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trade4V Viewer v3.1</title>
-<style>
-  :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; }
-  html,body{height:100%;background:var(--bg);color:var(--fg);font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif}
-  .wrap{display:flex;height:100%}
-  .side{width:420px;background:var(--panel);padding:16px;border-right:1px solid #1f2937;overflow:auto}
-  .main{flex:1;display:flex;flex-direction:column;gap:12px;padding:16px;overflow:auto}
-  .card{background:var(--card);border:1px solid #1f2937;border-radius:12px;padding:12px}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .btn{background:#1f2937;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:8px 10px;cursor:pointer}
-  .input{background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:8px 10px}
-  .drpz{border:2px dashed #334155;border-radius:12px;padding:12px;text-align:center;color:#9ca3af}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-  .kpi{font-size:22px;font-weight:700} .muted{color:#9ca3af;font-size:12px}
-</style>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-</head>
-<body>
-<div class="wrap">
-  <aside class="side">
-    <h2>Trade4V Viewer <span style="font-size:12px;color:#9ca3af">v3.1</span></h2>
-    <div class="drpz" id="drop">여기에 <b>preds.csv</b> + <b>metrics.json</b> + <b>market.csv</b> 드롭</div>
-    <div class="row" style="margin-top:8px;">
-      <input class="input" type="file" id="predsFile" accept=".csv">
-      <input class="input" type="file" id="metricsFile" accept="application/json">
-      <input class="input" type="file" id="marketFile" accept=".csv">
-    </div>
-    <div class="row" style="margin-top:8px;">
-      <input class="input" id="predsURL" placeholder="preds.csv raw URL" style="flex:1;">
-      <input class="input" id="metricsURL" placeholder="metrics.json raw URL" style="flex:1;">
-      <input class="input" id="marketURL" placeholder="market.csv raw URL (선택)" style="flex:1;">
-      <button class="btn" id="btnLoadURL">불러오기</button>
-    </div>
-    <div class="row" style="margin-top:8px;">
-      <label>θ <input class="input" id="theta" type="number" step="0.0001" value="0" style="width:90px"></label>
-      <label>K/일 <input class="input" id="topK" type="number" step="1" value="0" style="width:90px"></label>
-      <label>Fee(bps) <input class="input" id="feeBps" type="number" step="1" value="0" style="width:90px"></label>
-    </div>
-    <div class="row" style="margin-top:8px;">
-      <input class="input" id="start" type="datetime-local">
-      <input class="input" id="end" type="datetime-local">
-      <button class="btn" id="btnApplyRange">적용</button>
-      <button class="btn" id="btnReset">리셋</button>
-    </div>
-    <div class="muted">휠=확대/축소 · Shift+휠=이동 · Equity 드래그=확대</div>
-    <div class="muted" id="status" style="margin-top:6px;">-</div>
-  </aside>
-  <main class="main">
-    <div class="grid">
-      <div class="card"><div class="muted">Trades</div><div id="k_trades" class="kpi">-</div></div>
-      <div class="card"><div class="muted">Hit</div><div id="k_hit" class="kpi">-</div></div>
-      <div class="card"><div class="muted">PnL</div><div id="k_pnl" class="kpi">-</div></div>
-      <div class="card"><div class="muted">EV≥0</div><div id="k_evpos" class="kpi">-</div></div>
-    </div>
-    <div class="card"><canvas id="price" height="160"></canvas></div>
-    <div class="card"><canvas id="regime" height="80"></canvas></div>
-    <div class="card"><canvas id="equity" height="140"></canvas></div>
-    <div class="card"><canvas id="barPnL" height="140"></canvas></div>
-    <div class="card"><canvas id="scatter" height="140"></canvas></div>
-  </main>
-</div>
-<script>
-Chart.register(window["chartjs-plugin-zoom"]);
-const $ = (id)=>document.getElementById(id);
-let RAW=null, MET=null, MKT=null, ALL=null;
+name: Run trade4v v3 backtest
 
-function safeParseTime(v){
-  if(typeof v==='number') return new Date(v);
-  if(typeof v==='string'){ if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v=v.replace(' ','T')+'Z'; return new Date(v); }
-  return new Date(v);
-}
-const needCols=["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
-const syn={
-  time:["time","timestamp","open_time","date"],
-  regime_id:["regime_id","regime","state"],
-  H_row:["H_row","H","h_row","h","h_used"],
-  ev_final:["ev_final","ev","edge","ev_net","pnl_pred"],
-  entry_flag:["entry_flag","signal","enter","trade","flag"],
-  size:["size","kelly","weight","w","position"],
-  gross_event:["gross_event","gross","ret_gross"],
-  net_event:["net_event","net","ret_net","realized"],
-  price:["price","close","px"]
-};
-function mapHeaders(rows){
-  if(!rows?.length) return rows;
-  const keys=Object.keys(rows[0]||{}); const up=s=>s.toLowerCase().replace(/\s+/g,'');
-  const dict={}; for(const req in syn){ for(const k of keys){ if(syn[req].some(c=>up(c)===up(k))){ dict[req]=k; break; } } }
-  return rows.map(r=>{ const o={}; for(const req in syn){ const k=dict[req]; if(k!==undefined) o[req]=r[k]; } for(const k in r){ if(!(k in o)) o[k]=r[k]; } return o; });
-}
-function adaptRows(rows){
-  rows = rows.map(obj=>{ const r={}; for(const k in obj) r[k.trim()]=obj[k]; return r; });
-  rows = mapHeaders(rows);
-  const miss=needCols.filter(c=>!(c in rows[0])); if(miss.length) throw new Error("preds 필수 컬럼 누락: "+miss.join(", "));
-  return rows.map(r=>({
-    time: safeParseTime(r.time), regime_id:+r.regime_id, H_row:+r.H_row, ev_final:+r.ev_final,
-    entry_flag:+r.entry_flag, size:+r.size, gross_event:+r.gross_event, net_event:+r.net_event
-  }));
-}
-function adaptMarket(rows){
-  rows = rows.map(obj=>{ const r={}; for(const k in obj) r[k.trim()]=obj[k]; return r; });
-  rows = mapHeaders(rows);
-  if(!('time' in rows[0])||!('price' in rows[0])) throw new Error("market.csv는 time, price/close/px 필요");
-  return rows.map(r=>({ time: safeParseTime(r.time), price:+r.price }));
-}
-function derive(rows, start=null, end=null, theta=0, topK=0, feeBps=0){
-  const p = rows.filter(r=> (!start||r.time>=start) && (!end||r.time<=end));
-  let selected = p.filter(r=> r.entry_flag===1 && r.ev_final>=theta);
-  if(topK>0){
-    const byDay={}; selected.forEach(r=>{ const k=r.time.toISOString().slice(0,10); (byDay[k]=byDay[k]||[]).push(r); });
-    selected = Object.values(byDay).flatMap(arr=> arr.sort((a,b)=> b.ev_final-a.ev_final).slice(0, topK));
-  }
-  const fee = (+feeBps||0)/10000.0;
-  const withSize = selected.map(r=> ({...r, pnl:(r.net_event - fee)*r.size, exit:new Date(r.time.getTime()+r.H_row*60*1000)}));
-  const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
-  const wins = withSize.filter(r=> r.gross_event>0).length;
-  const hit = selected.length? wins/selected.length : 0;
-  let cum=0; const series = withSize.sort((a,b)=> a.exit-b.exit).map(s=> ({ t:s.exit, cum:(cum+=s.pnl) }));
-  const days={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); days[k]=(days[k]||0)+r.pnl; });
-  const dayRows = Object.keys(days).sort().map(k=> ({ day:k, pnl:days[k] }));
-  const evs = p.map(r=> r.ev_final);
-  return { base:p, selected, pnl, hit, trades:selected.length, series, dayRows, evs };
-}
-const charts={};
-function mkChart(id, cfg){ const el=document.getElementById(id); if(!el) return; if(charts[id]) charts[id].destroy(); charts[id]=new Chart(el, cfg); }
-function draw(d){
-  document.getElementById('k_trades').innerText = String(d.trades||0);
-  document.getElementById('k_hit').innerText = ((d.hit||0)*100).toFixed(1)+"%";
-  document.getElementById('k_pnl').innerText = (d.pnl||0).toFixed(4);
-  document.getElementById('k_evpos').innerText = ((d.base.filter(r=>r.ev_final>=0).length/(d.base.length||1))*100).toFixed(1)+"%";
-  // Price
-  const price = (window.__MKT||[]);
-  mkChart('price', {
-    type:'line',
-    data:{ labels: price.map(x=>x.time), datasets:[{ label:'Price', data: price.map(x=>x.price), pointRadius:0 }]},
-    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
-  });
-  // Regime
-  mkChart('regime', {
-    type:'line',
-    data:{ labels: d.base.map(r=>r.time), datasets:[{ label:'Regime', data: d.base.map(r=>r.regime_id), stepped:true, pointRadius:0 }]},
-    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
-  });
-  // Equity
-  mkChart('equity', {
-    type:'line',
-    data:{ labels: d.series.map(s=>s.t), datasets:[{ label:'Cum PnL', data: d.series.map(s=>s.cum), pointRadius:0 }]},
-    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
-  });
-  // Daily PnL
-  mkChart('barPnL', { type:'bar', data:{ labels: d.dayRows.map(x=>x.day), datasets:[{ label:'Daily PnL', data: d.dayRows.map(x=>x.pnl) }]}});
-  // EV vs realized
-  mkChart('scatter', { type:'scatter', data:{ datasets:[{ label:'EV vs Realized', data: d.selected.map(r=> ({x:r.ev_final, y:r.net_event})) }]}});
-}
-function toLocal(dt){ return new Date(dt.getTime()-dt.getTimezoneOffset()*60000).toISOString().slice(0,16); }
-function setDefaultRange(){
-  if(!ALL?.rows?.length) return;
-  const rows=ALL.rows; const t0=new Date(rows[0].time), t1=new Date(rows[rows.length-1].time);
-  document.getElementById('start').value = toLocal(t0); document.getElementById('end').value = toLocal(t1);
-}
-function getFilters(){
-  const s=document.getElementById('start').value, e=document.getElementById('end').value;
-  const start = s? new Date(s) : null; const end = e? new Date(e) : null;
-  const theta = parseFloat(document.getElementById('theta').value||"0")||0;
-  const topK = parseInt(document.getElementById('topK').value||"0",10)||0;
-  const feeBps = parseFloat(document.getElementById('feeBps').value||"0")||0;
-  return {start,end,theta,topK,feeBps};
-}
-function refresh(){
-  if(!ALL?.rows){ document.getElementById('status').innerText="데이터 없음"; return; }
-  const f = getFilters();
-  const d = derive(ALL.rows, f.start, f.end, f.theta, f.topK, f.feeBps);
-  draw(d);
-  document.getElementById('status').innerText = `rows: ${ALL.rows.length}, sel: ${d.trades}`;
-}
-async function handleFiles(files){
-  const arr = Array.from(files||[]); let changed=false;
-  for(const f of arr){
-    try{
-      const name=f.name.toLowerCase();
-      if(name.endsWith(".csv")){
-        const text = await f.text();
-        const parsed = Papa.parse(text, {header:true, dynamicTyping:true}).data;
-        const cols = parsed.length? Object.keys(parsed[0]).map(x=>x.trim().toLowerCase()) : [];
-        const isMarket = cols.includes("price")||cols.includes("close")||cols.includes("px");
-        if(isMarket && cols.includes("time")){ window.__MKT = MKT = adaptMarket(parsed); changed=true; }
-        else { RAW = adaptRows(parsed); changed=true; }
-      }else if(name.endsWith(".json")){
-        MET = JSON.parse(await f.text()); changed=true;
-      }
-    }catch(err){ document.getElementById('status').innerText = "로딩 실패: "+err.message; console.error(err); }
-  }
-  if(changed){ ALL = ALL||{}; ALL.rows = RAW; setDefaultRange(); refresh(); document.getElementById('status').innerText = "로드 완료"; }
-}
-async function fetchText(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
-document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
-document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
-document.getElementById("marketFile").addEventListener("change", e=> handleFiles(e.target.files));
-document.addEventListener("dragover", e=> e.preventDefault());
-document.addEventListener("drop", e=> { e.preventDefault(); handleFiles(e.dataTransfer.files); });
-document.getElementById("btnLoadURL").addEventListener("click", async ()=>{
-  const u1=document.getElementById("predsURL").value.trim(),
-        u2=document.getElementById("metricsURL").value.trim(),
-        u3=document.getElementById("marketURL").value.trim();
-  try{
-    if(u1){ RAW = adaptRows(Papa.parse(await fetchText(u1), {header:true, dynamicTyping:true}).data); }
-    if(u2){ MET = JSON.parse(await fetchText(u2)); }
-    if(u3){ window.__MKT = MKT = adaptMarket(Papa.parse(await fetchText(u3), {header:true, dynamicTyping:true}).data); }
-    ALL={ rows:RAW, metrics:MET }; setDefaultRange(); refresh(); document.getElementById("status").innerText="URL 로드 완료";
-  }catch(err){ document.getElementById("status").innerText = "실패: "+err.message; }
-});
-document.getElementById("btnApplyRange").addEventListener("click", refresh);
-document.getElementById("btnReset").addEventListener("click", ()=>{
-  setDefaultRange(); document.getElementById("theta").value="0"; document.getElementById("topK").value="0"; document.getElementById("feeBps").value="0"; refresh();
-});
-["theta","topK","feeBps"].forEach(id=> document.getElementById(id).addEventListener("change", refresh));
+on:
+  workflow_dispatch:
+    inputs:
+      data_path:
+        description: "데이터 경로 (예: ETHUSDT_1min_2025H1.csv 또는 .zip)"
+        required: true
+        type: string
+      code_zip:
+        description: "코드 ZIP 파일명(리포 루트). 비워두면 trade4v/ 폴더 사용"
+        required: false
+        default: "trade4v_S1S2_codepack_v3.zip"
+        type: string
+      train_start:
+        description: "학습 시작(UTC)"
+        required: true
+        default: "2025-01-01 00:00:00"
+        type: string
+      train_end:
+        description: "학습 종료(UTC)"
+        required: true
+        default: "2025-04-30 23:59:00"
+        type: string
+      test_start:
+        description: "테스트 시작(UTC)"
+        required: true
+        default: "2025-05-01 00:00:00"
+        type: string
+      test_end:
+        description: "테스트 종료(UTC)"
+        required: true
+        default: "2025-06-30 23:59:00"
+        type: string
+      H:
+        description: "홀드 분(H)"
+        required: true
+        default: "15"
+        type: string
+      fee_bps:
+        description: "수수료(bp)"
+        required: true
+        default: "1.0"
+        type: string
+      slip_bps:
+        description: "슬리피지(bp)"
+        required: true
+        default: "0.5"
+        type: string
+      ev_margin_bps:
+        description: "EV 마진(bp) — fee+slip 위에 추가"
+        required: true
+        default: "1.0"
+        type: string
+      K_day:
+        description: "레짐별 K/일 (예: 0:5,1:10,2:20)"
+        required: true
+        default: "0:5,1:10,2:20"
+        type: string
+      out_dir:
+        description: "출력 폴더"
+        required: true
+        default: "_out_4u"
+        type: string
 
-// Demo (빈 화면 방지용. 실제 파일 드롭하면 바로 대체됨)
-(function demo(){
-  const n=300; const now=Date.now(); const rows=[]; let px=2000;
-  for(let i=0;i<n;i++){ const t=new Date(now - (n-i)*60*1000); px *= (1 + (Math.random()-0.5)*0.001);
-    rows.push({ time:t, regime_id:(i%3), H_row:15, ev_final:(Math.random()-0.4)*0.01, entry_flag:(Math.random()>0.85?1:0),
-                size:Math.random(), gross_event:(Math.random()-0.5)*0.01, net_event:(Math.random()-0.5)*0.01 });
-  }
-  RAW = rows; window.__MKT = Array.from({length:n}, (_,i)=>{ const t=new Date(now - (n-i)*60*1000); return { time:t, price: 1900 + i*0.6 + (Math.random()-0.5)*5 }; });
-  ALL={ rows:RAW };
-  setDefaultRange(); refresh();
-})();
-</script>
-</body>
-</html>
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11 (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Install deps (minimal)
+        run: |
+          python -m pip install -U pip
+          pip install "pandas>=2.0" "numpy>=1.24"
+
+      - name: Prepare data
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA="${{ inputs.data_path }}"
+          mkdir -p data
+          [[ -e "$DATA" ]] || { echo "::error::data_path '$DATA' not found"; exit 1; }
+          if [[ "$DATA" == *.zip ]]; then unzip -o -q "$DATA" -d data; else cp -f "$DATA" data/; fi
+          echo "Using CSV:"; ls -1 data/*.csv | head -n1
+
+      - name: Prepare code (prefer committed ./trade4v, otherwise unzip code_zip)
+        id: codeprep
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEZIP="${{ inputs.code_zip }}"
+          if [[ -d trade4v && -f trade4v/trade4v/run_4u.py ]]; then
+            echo "Found committed ./trade4v/"
+            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+          else
+            if [[ -n "$CODEZIP" && -f "$CODEZIP" ]]; then
+              echo "Unzipping $CODEZIP"
+              rm -rf __extracted trade4v || true
+              unzip -o -q "$CODEZIP" -d __extracted
+              # 평탄화: 최상위에 trade4v/ 가 오도록
+              if [[ -d __extracted/trade4v ]]; then mv __extracted/trade4v ./trade4v; else
+                # zip 안에 상위폴더/trade4v 형태 지원
+                TDIR="$(find __extracted -type d -name trade4v | head -n1 || true)"
+                [[ -n "$TDIR" ]] || { echo "::error::trade4v folder not found in zip"; exit 1; }
+                mv "$TDIR" ./trade4v
+              fi
+              echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Neither committed ./trade4v nor code_zip exists"; exit 1
+            fi
+          fi
+          [[ -f ${{ steps.codeprep.outputs.SCRIPT }} ]] || { echo "::error::run_4u.py not found"; exit 1; }
+          echo "Using ${ { steps.codeprep.outputs.SCRIPT } }" || true
+
+      - name: Run backtest (v3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/trade4v"
+          OUT="${{ inputs.out_dir }}"
+          CSV=$(ls -1 data/*.csv | head -n1)
+          mkdir -p "$OUT"
+          python "${{ steps.codeprep.outputs.SCRIPT }}" \
+            --data "$CSV" \
+            --train_start "${{ inputs.train_start }}" \
+            --train_end   "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}" \
+            --test_end    "${{ inputs.test_end }}" \
+            --H "${{ inputs.H }}" \
+            --fee_bps "${{ inputs.fee_bps }}" \
+            --slip_bps "${{ inputs.slip_bps }}" \
+            --ev_margin_bps "${{ inputs.ev_margin_bps }}" \
+            --K_day "${{ inputs.K_day }}" \
+            --out_dir "$OUT"
+
+      - name: Show outputs (preview)
+        if: always()
+        run: |
+          echo "== files =="; find "${{ inputs.out_dir }}" -maxdepth 3 -type f -print | sed 's/^/  /'
+          echo "== run.log tail =="; tail -n 50 "${{ inputs.out_dir }}"/run/run.log || true
+          echo "== metrics =="; cat "${{ inputs.out_dir }}"/run/metrics_oos.json || true
+          echo "== preds head =="; head -n 5 "${{ inputs.out_dir }}"/run/preds_test.csv || true
+
+      - name: Upload artifacts (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: out_4u_v3
+          path: |
+            ${{ inputs.out_dir }}/run/preds_test.csv
+            ${{ inputs.out_dir }}/run/metrics_oos.json
+            ${{ inputs.out_dir }}/run/run.log
+          if-no-files-found: error
+          retention-days: 14
