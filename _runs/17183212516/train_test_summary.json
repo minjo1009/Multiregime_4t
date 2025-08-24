@@ -1,0 +1,22 @@
+{
+  "H": null,
+  "edge_threshold": null,
+  "train": {
+    "start": "2020-01-01",
+    "end": "2024-01-01",
+    "coverage": 0.0,
+    "acc": 0.0,
+    "mcc": 0.0,
+    "n_trades": 0
+  },
+  "test": {
+    "start": "2025-01-01",
+    "end": "2025-06-30",
+    "coverage": 0.0,
+    "acc": 0.0,
+    "mcc": 0.0,
+    "n_trades": 0,
+    "total_return": 1.0,
+    "monthly_return": 1.0
+  }
+}

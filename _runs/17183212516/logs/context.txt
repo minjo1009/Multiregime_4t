@@ -1,0 +1,3 @@
+Repo: minjo1009/Multiregime_4t
+SHA : 7ed8be92275d546948a83885b88b7ed1180b8013
+TZ  : Asia/Seoul

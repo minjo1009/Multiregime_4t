@@ -1,0 +1,10 @@
+./trend4u/README.md
+./trend4u/requirements.txt
+./trend4u/run_4u.py
+./trend4u/trend4p/__init__.py
+./trend4u/trend4p/data_utils.py
+./trend4u/trend4p/execution_4u.py
+./trend4u/trend4p/features_4u.py
+./trend4u/trend4p/labeling.py
+./trend4u/trend4p/model_4u.py
+./trend4u/trend4p/selector_4u.py
