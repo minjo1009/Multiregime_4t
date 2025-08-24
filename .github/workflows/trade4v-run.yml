@@ -2,14 +2,16 @@ name: trade4v-run
 on:
   workflow_dispatch:
     inputs:
-      project_zip: { description: "project zip in repo", default: "trade4v.zip", required: true }
+      project_zip: { description: "project zip", default: "trade4v.zip", required: true }
       data_zip:    { description: "ETH 1m zip in repo", default: "ETHUSDT_1min_2020_2025.zip", required: true }
-      train_range: { description: "train_start,train_end (UTC)", default: "2025-01-01,2025-04-30", required: true }
-      test_range:  { description: "test_start,test_end (UTC)",  default: "2025-05-01,2025-06-30",  required: true }
-      H:           { description: "H forward bars", default: "7", required: true }
+      train_range: { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
+      test_range:  { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
+      H:           { description: "H forward bars", default: "9", required: true }
       fee_bps:     { description: "one-way fee bps (0.1% = 10)", default: "10", required: true }
-      regime:      { description: "vol_window[,z_low,z_high] or vol_window,z_thr", default: "64,1.0,1.8", required: true }
-      goal:        { description: "objective, e.g. pnl,low:400-900,med:300-600,high:150-400", default: "pnl,low:400-900,med:300-600,high:150-400", required: true }
+      regime:      { description: "vol,z_low,z_high (or vol,z_thr)", default: "64,1.0,2.0", required: true }
+      goal:        { description: "objective (e.g., pnl,400-900)", default: "pnl,400-900", required: true }
+      goal_maps:   { description: "per-regime bounds (e.g., 0:350-700,1:200-400,2:150-350)", default: "0:350-700,1:200-400,2:150-350", required: true }
+      cal:         { description: "cal_frac,cal_bins", default: "0.35,150", required: true }
 
 jobs:
   run:
@@ -17,11 +19,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - name: Unzip project
         run: unzip -q "${{ github.event.inputs.project_zip }}" -d .
@@ -37,19 +37,15 @@ jobs:
           python - <<'PY'
           import glob, pandas as pd, numpy as np
           srcs = sorted(glob.glob("data/*.csv"))
-          assert srcs, "No CSV inside the uploaded zip"
+          assert srcs, "No CSV inside uploaded zip"
           src = srcs[0]
           df = pd.read_csv(src)
-          # normalize column names
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
-          # choose time column
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
-          if tcol is None: raise SystemExit("No time/open_time/ts/timestamp column found")
+          if tcol is None: raise SystemExit("No time/open_time/ts column found")
           s = df[tcol]
           if np.issubdtype(s.dtype, np.number):
-            # infer unit for numeric timestamps
-            med = float(s.iloc[len(s)//2])
-            unit = "ms" if med > 1e11 else "s"
+            med = float(s.iloc[len(s)//2]); unit = "ms" if med > 1e11 else "s"
             df["time"] = pd.to_datetime(s, unit=unit, utc=True)
           else:
             df["time"] = pd.to_datetime(s, utc=True)
@@ -68,36 +64,15 @@ jobs:
         run: |
           IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
           IFS=',' read -r TEST_S  TEST_E  <<< "${{ github.event.inputs.test_range }}"
-          IFS=',' read -r -a PARTS <<< "${{ github.event.inputs.regime }}"
-          VOLW="${PARTS[0]}"
-          ZLOW=""
-          ZHIGH=""
-          ZTHR=""
-          if [[ "${#PARTS[@]}" -eq 3 ]]; then
-            ZLOW="${PARTS[1]}"; ZHIGH="${PARTS[2]}"
-          elif [[ "${#PARTS[@]}" -eq 2 ]]; then
-            ZTHR="${PARTS[1]}"
-          fi
           echo "TRAIN_S=$TRAIN_S" >> $GITHUB_ENV
           echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
           echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
           echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
-          echo "VOLW=$VOLW"       >> $GITHUB_ENV
-          echo "ZLOW=$ZLOW"       >> $GITHUB_ENV
-          echo "ZHIGH=$ZHIGH"     >> $GITHUB_ENV
-          echo "ZTHR=$ZTHR"       >> $GITHUB_ENV
 
-      - name: Run backtest (v1.4 defaults)
-        shell: bash
+      - name: Run backtest (pnl objective with goal maps + deoverlap + gating)
         env:
           PYTHONWARNINGS: "ignore::FutureWarning"
         run: |
-          EXTRA_ARGS=""
-          if [[ -n "$ZLOW" && -n "$ZHIGH" ]]; then
-            EXTRA_ARGS="--z_thr_low $ZLOW --z_thr_high $ZHIGH"
-          elif [[ -n "$ZTHR" ]]; then
-            EXTRA_ARGS="--z_thr $ZTHR"
-          fi
           python trade4v/run_4u.py \
             --data        "${{ env.DATA_PATH }}" \
             --train_start "${{ env.TRAIN_S }}" \
@@ -106,11 +81,14 @@ jobs:
             --test_end    "${{ env.TEST_E }}" \
             --H           ${{ github.event.inputs.H }} \
             --fee_bps     ${{ github.event.inputs.fee_bps }} \
-            --vol_window  "${{ env.VOLW }}" \
+            --regime      "${{ github.event.inputs.regime }}" \
             --goal        "${{ github.event.inputs.goal }}" \
+            --goal_maps   "${{ github.event.inputs.goal_maps }}" \
+            --cal         "${{ github.event.inputs.cal }}" \
             --deoverlap \
-            --out_dir _out_4u/github \
-            $EXTRA_ARGS
+            --gate_negative \
+            --max_train_rows 200000 \
+            --out_dir _out_4u/github
 
       - name: Upload outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
