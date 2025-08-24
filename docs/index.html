@@ -1,723 +1,238 @@
 <!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro v2.7</title>
-  <style>
-    :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; --warn:#f59e0b; }
-    html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    .wrap { display:flex; height:100%; }
-    .side { width:440px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
-    .main { flex:1; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto; }
-    h1 { margin:0 0 12px; font-size:18px; font-weight:600; }
-    .section { margin-bottom:16px; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .btn { background:#1f2937; border:1px solid #374151; color:#e5e7eb; border-radius:8px; padding:8px 10px; cursor:pointer; }
-    .btn:hover { border-color:#4b5563; }
-    .input, select { background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
-    .card { background: var(--card); border:1px solid #1f2937; border-radius:12px; padding:12px; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:10px; }
-    .muted { color: var(--muted); font-size:12px; }
-    .kpi { font-size:22px; font-weight:700; }
-    .drpz { border:2px dashed #334155; border-radius:12px; padding:12px; text-align:center; color:#9ca3af; }
-    .preset .btn { font-size:12px; padding:6px 8px; }
-    .toast { position:fixed; right:16px; bottom:16px; background:#111827; border:1px solid #374151; border-radius:10px; padding:10px 12px; color:#e5e7eb; opacity:0.95; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { padding:6px 8px; border-bottom:1px solid #1f2937; font-size:12px; text-align:right; }
-    th:first-child, td:first-child { text-align:left; }
-    .pos { color: var(--good); } .neg { color: var(--bad); } .warn { color: var(--warn); }
-    .rel { position:relative; }
-    .selbox { position:absolute; display:none; border:1px dashed var(--accent); background: rgba(96,165,250,0.18); pointer-events:none; }
-    .heat { display:grid; grid-template-columns: repeat(auto-fill, minmax(80px,1fr)); gap:8px; }
-    .heat .hcell { background:#0f172a; border:1px solid #1f2937; border-radius:8px; padding:6px; font-size:11px; }
-    .heat .hcell .v { font-weight:700; }
-    .cal { display:grid; grid-template-columns: repeat(14, 1fr); gap:4px; }
-    .cal .d { height:16px; border-radius:3px; background:#1f2937; }
-    .cal .d.pos { background:#185c37; } .cal .d.neg { background:#7f1d1d; } .cal .d.zero { background:#374151; }
-    .tbl { max-height: 260px; overflow:auto; }
-    .badge { display:inline-block; padding:2px 6px; border-radius:10px; background:#1f2937; border:1px solid #374151; font-size:11px; }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade4V Viewer v3.1</title>
+<style>
+  :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; }
+  html,body{height:100%;background:var(--bg);color:var(--fg);font-family:Inter,system-ui,Segoe UI,Roboto,sans-serif}
+  .wrap{display:flex;height:100%}
+  .side{width:420px;background:var(--panel);padding:16px;border-right:1px solid #1f2937;overflow:auto}
+  .main{flex:1;display:flex;flex-direction:column;gap:12px;padding:16px;overflow:auto}
+  .card{background:var(--card);border:1px solid #1f2937;border-radius:12px;padding:12px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .btn{background:#1f2937;border:1px solid #374151;color:#e5e7eb;border-radius:8px;padding:8px 10px;cursor:pointer}
+  .input{background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:8px 10px}
+  .drpz{border:2px dashed #334155;border-radius:12px;padding:12px;text-align:center;color:#9ca3af}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+  .kpi{font-size:22px;font-weight:700} .muted{color:#9ca3af;font-size:12px}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro v2.7</h1>
-
-    <div class="section">
-      <div class="muted">파일 드래그 앤 드롭 (창 어디든 가능)</div>
-      <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> + <b>market.csv</b>(선택: time, price/close) 드롭</div>
-      <div style="height:8px"></div>
-      <div class="row">
-        <input class="input" type="file" id="predsFile" accept=".csv" />
-        <input class="input" type="file" id="metricsFile" accept="application/json" />
-        <input class="input" type="file" id="marketFile" accept=".csv" />
-      </div>
-      <div class="row"><button class="btn" id="btnForceRefresh">강제 새로고침</button><span id="status" class="muted">-</span></div>
+    <h2>Trade4V Viewer <span style="font-size:12px;color:#9ca3af">v3.1</span></h2>
+    <div class="drpz" id="drop">여기에 <b>preds.csv</b> + <b>metrics.json</b> + <b>market.csv</b> 드롭</div>
+    <div class="row" style="margin-top:8px;">
+      <input class="input" type="file" id="predsFile" accept=".csv">
+      <input class="input" type="file" id="metricsFile" accept="application/json">
+      <input class="input" type="file" id="marketFile" accept=".csv">
     </div>
-
-    <div class="section">
-      <div class="muted">URL로 불러오기 (raw 링크)</div>
-      <input class="input" id="predsURL" placeholder="preds.csv raw URL">
-      <input class="input" id="metricsURL" placeholder="metrics.json raw URL">
-      <input class="input" id="marketURL" placeholder="market.csv raw URL (선택)">
-      <div class="row"><button class="btn" id="btnLoadURL">불러오기</button><span id="loadMsg" class="muted"></span></div>
+    <div class="row" style="margin-top:8px;">
+      <input class="input" id="predsURL" placeholder="preds.csv raw URL" style="flex:1;">
+      <input class="input" id="metricsURL" placeholder="metrics.json raw URL" style="flex:1;">
+      <input class="input" id="marketURL" placeholder="market.csv raw URL (선택)" style="flex:1;">
+      <button class="btn" id="btnLoadURL">불러오기</button>
     </div>
-
-    <div class="section preset">
-      <div class="muted">기간 빠른 선택</div>
-      <div class="row">
-        <button class="btn" data-range="1D">1D</button>
-        <button class="btn" data-range="1W">1W</button>
-        <button class="btn" data-range="1M">1M</button>
-        <button class="btn" data-range="3M">3M</button>
-        <button class="btn" data-range="YTD">YTD</button>
-        <button class="btn" data-range="ALL">ALL</button>
-      </div>
+    <div class="row" style="margin-top:8px;">
+      <label>θ <input class="input" id="theta" type="number" step="0.0001" value="0" style="width:90px"></label>
+      <label>K/일 <input class="input" id="topK" type="number" step="1" value="0" style="width:90px"></label>
+      <label>Fee(bps) <input class="input" id="feeBps" type="number" step="1" value="0" style="width:90px"></label>
     </div>
-
-    <div class="section">
-      <div class="muted">기간 수동 선택 (기본값=데이터 전체)</div>
-      <div class="row">
-        <input class="input" id="start" type="datetime-local">
-        <input class="input" id="end" type="datetime-local">
-      </div>
-      <div class="row">
-        <button class="btn" id="btnApplyRange">적용</button>
-        <button class="btn" id="btnResetAll">전체 리셋</button>
-      </div>
-      <div class="muted">휠 줌: 차트 위에서 휠(확대/축소), Shift+휠(좌/우 이동). <b>드래그 선택</b>으로 그 범위 확대.</div>
+    <div class="row" style="margin-top:8px;">
+      <input class="input" id="start" type="datetime-local">
+      <input class="input" id="end" type="datetime-local">
+      <button class="btn" id="btnApplyRange">적용</button>
+      <button class="btn" id="btnReset">리셋</button>
     </div>
-
-    <div class="section">
-      <div class="muted">집행 제어(게이팅/비용/임계)</div>
-      <div class="row">
-        <label>EV θ <input class="input" id="theta" type="number" step="0.0001" value="0"></label>
-        <label>Top-K/일 <input class="input" id="topK" type="number" min="0" step="1" value="0"></label>
-        <label>Fee bps+ <input class="input" id="feeBps" type="number" step="1" value="0"></label>
-      </div>
-      <div class="muted">θ: ev_final ≥ θ만, K: 일별 EV 상위 K개만, 비용은 트레이드당 bps 추가 차감</div>
-    </div>
-
-    <div class="section">
-      <div class="muted">표시 요소</div>
-      <div class="row" style="flex-direction:column; align-items:flex-start;">
-        <label><input type="checkbox" id="showPrice" checked> 가격 라인 + 트레이드 마커</label>
-        <label><input type="checkbox" id="showSignal" checked> 레짐/EV 신호 밴드</label>
-        <label><input type="checkbox" id="showEquity" checked> 누적 PnL 라인</label>
-        <label><input type="checkbox" id="showBars" checked> 일별 PnL 바</label>
-        <label><input type="checkbox" id="showScatter" checked> EV vs 실현 산포</label>
-        <label><input type="checkbox" id="showHist" checked> EV 히스토그램</label>
-        <label><input type="checkbox" id="showDD" checked> 드로우다운</label>
-        <label><input type="checkbox" id="showMCC" checked> 기간별 MCC</label>
-        <label><input type="checkbox" id="showHeat" checked> Regime×H 요약</label>
-        <label><input type="checkbox" id="showCal" checked> 달력 히트맵</label>
-        <label><input type="checkbox" id="showTable" checked> 트레이드 테이블</label>
-        <label><input type="checkbox" id="showMonthlyCharts" checked> 월별 누적/승률/MCC 차트</label>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="muted">스무딩(Equity)</div>
-      <select id="smooth" class="input">
-        <option value="1">x1</option>
-        <option value="5">x5</option>
-        <option value="15">x15</option>
-      </select>
-    </div>
-
-    <div class="section">
-      <span class="muted">스키마</span>
-      <div id="schemaInfo" class="badge">-</div>
-    </div>
+    <div class="muted">휠=확대/축소 · Shift+휠=이동 · Equity 드래그=확대</div>
+    <div class="muted" id="status" style="margin-top:6px;">-</div>
   </aside>
-
   <main class="main">
     <div class="grid">
       <div class="card"><div class="muted">Trades</div><div id="k_trades" class="kpi">-</div></div>
-      <div class="card"><div class="muted">Hit rate</div><div id="k_hit" class="kpi">-</div></div>
-      <div class="card"><div class="muted">PnL (sum)</div><div id="k_pnl" class="kpi">-</div></div>
-      <div class="card"><div class="muted">EV≥0 ratio</div><div id="k_evpos" class="kpi">-</div></div>
-      <div class="card"><div class="muted">Eff (real/EV)</div><div id="k_eff" class="kpi">-</div></div>
-      <div class="card"><div class="muted">Eff (real/EV·size)</div><div id="k_effw" class="kpi">-</div></div>
+      <div class="card"><div class="muted">Hit</div><div id="k_hit" class="kpi">-</div></div>
+      <div class="card"><div class="muted">PnL</div><div id="k_pnl" class="kpi">-</div></div>
+      <div class="card"><div class="muted">EV≥0</div><div id="k_evpos" class="kpi">-</div></div>
     </div>
-
-    <div id="panelPrice" class="card"><canvas id="price" height="160"></canvas></div>
-    <div id="panelSignal" class="card"><canvas id="signal" height="80"></canvas></div>
-
-    <div class="card rel" id="panelEquity">
-      <canvas id="equity" height="140"></canvas>
-      <div id="selBox" class="selbox"></div>
-    </div>
-    <div id="panelBars" class="card"><canvas id="barPnL" height="140"></canvas></div>
-    <div id="panelDD" class="card"><canvas id="drawdown" height="140"></canvas></div>
-    <div id="panelScatter" class="card"><canvas id="scatter" height="140"></canvas></div>
-    <div id="panelHist" class="card"><canvas id="hist" height="120"></canvas></div>
-    <div id="panelMCC" class="card" style="display:none;"><canvas id="mccChart" height="120"></canvas></div>
-
-    <div id="panelMonthly" class="card" style="display:none;">
-      <div class="muted">월별 차트</div>
-      <canvas id="monthlyCum" height="120"></canvas>
-      <canvas id="monthlyHit" height="120" style="margin-top:10px;"></canvas>
-      <canvas id="monthlyMCC" height="120" style="margin-top:10px;"></canvas>
-    </div>
-
-    <div id="panelHeat" class="card" style="display:none;">
-      <div class="muted">Regime × H 요약</div>
-      <div id="heatGrid" class="heat"></div>
-    </div>
-
-    <div id="panelCal" class="card" style="display:none;">
-      <div class="muted">달력 히트맵 (일별 PnL)</div>
-      <div id="cal" class="cal"></div>
-    </div>
-
-    <div class="card">
-      <div class="muted">EV Deciles</div>
-      <table id="deciles"><thead><tr><th>Bucket</th><th>Count</th><th>EV Sum</th><th>Realized Sum</th><th>Eff</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="card">
-      <div class="muted">Period Breakdown (Monthly)</div>
-      <table id="periodTable">
-        <thead><tr><th>Period</th><th>Trades</th><th>Hit%</th><th>PnL Sum</th><th>Cum PnL</th><th>Max DD</th><th>MCC</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-
-    <div id="panelTable" class="card tbl" style="display:none;">
-      <div class="muted">Trades (상위 500)</div>
-      <table id="tradeTable">
-        <thead><tr><th>time</th><th>reg</th><th>H</th><th>EV</th><th>size</th><th>gross</th><th>net</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
+    <div class="card"><canvas id="price" height="160"></canvas></div>
+    <div class="card"><canvas id="regime" height="80"></canvas></div>
+    <div class="card"><canvas id="equity" height="140"></canvas></div>
+    <div class="card"><canvas id="barPnL" height="140"></canvas></div>
+    <div class="card"><canvas id="scatter" height="140"></canvas></div>
   </main>
 </div>
-
-<div id="toast" class="toast" style="display:none"></div>
-
 <script>
-window.addEventListener('DOMContentLoaded', () => {
-  let RAW=null, MET=null, MKT=null, ALL=null, FILT=null, charts={};
-  const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
-  const synonyms = {
-    time: ["time","timestamp","open_time","date"],
-    regime_id: ["regime_id","regime","state"],
-    H_row: ["H_row","H_used","H","h_row","h_used","h"],
-    ev_final: ["ev_final","ev_net","edge","pnl_pred","ev"],
-    entry_flag: ["entry_flag","signal","enter","trade","flag"],
-    size: ["size","kelly","weight","position","w","kelly_size"],
-    gross_event: ["gross_event","event_gross","gross","ret_gross","gross_ret"],
-    net_event: ["net_event","event_net","net","ret_net","net_ret","realized"],
-    price: ["price","close","px"]
-  };
-  const $ = id => document.getElementById(id);
-  const safe = (id, text) => { const el=$(id); if(el) el.innerText = text; };
-  function toast(msg){ const t=$('toast'); t.innerText=msg; t.style.display='block'; setTimeout(()=>{ t.style.display='none'; }, 2500); }
-  function setStatus(msg){ const el=$('status'); if(el) el.innerText = msg; }
-  function safeParseTime(v){ if(typeof v === 'number'){ return new Date(v); } if(typeof v === 'string'){ if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z'; return new Date(v); } return new Date(v); }
-  function mapHeaders(rows){
-    if(!rows || !rows.length) return rows;
-    const keys = Object.keys(rows[0]);
-    const up = k=> k.toLowerCase().replace(/\s+/g,'');
-    const dict = {};
-    for(const req in synonyms){
-      const cands = synonyms[req];
-      for(const k of keys){
-        const K = up(k);
-        for(const c of cands){ if(K === up(c)){ dict[req] = k; break; } }
-        if(dict[req]) break;
-      }
-    }
-    return rows.map(r=>{
-      const o={};
-      for(const req of Object.keys(synonyms)){ const k = dict[req]; if(k !== undefined){ o[req] = r[k]; } }
-      for(const k in r){ if(!(k in o)) o[k]=r[k]; }
-      return o;
-    });
+Chart.register(window["chartjs-plugin-zoom"]);
+const $ = (id)=>document.getElementById(id);
+let RAW=null, MET=null, MKT=null, ALL=null;
+
+function safeParseTime(v){
+  if(typeof v==='number') return new Date(v);
+  if(typeof v==='string'){ if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v=v.replace(' ','T')+'Z'; return new Date(v); }
+  return new Date(v);
+}
+const needCols=["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
+const syn={
+  time:["time","timestamp","open_time","date"],
+  regime_id:["regime_id","regime","state"],
+  H_row:["H_row","H","h_row","h","h_used"],
+  ev_final:["ev_final","ev","edge","ev_net","pnl_pred"],
+  entry_flag:["entry_flag","signal","enter","trade","flag"],
+  size:["size","kelly","weight","w","position"],
+  gross_event:["gross_event","gross","ret_gross"],
+  net_event:["net_event","net","ret_net","realized"],
+  price:["price","close","px"]
+};
+function mapHeaders(rows){
+  if(!rows?.length) return rows;
+  const keys=Object.keys(rows[0]||{}); const up=s=>s.toLowerCase().replace(/\s+/g,'');
+  const dict={}; for(const req in syn){ for(const k of keys){ if(syn[req].some(c=>up(c)===up(k))){ dict[req]=k; break; } } }
+  return rows.map(r=>{ const o={}; for(const req in syn){ const k=dict[req]; if(k!==undefined) o[req]=r[k]; } for(const k in r){ if(!(k in o)) o[k]=r[k]; } return o; });
+}
+function adaptRows(rows){
+  rows = rows.map(obj=>{ const r={}; for(const k in obj) r[k.trim()]=obj[k]; return r; });
+  rows = mapHeaders(rows);
+  const miss=needCols.filter(c=>!(c in rows[0])); if(miss.length) throw new Error("preds 필수 컬럼 누락: "+miss.join(", "));
+  return rows.map(r=>({
+    time: safeParseTime(r.time), regime_id:+r.regime_id, H_row:+r.H_row, ev_final:+r.ev_final,
+    entry_flag:+r.entry_flag, size:+r.size, gross_event:+r.gross_event, net_event:+r.net_event
+  }));
+}
+function adaptMarket(rows){
+  rows = rows.map(obj=>{ const r={}; for(const k in obj) r[k.trim()]=obj[k]; return r; });
+  rows = mapHeaders(rows);
+  if(!('time' in rows[0])||!('price' in rows[0])) throw new Error("market.csv는 time, price/close/px 필요");
+  return rows.map(r=>({ time: safeParseTime(r.time), price:+r.price }));
+}
+function derive(rows, start=null, end=null, theta=0, topK=0, feeBps=0){
+  const p = rows.filter(r=> (!start||r.time>=start) && (!end||r.time<=end));
+  let selected = p.filter(r=> r.entry_flag===1 && r.ev_final>=theta);
+  if(topK>0){
+    const byDay={}; selected.forEach(r=>{ const k=r.time.toISOString().slice(0,10); (byDay[k]=byDay[k]||[]).push(r); });
+    selected = Object.values(byDay).flatMap(arr=> arr.sort((a,b)=> b.ev_final-a.ev_final).slice(0, topK));
   }
-  function adaptRows(rows){
-    if(!rows || rows.length===0) return rows;
-    rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
-    rows = mapHeaders(rows);
-    const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
-    let out = rows.map(r=>({...r}));
-    if(!has("ev_final") && has("ev_net")) out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
-    const miss = needCols.filter(c=> !(c in out[0]));
-    if(miss.length) throw new Error("preds 필수 컬럼 누락: "+miss.join(", "));
-    return out;
-  }
-  function adaptMarket(rows){
-    if(!rows || rows.length===0) return rows;
-    rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
-    rows = mapHeaders(rows);
-    if(!("time" in rows[0]) || !("price" in rows[0])) throw new Error("market.csv는 time, price/close 컬럼이 필요합니다.");
-    return rows.map(r=> ({ time: safeParseTime(r.time), price: Number(r.price) }));
-  }
-
-  function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1, theta=0, topK=0, feeBps=0){
-    const p = rows.map(r=>({ ...r,
-      time: safeParseTime(r.time), regime_id: Number(r.regime_id), H_row: Number(r.H_row||1),
-      ev_final: Number(r.ev_final||0), entry_flag: Number(r.entry_flag||0), size: Number(r.size||0),
-      gross_event: Number(r.gross_event||0), net_event: Number(r.net_event||0),
-    })).filter(r=> ridMask[r.regime_id]);
-    const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
-
-    let selected = p2.filter(r=> r.entry_flag===1 && r.ev_final>=theta);
-
-    if(topK && topK>0){
-      const byDay = {};
-      selected.forEach(r=>{
-        const k = r.time.toISOString().slice(0,10);
-        (byDay[k] = byDay[k] || []).push(r);
-      });
-      selected = Object.values(byDay).flatMap(arr=> arr.sort((a,b)=> b.ev_final - a.ev_final).slice(0, topK));
-    }
-
-    const fee = Number(feeBps||0)/10000.0;
-    const withSize = selected.map(r=> ({...r,
-      dir_pred: Math.sign(r.ev_final||0)||1, dir_real: Math.sign(r.gross_event||0)||-1,
-      pnl: (r.net_event - fee) * r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
-
-    const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
-    const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
-    const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
-    const eff = evSum>0 ? pnl/evSum : 0;
-    const effW= evWSum>0? pnl/evWSum: 0;
-    const wins = withSize.filter(r=> r.gross_event>0).length;
-    const hit = selected.length? wins/selected.length : 0;
-    const evPos = p2.length? p2.filter(r=> r.ev_final>=0).length/p2.length : 0;
-
-    const impulses = withSize.map(r=> ({ t:r.exit, v:r.pnl })).sort((a,b)=>a.t-b.t);
-    let cum=0; const series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
-
-    const dayMap={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); dayMap[k]=(dayMap[k]||0)+r.pnl; });
-    const days = Object.keys(dayMap).sort().map(k=> ({ day:k, pnl: dayMap[k] }));
-
-    const scatter = withSize.map(r=> ({ x:r.ev_final, y:r.pnl }));
-    const evs = p2.map(r=> r.ev_final);
-
-    let peak = 0, eq=0, ddSeries=[];
-    series.forEach(s=>{ eq=s.cum; peak=Math.max(peak, eq); ddSeries.push({t:s.t, dd: peak - eq}); });
-
-    function yyyymm(d){ return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,'0'); }
-    const per = {}; let cumPnL=0; const byExit = withSize.slice().sort((a,b)=>a.exit-b.exit);
-    let eqPeak=0, eqNow=0;
-    byExit.forEach(r=>{
-      const m = yyyymm(r.exit);
-      per[m] = per[m] || { trades:0, wins:0, pnl:0, cum:0, mccN:{tp:0,tn:0,fp:0,fn:0} };
-      per[m].trades += 1; per[m].wins += (r.gross_event>0?1:0); per[m].pnl  += r.pnl;
-      const pred = r.dir_pred>=0? 1:0; const real = r.dir_real>=0? 1:0;
-      if(pred===1 && real===1) per[m].mccN.tp += 1;
-      else if(pred===0 && real===0) per[m].mccN.tn += 1;
-      else if(pred===1 && real===0) per[m].mccN.fp += 1;
-      else if(pred===0 && real===1) per[m].mccN.fn += 1;
-      eqNow += r.pnl; eqPeak = Math.max(eqPeak, eqNow);
-    });
-    const periods = Object.keys(per).sort();
-    const periodRows = [];
-    periods.forEach(m=>{
-      const o = per[m]; cumPnL += o.pnl; const n = o.trades||1; const hr = o.wins/n;
-      const N = o.mccN; const denom = (N.tp+N.fp)*(N.tp+N.fn)*(N.tn+N.fp)*(N.tn+N.fn); let mcc=0;
-      if(denom>0) mcc = ((N.tp*N.tn - N.fp*N.fn) / Math.sqrt(denom)) || 0;
-      periodRows.push({ period:m, trades:o.trades, hit:hr, pnl:o.pnl, cum:cumPnL, mcc:mcc });
-    });
-    const mccSeries = periodRows.map(r=> ({ x:r.period, y:r.mcc }));
-
-    const rh = {};
-    withSize.forEach(r=>{
-      const k = `${r.regime_id}|${r.H_row}`;
-      const t = rh[k] = rh[k] || {reg:r.regime_id, H:r.H_row, trades:0, pnl:0};
-      t.trades += 1; t.pnl += r.pnl;
-    });
-    const rhRows = Object.values(rh).sort((a,b)=> a.reg-b.reg || a.H-b.H);
-
-    const daysAll = {};
-    p2.forEach(r=>{ const k=r.time.toISOString().slice(0,10); if(!(k in daysAll)) daysAll[k]=0; });
-    withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); daysAll[k]=(daysAll[k]||0)+r.pnl; });
-    const calRows = Object.keys(daysAll).sort().map(k=> ({ day:k, pnl:daysAll[k] }));
-
-    // Build market slice + trade overlay + signal band
-    let priceSeries = [], tradePoints = [], signalBand = [];
-    if(MKT && MKT.length){
-      const startT = start || MKT[0].time; const endT = end || MKT[MKT.length-1].time;
-      const m2 = MKT.filter(x=> x.time>=startT && x.time<=endT);
-      priceSeries = m2.map(x=> ({ t:x.time, p:x.price }));
-      // map time->price (carry forward)
-      let i=0;
-      withSize.sort((a,b)=> a.time-b.time).forEach(tr=>{
-        while(i<m2.length-1 && m2[i+1].time<=tr.time) i++;
-        const px = m2[i] ? m2[i].price : (m2.length? m2[m2.length-1].price : NaN);
-        tradePoints.push({ x: tr.time, y: px, win: tr.gross_event>0, size: Math.max(2, Math.min(12, Math.abs(tr.size)*8)) });
-      });
-      p2.forEach(r=>{
-        signalBand.push({ t:r.time, v: 1, reg: r.regime_id, pos: r.ev_final>=0 });
-      });
-    }
-
-    return { selected, base:p2, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs,
-             ddSeries, deciles: computeDeciles(withSize), periodRows, mccSeries, rhRows, calRows,
-             priceSeries, tradePoints, signalBand,
-             tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
-  }
-
-  function computeDeciles(withSize){
-    const evSel = withSize.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
-    const buckets = 10; let cuts=[];
-    for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
-    function bucketOf(v){ let b=0; while(b<cuts.length && v>cuts[b]) b++; return b; }
-    const agg = Array.from({length:buckets},()=>({cnt:0, ev:0, real:0}));
-    withSize.forEach(r=>{ const b = bucketOf(r.ev_final); agg[b].cnt++; agg[b].ev += r.ev_final; agg[b].real += r.pnl; });
-    return agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
-  }
-
-  function mkChart(id, cfg){ const el=$(id); if(!el) return; if(charts[id]) charts[id].destroy(); charts[id] = new Chart(el, cfg); }
-
-  function draw(d){
-    safe("k_trades", String(d.trades));
-    safe("k_hit", (d.hit*100).toFixed(1)+"%");
-    safe("k_pnl", d.pnl.toFixed(4));
-    safe("k_evpos", (d.evPos*100).toFixed(1)+"%");
-    safe("k_eff", d.eff.toFixed(3));
-    safe("k_effw", d.effW.toFixed(3));
-
-    const show = (panel, flag)=>{ const p=$(panel), f=$(flag); if(p&&f) p.style.display = f.checked? 'block':'none'; };
-    show("panelPrice","showPrice"); show("panelSignal","showSignal");
-    show("panelEquity","showEquity"); show("panelBars","showBars"); show("panelScatter","showScatter");
-    show("panelHist","showHist"); show("panelDD","showDD"); show("panelMCC","showMCC");
-    show("panelHeat","showHeat"); show("panelCal","showCal"); show("panelTable","showTable");
-    show("panelMonthly","showMonthlyCharts");
-
-    // Price
-    if($("showPrice")?.checked){
-      const labels = d.priceSeries.map(s=> s.t);
-      const data = d.priceSeries.map(s=> s.p);
-      const points = d.tradePoints.map(tp=> ({ x:tp.x, y:tp.y, r:tp.size || 4, backgroundColor: tp.win? "#10b981" : "#ef4444" }));
-      let datasets = [{ label:'Price', data, pointRadius:0, yAxisID:'y' }];
-      if(points.length){
-        datasets.push({ type:'scatter', label:'Trades', data: points, showLine:false, pointRadius: ctx=> ctx.raw.r, yAxisID:'y' });
-      }
-      mkChart('price', {
-        data:{ labels, datasets },
-        options:{ parsing:false, scales:{ x:{ type:'time' }, y:{ title:{display:true,text:'Price'} } }, plugins:{ legend:{ display:true } } }
-      });
-    }
-
-    // Signal band
-    if($("showSignal")?.checked){
-      const labels = d.signalBand.map(s=> s.t);
-      const data = d.signalBand.map(()=> 1);
-      mkChart('signal', {
-        type:'bar',
-        data:{ labels, datasets:[{ label:'Signal', data, borderWidth:0, borderSkipped:false,
-          backgroundColor: (ctx)=>{
-            const s = d.signalBand[ctx.dataIndex];
-            const reg = s.reg;
-            const base = reg===0? "#1f2937" : (reg===1? "#334155" : "#0f766e");
-            return s.pos ? base : "#7f1d1d";
-          } }]},
-        options:{ parsing:false, scales:{ x:{ type:'time' }, y:{ display:false } }, plugins:{ legend:{ display:false }, tooltip:{ enabled:false } } }
-      });
-    }
-
-    // Equity
-    if($("showEquity")?.checked){
-      const labels = d.series.map(s=> s.t);
-      const data = d.series.map(s=> s.cum);
-      const smooth = parseInt($("smooth")?.value||"1",10);
-      let smData=data;
-      if(smooth>1 && data.length>smooth){
-        smData=[]; for(let i=0;i<data.length;i++){ const a=Math.max(0, i-smooth+1); const chunk=data.slice(a,i+1); smData.push(chunk.reduce((x,y)=>x+y,0)/chunk.length); }
-      }
-      mkChart('equity', { type:'line', data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
-        options:{ parsing:false, scales:{ x:{ type:'time' } } } });
-    }
-
-    if($("showBars")?.checked){
-      mkChart('barPnL', { type:'bar', data:{ labels: d.days.map(x=> x.day), datasets:[{ label:'Daily PnL', data: d.days.map(x=> x.pnl) }]},
-                           options:{ scales:{ x:{ ticks:{ maxRotation:0 } } } } });
-    }
-    if($("showDD")?.checked){
-      mkChart('drawdown', { type:'line', data:{ labels: d.ddSeries.map(s=> s.t), datasets:[{ label:'Drawdown', data: d.ddSeries.map(s=> s.dd), pointRadius:0 }]},
-                            options:{ parsing:false, scales:{ x:{ type:'time' } } } });
-    }
-    if($("showScatter")?.checked){
-      mkChart('scatter', { type:'scatter', data:{ datasets:[{ label:'EV vs Realized', data: d.scatter }]},
-                           options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} } } });
-    }
-    if($("showHist")?.checked){
-      const evs = d.evs.slice().sort((a,b)=>a-b);
-      const bins = 30; const min = evs.length? evs[0]:0; const max = evs.length? evs[evs.length-1]:1;
-      const step = (max-min)/(bins||1) || 1;
-      const edges = Array.from({length:bins}, (_,i)=> min + i*step);
-      const counts = Array.from({length:bins}, ()=>0);
-      evs.forEach(v=>{ const idx = Math.max(0, Math.min(bins-1, Math.floor((v-min)/step))); counts[idx]++; });
-      const centers = edges.map((e,i)=> e + step/2);
-      mkChart('hist', { type:'bar', data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]},
-                        options:{ scales:{ x:{ ticks:{ display:false }}} } });
-    }
-    if($("showMCC")?.checked){
-      mkChart('mccChart', { type:'bar', data:{ labels: d.mccSeries.map(p=> p.x), datasets:[{ label:'MCC by Month', data: d.mccSeries.map(p=> p.y) }]},
-                            options:{ scales:{ y:{ min:-1, max:1 } } } });
-    }
-
-    // Monthly charts (cum/hit/MCC)
-    if($("showMonthlyCharts")?.checked){
-      const labels = d.periodRows.map(r=> r.period);
-      const cum = d.periodRows.map(r=> r.cum);
-      const hit = d.periodRows.map(r=> Math.round(r.hit*1000)/10);
-      const mcc = d.periodRows.map(r=> r.mcc);
-      mkChart('monthlyCum', { type:'line', data:{ labels, datasets:[{ label:'Cum PnL (Monthly)', data: cum, pointRadius:2 }]},
-                              options:{ scales:{ x:{ ticks:{ maxRotation:0 } } } } });
-      mkChart('monthlyHit', { type:'bar', data:{ labels, datasets:[{ label:'Hit % (Monthly)', data: hit }]},
-                              options:{ scales:{ y:{ min:0, max:100 } } } });
-      mkChart('monthlyMCC', { type:'bar', data:{ labels, datasets:[{ label:'MCC (Monthly)', data: mcc }]},
-                              options:{ scales:{ y:{ min:-1, max:1 } } } });
-    }
-
-    // Heat grid
-    if($("showHeat")?.checked){
-      const root = $("heatGrid"); if(root){ root.innerHTML=""; d.rhRows.forEach(x=>{
-        const div=document.createElement("div"); div.className="hcell";
-        div.innerHTML=`<div>R${x.reg} · H${x.H}</div><div class="v ${x.pnl>=0?'pos':'neg'}">${x.pnl.toFixed(4)}</div><div class="muted">${x.trades} trd</div>`;
-        root.appendChild(div);
-      }); }
-    }
-    // Calendar heatmap
-    if($("showCal")?.checked){
-      const root = $("cal"); if(root){ root.innerHTML="";
-        d.calRows.forEach(r=>{
-          const div=document.createElement("div"); div.className="d " + (r.pnl>0?'pos':(r.pnl<0?'neg':'zero')); div.title=`${r.day}: ${r.pnl.toFixed(4)}`;
-          root.appendChild(div);
-        });
-      }
-    }
-    // Trade table
-    if($("showTable")?.checked){
-      const tb = document.querySelector("#tradeTable tbody"); if(tb){ tb.innerHTML="";
-        const rows = d.selected.slice(0,500);
-        rows.forEach(r=>{
-          const tr=document.createElement("tr");
-          tr.innerHTML = `<td>${r.time.toISOString()}</td><td>${r.regime_id}</td><td>${r.H_row}</td><td>${r.ev_final.toFixed(5)}</td><td>${r.size.toFixed(3)}</td><td>${r.gross_event.toFixed(5)}</td><td>${r.net_event.toFixed(5)}</td>`;
-          tb.appendChild(tr);
-        });
-      }
-    }
-
-    // Deciles table
-    const dtb = document.querySelector("#deciles tbody"); if(dtb){ dtb.innerHTML=""; d.deciles.forEach(g=>{
-      const tr=document.createElement("tr");
-      const eff = (g.ev>0)? (g.real/g.ev) : 0;
-      tr.innerHTML = `<td>${g.bucket}</td><td>${g.cnt}</td><td>${g.ev.toFixed(4)}</td><td class="${g.real>=0?'pos':'neg'}">${g.real.toFixed(4)}</td><td>${eff.toFixed(3)}</td>`;
-      dtb.appendChild(tr);
-    }); }
-
-    // Period table
-    const pt = document.querySelector("#periodTable tbody"); if(pt){ pt.innerHTML="";
-      d.periodRows.forEach(r=>{
-        const tr=document.createElement("tr");
-        tr.innerHTML = `<td>${r.period}</td><td>${r.trades}</td><td>${(r.hit*100).toFixed(1)}%</td><td class="${r.pnl>=0?'pos':'neg'}">${r.pnl.toFixed(4)}</td><td>${r.cum.toFixed(4)}</td><td>—</td><td>${r.mcc.toFixed(3)}</td>`;
-        pt.appendChild(tr);
-      });
-    }
-  }
-
-  function getFilters(){
-    const s = $('start')?.value; const e = $('end')?.value;
-    const start = s ? new Date(s) : null; const end = e ? new Date(e) : null;
-    const ridMask = {0:$('rid0')?.checked!==false, 1:$('rid1')?.checked!==false, 2:$('rid2')?.checked!==false};
-    const smooth = parseInt($('smooth')?.value||"1",10);
-    const theta = parseFloat($('theta')?.value || "0") || 0;
-    const topK = parseInt($('topK')?.value || "0", 10) || 0;
-    const feeBps = parseFloat($('feeBps')?.value || "0") || 0;
-    return { start, end, ridMask, smooth, theta, topK, feeBps };
-  }
-
-  function refresh(){
-    if(!ALL || !ALL.rows) return;
-    const { start, end, ridMask, smooth, theta, topK, feeBps } = getFilters();
-    FILT = derive(ALL.rows, start, end, ridMask, smooth, theta, topK, feeBps);
-    const sch = ALL.metrics?.viewer_schema || "v2-monthly";
-    const el=$('schemaInfo'); if(el) el.innerText = "viewer_schema: " + sch + (MKT?' + market':' (market 없음)');
-    draw(FILT);
-    saveSettings();
-  }
-
-  function afterLoad(){
-    if(!RAW && !MET && !MKT){ setStatus("-"); return; }
-    const name1 = ALL?.names?.preds || "-";
-    const name2 = ALL?.names?.metrics || "-";
-    const name3 = ALL?.names?.market || "-";
-    setStatus(`로드됨: ${name1} / ${name2} / ${name3} (rows=${(ALL.rows||[]).length||0})`);
+  const fee = (+feeBps||0)/10000.0;
+  const withSize = selected.map(r=> ({...r, pnl:(r.net_event - fee)*r.size, exit:new Date(r.time.getTime()+r.H_row*60*1000)}));
+  const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
+  const wins = withSize.filter(r=> r.gross_event>0).length;
+  const hit = selected.length? wins/selected.length : 0;
+  let cum=0; const series = withSize.sort((a,b)=> a.exit-b.exit).map(s=> ({ t:s.exit, cum:(cum+=s.pnl) }));
+  const days={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); days[k]=(days[k]||0)+r.pnl; });
+  const dayRows = Object.keys(days).sort().map(k=> ({ day:k, pnl:days[k] }));
+  const evs = p.map(r=> r.ev_final);
+  return { base:p, selected, pnl, hit, trades:selected.length, series, dayRows, evs };
+}
+const charts={};
+function mkChart(id, cfg){ const el=document.getElementById(id); if(!el) return; if(charts[id]) charts[id].destroy(); charts[id]=new Chart(el, cfg); }
+function draw(d){
+  document.getElementById('k_trades').innerText = String(d.trades||0);
+  document.getElementById('k_hit').innerText = ((d.hit||0)*100).toFixed(1)+"%";
+  document.getElementById('k_pnl').innerText = (d.pnl||0).toFixed(4);
+  document.getElementById('k_evpos').innerText = ((d.base.filter(r=>r.ev_final>=0).length/(d.base.length||1))*100).toFixed(1)+"%";
+  // Price
+  const price = (window.__MKT||[]);
+  mkChart('price', {
+    type:'line',
+    data:{ labels: price.map(x=>x.time), datasets:[{ label:'Price', data: price.map(x=>x.price), pointRadius:0 }]},
+    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
+  });
+  // Regime
+  mkChart('regime', {
+    type:'line',
+    data:{ labels: d.base.map(r=>r.time), datasets:[{ label:'Regime', data: d.base.map(r=>r.regime_id), stepped:true, pointRadius:0 }]},
+    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
+  });
+  // Equity
+  mkChart('equity', {
+    type:'line',
+    data:{ labels: d.series.map(s=>s.t), datasets:[{ label:'Cum PnL', data: d.series.map(s=>s.cum), pointRadius:0 }]},
+    options:{ parsing:false, scales:{ x:{ type:'time' }}, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x', modifierKey:'shift' }}}}
+  });
+  // Daily PnL
+  mkChart('barPnL', { type:'bar', data:{ labels: d.dayRows.map(x=>x.day), datasets:[{ label:'Daily PnL', data: d.dayRows.map(x=>x.pnl) }]}});
+  // EV vs realized
+  mkChart('scatter', { type:'scatter', data:{ datasets:[{ label:'EV vs Realized', data: d.selected.map(r=> ({x:r.ev_final, y:r.net_event})) }]}});
+}
+function toLocal(dt){ return new Date(dt.getTime()-dt.getTimezoneOffset()*60000).toISOString().slice(0,16); }
+function setDefaultRange(){
+  if(!ALL?.rows?.length) return;
+  const rows=ALL.rows; const t0=new Date(rows[0].time), t1=new Date(rows[rows.length-1].time);
+  document.getElementById('start').value = toLocal(t0); document.getElementById('end').value = toLocal(t1);
+}
+function getFilters(){
+  const s=document.getElementById('start').value, e=document.getElementById('end').value;
+  const start = s? new Date(s) : null; const end = e? new Date(e) : null;
+  const theta = parseFloat(document.getElementById('theta').value||"0")||0;
+  const topK = parseInt(document.getElementById('topK').value||"0",10)||0;
+  const feeBps = parseFloat(document.getElementById('feeBps').value||"0")||0;
+  return {start,end,theta,topK,feeBps};
+}
+function refresh(){
+  if(!ALL?.rows){ document.getElementById('status').innerText="데이터 없음"; return; }
+  const f = getFilters();
+  const d = derive(ALL.rows, f.start, f.end, f.theta, f.topK, f.feeBps);
+  draw(d);
+  document.getElementById('status').innerText = `rows: ${ALL.rows.length}, sel: ${d.trades}`;
+}
+async function handleFiles(files){
+  const arr = Array.from(files||[]); let changed=false;
+  for(const f of arr){
     try{
-      const rows = ALL.rows;
-      if(rows && rows.length){
-        const t0 = new Date(rows[0].time);
-        const t1 = new Date(rows[rows.length-1].time);
-        setRange(t0, t1); // default = full data
+      const name=f.name.toLowerCase();
+      if(name.endsWith(".csv")){
+        const text = await f.text();
+        const parsed = Papa.parse(text, {header:true, dynamicTyping:true}).data;
+        const cols = parsed.length? Object.keys(parsed[0]).map(x=>x.trim().toLowerCase()) : [];
+        const isMarket = cols.includes("price")||cols.includes("close")||cols.includes("px");
+        if(isMarket && cols.includes("time")){ window.__MKT = MKT = adaptMarket(parsed); changed=true; }
+        else { RAW = adaptRows(parsed); changed=true; }
+      }else if(name.endsWith(".json")){
+        MET = JSON.parse(await f.text()); changed=true;
       }
-    }catch(err){}
-    refresh();
+    }catch(err){ document.getElementById('status').innerText = "로딩 실패: "+err.message; console.error(err); }
   }
-
-  async function handleFiles(files){
-    const arr = Array.from(files||[]);
-    if(arr.length===0) return;
-    let changed=false;
-    for(const f of arr){
-      try{
-        if(f.name.endsWith(".csv")){
-          const text = await f.text();
-          const parsed = Papa.parse(text, {header:true, dynamicTyping:true}).data;
-          const cols = parsed.length? Object.keys(parsed[0]).map(x=> x.trim().toLowerCase()) : [];
-          const isMarket = cols.includes("price") || cols.includes("close") || cols.includes("px");
-          if(isMarket && cols.includes("time")){
-            MKT = adaptMarket(parsed); changed=true;
-            ALL = ALL || {}; ALL.names = ALL.names || {}; ALL.names.market = f.name;
-          }else{
-            RAW = adaptRows(parsed); changed=true;
-            ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
-          }
-        }else if(f.name.endsWith(".json")){
-          const text = await f.text(); MET = JSON.parse(text); changed=true;
-          ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
-        }else{ toast("지원하지 않는 파일: "+f.name); }
-      }catch(err){ toast("로딩 실패: "+err.message); console.error(err); }
-    }
-    if(changed) afterLoad();
-  }
-
-  async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
-
-  function loadSettings(){
-    try{ const s = JSON.parse(localStorage.getItem('t4v_settings')||'{}');
-      if('theta' in s) $('theta').value=s.theta; if('topK' in s) $('topK').value=s.topK; if('feeBps' in s) $('feeBps').value=s.feeBps;
-    }catch(e){}
-  }
-  function saveSettings(){
-    const s = { theta: Number($('theta').value||0), topK: Number($('topK').value||0), feeBps: Number($('feeBps').value||0) };
-    localStorage.setItem('t4v_settings', JSON.stringify(s));
-  }
-
-  // Inputs
-  ['theta','topK','feeBps'].forEach(id=>{ $(id)?.addEventListener("change", refresh); });
-  $('predsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
-  $('metricsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
-  $('marketFile')?.addEventListener("change", e=> handleFiles(e.target.files));
-  $('btnForceRefresh')?.addEventListener("click", refresh);
-  ['rid0','rid1','rid2','showPrice','showSignal','showEquity','showBars','showScatter','showHist','showDD','showMCC','showHeat','showCal','showTable','showMonthlyCharts','smooth'].forEach(id=>{
-    const el=$(id); if(el) el.addEventListener("change", refresh);
-  });
-  document.querySelectorAll(".preset .btn").forEach(btn=>{
-    btn.addEventListener("click", ()=>{
-      if(!ALL?.rows?.length) return;
-      const rows = ALL.rows; const last = new Date(rows[rows.length-1].time); const first= new Date(rows[0].time);
-      function minusDays(d){ const x = new Date(last); x.setDate(x.getDate()-d); return x; }
-      let s=first, e=last; const label = btn.getAttribute("data-range");
-      if(label==="1D") s = minusDays(1);
-      if(label==="1W") s = minusDays(7);
-      if(label==="1M") s = minusDays(30);
-      if(label==="3M") s = minusDays(90);
-      if(label==="YTD"){ s = new Date(last.getUTCFullYear(),0,1); }
-      setRange(s,e); refresh();
-    });
-  });
-  $('btnApplyRange')?.addEventListener("click", refresh);
-  $('btnResetAll')?.addEventListener("click", ()=>{
-    if(ALL?.rows?.length){
-      const t0 = new Date(ALL.rows[0].time); const t1 = new Date(ALL.rows[ALL.rows.length-1].time);
-      setRange(t0,t1);
-    }
-    ['rid0','rid1','rid2','showPrice','showSignal','showEquity','showBars','showScatter','showHist','showDD','showMCC','showHeat','showCal','showTable','showMonthlyCharts'].forEach(id=>{ if($(id)) $(id).checked=true; });
-    if($('smooth')) $('smooth').value="1"; $('theta').value="0"; $('topK').value="0"; $('feeBps').value="0";
-    refresh();
-  });
-
-  // DnD
-  ["dragenter","dragover","dragleave","drop"].forEach(evt=>{
-    document.addEventListener(evt, e=>{ if(evt!=="drop"){ e.preventDefault(); } }, false);
-  });
-  document.addEventListener("dragover", e=>{ e.preventDefault(); $('drop').style.background="#0b1220"; });
-  document.addEventListener("dragleave", e=>{ $('drop').style.background=""; });
-  document.addEventListener("drop", e=>{
-    e.preventDefault(); $('drop').style.background="";
-    const items = e.dataTransfer?.files;
-    if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
-  });
-
-  // URL load
-  $('btnLoadURL')?.addEventListener("click", async ()=>{
-    const u1 = $('predsURL')?.value.trim(); const u2 = $('metricsURL')?.value.trim(); const u3 = $('marketURL')?.value.trim();
-    $('loadMsg').innerText = "불러오는 중...";
-    try{
-      if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); ALL = ALL || {}; ALL.rows=RAW; ALL.names=ALL.names||{}; ALL.names.preds=u1; }
-      if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); ALL = ALL || {}; ALL.metrics=MET; ALL.names=ALL.names||{}; ALL.names.metrics=u2; }
-      if(u3){ const t3 = await fetchText(u3); MKT = adaptMarket(Papa.parse(t3, {header:true, dynamicTyping:true}).data); ALL = ALL || {}; ALL.names=ALL.names||{}; ALL.names.market=u3; }
-      $('loadMsg').innerText = "완료"; afterLoad();
-    }catch(err){ $('loadMsg').innerText = "실패: "+err.message; }
-  });
-
-  // Range helpers
-  function setRange(s,e){
-    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-    if($('start')) $('start').value = toLocal(s);
-    if($('end'))   $('end').value   = toLocal(e);
-  }
-  function getCurrentRange(){
-    const s = $('start')?.value; const e = $('end')?.value;
-    let start = s? new Date(s): null; let end = e? new Date(e): null;
-    if(!start || !end){
-      if(ALL?.rows?.length){ start = new Date(ALL.rows[0].time); end = new Date(ALL.rows[ALL.rows.length-1].time); }
-    }
-    return {start, end};
-  }
-
-  // Wheel zoom & pan
-  function wheelZoomHandler(e){
-    if(!ALL?.rows?.length) return;
-    e.preventDefault();
-    const {start, end} = getCurrentRange(); if(!start || !end) return;
-    const span = end - start; if(span<=0) return;
-    const factor = 1 + (e.deltaY>0 ? 0.1 : -0.1);
-    let newSpan = Math.max(60*1000, span * factor);
-    const mid = new Date((start.getTime()+end.getTime())/2);
-    let ns = new Date(mid.getTime() - newSpan/2);
-    let ne = new Date(mid.getTime() + newSpan/2);
-    if(e.shiftKey){
-      const shift = span * 0.1 * (e.deltaY>0 ? 1 : -1);
-      ns = new Date(start.getTime() + shift);
-      ne = new Date(end.getTime() + shift);
-    }
-    const d0 = new Date(ALL.rows[0].time); const d1 = new Date(ALL.rows[ALL.rows.length-1].time);
-    if(ns<d0){ ns=d0; ne=new Date(ns.getTime()+newSpan); }
-    if(ne>d1){ ne=d1; ns=new Date(ne.getTime()-newSpan); }
-    setRange(ns, ne); refresh();
-  }
-  ['equity','barPnL','drawdown','price','signal'].forEach(id=>{ const el=$(id); if(el){ el.addEventListener('wheel', wheelZoomHandler, {passive:false}); } });
-
-  // Drag-select zoom (equity panel)
-  (function(){
-    const panel = $('panelEquity'); const box = $('selBox');
-    let dragging=false, x0=0;
-    function px(e){ const r=panel.getBoundingClientRect(); return Math.max(0, Math.min(e.clientX - r.left, r.width)); }
-    panel.addEventListener('mousedown', e=>{ if(e.button!==0) return; dragging=true; x0=px(e); box.style.display='block'; box.style.left=x0+'px'; box.style.top='0px'; box.style.width='1px'; box.style.height='100%'; });
-    panel.addEventListener('mousemove', e=>{ if(!dragging) return; const x1=px(e); const l=Math.min(x0,x1); const w=Math.abs(x1-x0); box.style.left=l+'px'; box.style.width=Math.max(1,w)+'px'; });
-    function done(e){
-      if(!dragging) return; dragging=false; box.style.display='none';
-      const x1=px(e); if(Math.abs(x1-x0)<5) return;
-      const r=panel.getBoundingClientRect(); const {start, end}=getCurrentRange(); const span=end-start;
-      const t0 = new Date(start.getTime() + (Math.min(x0,x1)/r.width)*span);
-      const t1 = new Date(start.getTime() + (Math.max(x0,x1)/r.width)*span);
-      setRange(t0,t1); refresh();
-    }
-    panel.addEventListener('mouseup', done); panel.addEventListener('mouseleave', e=>{ if(dragging) done(e); });
-  })();
-
-  loadSettings();
+  if(changed){ ALL = ALL||{}; ALL.rows = RAW; setDefaultRange(); refresh(); document.getElementById('status').innerText = "로드 완료"; }
+}
+async function fetchText(u){ const r=await fetch(u,{cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
+document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
+document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
+document.getElementById("marketFile").addEventListener("change", e=> handleFiles(e.target.files));
+document.addEventListener("dragover", e=> e.preventDefault());
+document.addEventListener("drop", e=> { e.preventDefault(); handleFiles(e.dataTransfer.files); });
+document.getElementById("btnLoadURL").addEventListener("click", async ()=>{
+  const u1=document.getElementById("predsURL").value.trim(),
+        u2=document.getElementById("metricsURL").value.trim(),
+        u3=document.getElementById("marketURL").value.trim();
+  try{
+    if(u1){ RAW = adaptRows(Papa.parse(await fetchText(u1), {header:true, dynamicTyping:true}).data); }
+    if(u2){ MET = JSON.parse(await fetchText(u2)); }
+    if(u3){ window.__MKT = MKT = adaptMarket(Papa.parse(await fetchText(u3), {header:true, dynamicTyping:true}).data); }
+    ALL={ rows:RAW, metrics:MET }; setDefaultRange(); refresh(); document.getElementById("status").innerText="URL 로드 완료";
+  }catch(err){ document.getElementById("status").innerText = "실패: "+err.message; }
 });
+document.getElementById("btnApplyRange").addEventListener("click", refresh);
+document.getElementById("btnReset").addEventListener("click", ()=>{
+  setDefaultRange(); document.getElementById("theta").value="0"; document.getElementById("topK").value="0"; document.getElementById("feeBps").value="0"; refresh();
+});
+["theta","topK","feeBps"].forEach(id=> document.getElementById(id).addEventListener("change", refresh));
+
+// Demo (빈 화면 방지용. 실제 파일 드롭하면 바로 대체됨)
+(function demo(){
+  const n=300; const now=Date.now(); const rows=[]; let px=2000;
+  for(let i=0;i<n;i++){ const t=new Date(now - (n-i)*60*1000); px *= (1 + (Math.random()-0.5)*0.001);
+    rows.push({ time:t, regime_id:(i%3), H_row:15, ev_final:(Math.random()-0.4)*0.01, entry_flag:(Math.random()>0.85?1:0),
+                size:Math.random(), gross_event:(Math.random()-0.5)*0.01, net_event:(Math.random()-0.5)*0.01 });
+  }
+  RAW = rows; window.__MKT = Array.from({length:n}, (_,i)=>{ const t=new Date(now - (n-i)*60*1000); return { time:t, price: 1900 + i*0.6 + (Math.random()-0.5)*5 }; });
+  ALL={ rows:RAW };
+  setDefaultRange(); refresh();
+})();
 </script>
 </body>
 </html>
