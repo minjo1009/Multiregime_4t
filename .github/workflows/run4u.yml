@@ -7,11 +7,6 @@ on:
         description: "데이터 경로 (예: ETHUSDT_1min_2025H1.csv 또는 .zip)"
         required: true
         type: string
-      code_zip:
-        description: "코드 ZIP 파일명(리포 루트). 비워두면 trade4v/ 폴더 사용"
-        required: false
-        default: "trade4v_S1S2_codepack_v3.zip"
-        type: string
       train_start:
         description: "학습 시작(UTC)"
         required: true
@@ -57,11 +52,6 @@ on:
         required: true
         default: "0:5,1:10,2:20"
         type: string
-      out_dir:
-        description: "출력 폴더"
-        required: true
-        default: "_out_4u"
-        type: string
 
 jobs:
   backtest:
@@ -80,7 +70,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps (minimal)
+      - name: Install deps
         run: |
           python -m pip install -U pip
           pip install "pandas>=2.0" "numpy>=1.24"
@@ -95,41 +85,55 @@ jobs:
           if [[ "$DATA" == *.zip ]]; then unzip -o -q "$DATA" -d data; else cp -f "$DATA" data/; fi
           echo "Using CSV:"; ls -1 data/*.csv | head -n1
 
-      - name: Prepare code (prefer committed ./trade4v, otherwise unzip code_zip)
+      - name: Prepare code (auto-detect folder or unzip *trade4v*.zip)
         id: codeprep
         shell: bash
         run: |
           set -euo pipefail
-          CODEZIP="${{ inputs.code_zip }}"
-          if [[ -d trade4v && -f trade4v/trade4v/run_4u.py ]]; then
-            echo "Found committed ./trade4v/"
+          shopt -s nullglob dotglob
+
+          # 1) 커밋된 폴더 우선
+          if [[ -f trade4v/run_4u.py ]]; then
+            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -f trade4v/trade4v/run_4u.py ]]; then
+            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 2) 루트의 *trade4v*.zip 자동 탐색 → 임시 폴더에 비대화형 해제
+          rm -rf __extracted trade4v || true
+          mapfile -t ZIPS < <(ls -1 *.zip 2>/dev/null | grep -i 'trade4v' || true)
+          if (( ${#ZIPS[@]} == 0 )); then
+            echo "::error::No trade4v code folder or trade4v*.zip found"; exit 1
+          fi
+          for z in "${ZIPS[@]}"; do
+            echo "Unzipping $z"
+            unzip -o -q "$z" -d "__extracted/${z%.zip}"
+          done
+
+          # 3) run_4u.py가 들어있는 '가장 안쪽 trade4v' 폴더를 ./trade4v 로 평탄화
+          PARENT="$(dirname "$(find __extracted -type f -name 'run_4u.py' | head -n1 || true)")"
+          [[ -n "$PARENT" ]] || { echo "::error::run_4u.py not found after extraction"; exit 1; }
+          # 깊이 상관없이 PARENT를 trade4v로 이동
+          mv "$PARENT" trade4v
+
+          # 4) 스크립트 경로 결정
+          if [[ -f trade4v/run_4u.py ]]; then
+            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+          elif [[ -f trade4v/trade4v/run_4u.py ]]; then
             echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
           else
-            if [[ -n "$CODEZIP" && -f "$CODEZIP" ]]; then
-              echo "Unzipping $CODEZIP"
-              rm -rf __extracted trade4v || true
-              unzip -o -q "$CODEZIP" -d __extracted
-              # 평탄화: 최상위에 trade4v/ 가 오도록
-              if [[ -d __extracted/trade4v ]]; then mv __extracted/trade4v ./trade4v; else
-                # zip 안에 상위폴더/trade4v 형태 지원
-                TDIR="$(find __extracted -type d -name trade4v | head -n1 || true)"
-                [[ -n "$TDIR" ]] || { echo "::error::trade4v folder not found in zip"; exit 1; }
-                mv "$TDIR" ./trade4v
-              fi
-              echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
-            else
-              echo "::error::Neither committed ./trade4v nor code_zip exists"; exit 1
-            fi
+            echo "::error::run_4u.py not found in ./trade4v"; exit 1
           fi
-          [[ -f ${{ steps.codeprep.outputs.SCRIPT }} ]] || { echo "::error::run_4u.py not found"; exit 1; }
-          echo "Using ${ { steps.codeprep.outputs.SCRIPT } }" || true
 
       - name: Run backtest (v3)
         shell: bash
         run: |
           set -euo pipefail
-          export PYTHONPATH="$PWD/trade4v"
-          OUT="${{ inputs.out_dir }}"
+          export PYTHONPATH="$PWD/trade4v:$PWD"
+          OUT="_out_4u"
           CSV=$(ls -1 data/*.csv | head -n1)
           mkdir -p "$OUT"
           python "${{ steps.codeprep.outputs.SCRIPT }}" \
@@ -148,18 +152,18 @@ jobs:
       - name: Show outputs (preview)
         if: always()
         run: |
-          echo "== files =="; find "${{ inputs.out_dir }}" -maxdepth 3 -type f -print | sed 's/^/  /'
-          echo "== run.log tail =="; tail -n 50 "${{ inputs.out_dir }}"/run/run.log || true
-          echo "== metrics =="; cat "${{ inputs.out_dir }}"/run/metrics_oos.json || true
-          echo "== preds head =="; head -n 5 "${{ inputs.out_dir }}"/run/preds_test.csv || true
+          echo "== files =="; find "_out_4u" -maxdepth 3 -type f -print | sed 's/^/  /'
+          echo "== run.log tail =="; tail -n 80 "_out_4u/run/run.log" || true
+          echo "== metrics =="; cat "_out_4u/run/metrics_oos.json" || true
+          echo "== preds head =="; head -n 5 "_out_4u/run/preds_test.csv" || true
 
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_4u_v3
           path: |
-            ${{ inputs.out_dir }}/run/preds_test.csv
-            ${{ inputs.out_dir }}/run/metrics_oos.json
-            ${{ inputs.out_dir }}/run/run.log
+            _out_4u/run/preds_test.csv
+            _out_4u/run/metrics_oos.json
+            _out_4u/run/run.log
           if-no-files-found: error
           retention-days: 14
