@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro v2.2 (Schema v1)</title>
+  <title>Trade4V Viewer Pro v2.3 (Schema v1)</title>
   <style>
     :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; }
     html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -28,16 +28,15 @@
     th:first-child, td:first-child { text-align:left; }
     .pos { color: var(--good); } .neg { color: var(--bad); }
   </style>
-  <!-- Pinned versions -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" integrity="" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0" integrity="" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js" integrity="" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" integrity="" crossorigin="anonymous"></script>
+  <!-- Core libs (pinned) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro v2.2</h1>
+    <h1>Trade4V Viewer Pro v2.3</h1>
     <div class="section">
       <div class="muted">파일 드래그 앤 드롭 (창 어디든 가능)</div>
       <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
@@ -130,366 +129,327 @@
 <div id="toast" class="toast" style="display:none"></div>
 
 <script>
-// ===== Chart.js safe plugin registration =====
-(function(){
-  try{
-    const zoom = window["chartjs-plugin-zoom"] || window.ChartZoom || window.chartjsPluginZoom;
-    if(zoom && window.Chart && window.Chart.register){
-      window.Chart.register(zoom);
-      console.log("[viewer] zoom plugin registered");
-    }else{
-      console.warn("[viewer] zoom plugin not found; charts will render without zoom.");
-    }
-  }catch(e){
-    console.warn("[viewer] zoom plugin registration failed:", e);
-  }
-})();
+// Dynamic loader for chartjs-plugin-zoom with fallback and no hard failure.
+function loadZoomPlugin(callback){
+  const urls = [
+    "https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js",
+    "https://unpkg.com/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"
+  ];
+  let i=0;
+  (function tryLoad(){
+    if(i>=urls.length){ console.warn("[viewer] zoom plugin not found; continue without zoom."); callback(false); return; }
+    const s=document.createElement("script");
+    s.src=urls[i++]; s.async=true; s.onload=()=>{ try{
+      if(window.Chart && window.Chart.register && window["ChartZoom"]){ window.Chart.register(window.ChartZoom); callback(true); }
+      else if(window.Chart && window.Chart.register && window["chartjs-plugin-zoom"]){ window.Chart.register(window["chartjs-plugin-zoom"]); callback(true); }
+      else { callback(false); }
+    }catch(e){ console.warn("[viewer] zoom plugin register failed:", e); callback(false); } };
+    s.onerror=()=>{ tryLoad(); };
+    document.head.appendChild(s);
+  })();
+}
 </script>
 
 <script>
-let RAW=null, MET=null, FILT=null, ALL=null, charts={};
-const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
-const synonyms = {
-  time: ["time","timestamp","open_time","date"],
-  regime_id: ["regime_id","regime","state"],
-  H_row: ["H_row","H_used","H","h_row","h_used","h"],
-  ev_final: ["ev_final","ev_net","edge","pnl_pred","ev"],
-  entry_flag: ["entry_flag","signal","enter","trade","flag"],
-  size: ["size","kelly","weight","position","w","kelly_size"],
-  gross_event: ["gross_event","event_gross","gross","ret_gross","gross_ret"],
-  net_event: ["net_event","event_net","net","ret_net","net_ret","realized"]
-};
+window.addEventListener('DOMContentLoaded', () => {
+  let RAW=null, MET=null, FILT=null, ALL=null, charts={};
+  const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
+  const synonyms = {
+    time: ["time","timestamp","open_time","date"],
+    regime_id: ["regime_id","regime","state"],
+    H_row: ["H_row","H_used","H","h_row","h_used","h"],
+    ev_final: ["ev_final","ev_net","edge","pnl_pred","ev"],
+    entry_flag: ["entry_flag","signal","enter","trade","flag"],
+    size: ["size","kelly","weight","position","w","kelly_size"],
+    gross_event: ["gross_event","event_gross","gross","ret_gross","gross_ret"],
+    net_event: ["net_event","event_net","net","ret_net","net_ret","realized"]
+  };
 
-function toast(msg){
-  const t=document.getElementById('toast'); t.innerText=msg; t.style.display='block';
-  setTimeout(()=>{ t.style.display='none'; }, 2500);
-}
-function setStatus(msg){ document.getElementById('status').innerText = msg; }
+  const $ = id => document.getElementById(id);
+  const safe = (id, text) => { const el=$(id); if(el) el.innerText = text; };
 
-function safeParseTime(v){
-  if(typeof v === 'number'){ return new Date(v); }
-  if(typeof v === 'string'){
-    if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
+  function toast(msg){
+    const t=$('toast'); t.innerText=msg; t.style.display='block'; setTimeout(()=>{ t.style.display='none'; }, 2500);
+  }
+  function setStatus(msg){ const el=$('status'); if(el) el.innerText = msg; }
+
+  function safeParseTime(v){
+    if(typeof v === 'number'){ return new Date(v); }
+    if(typeof v === 'string'){
+      if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
+      return new Date(v);
+    }
     return new Date(v);
   }
-  return new Date(v);
-}
 
-function mapHeaders(rows){
-  if(!rows || !rows.length) return rows;
-  const first = rows[0];
-  const keys = Object.keys(first);
-  const up = k=> k.toLowerCase().replace(/\s+/g,'');
-  const dict = {};
-  for(const req in synonyms){
-    const cands = synonyms[req];
-    for(const k of keys){
-      const K = up(k);
-      for(const c of cands){
-        if(K === up(c)){ dict[req] = k; break; }
+  function mapHeaders(rows){
+    if(!rows || !rows.length) return rows;
+    const keys = Object.keys(rows[0]);
+    const up = k=> k.toLowerCase().replace(/\s+/g,'');
+    const dict = {};
+    for(const req in synonyms){
+      const cands = synonyms[req];
+      for(const k of keys){
+        const K = up(k);
+        for(const c of cands){ if(K === up(c)){ dict[req] = k; break; } }
+        if(dict[req]) break;
       }
-      if(dict[req]) break;
     }
-  }
-  return rows.map(r=>{
-    const o={};
-    for(const req of Object.keys(synonyms)){
-      const k = dict[req];
-      if(k !== undefined){ o[req] = r[k]; }
-    }
-    for(const k in r){ if(!(k in o)) o[k]=r[k]; }
-    return o;
-  });
-}
-
-function adaptRows(rows){
-  if(!rows || rows.length===0) return rows;
-  rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
-  rows = mapHeaders(rows);
-  const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
-  let out = rows.map(r=>({...r}));
-  if(!has("ev_final") && has("ev_net")) out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
-  const miss = needCols.filter(c=> !(c in out[0]));
-  if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
-  return out;
-}
-
-function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
-  const p = rows.map(r=>({ ...r,
-    time: safeParseTime(r.time),
-    regime_id: Number(r.regime_id),
-    H_row: Number(r.H_row||1),
-    ev_final: Number(r.ev_final||0),
-    entry_flag: Number(r.entry_flag||0),
-    size: Number(r.size||0),
-    gross_event: Number(r.gross_event||0),
-    net_event: Number(r.net_event||0),
-  })).filter(r=> ridMask[r.regime_id]);
-  const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
-
-  const selected = p2.filter(r=> r.entry_flag===1);
-  const withSize = selected.map(r=> ({...r, pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
-
-  const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
-  const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
-  const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
-  const eff = evSum>0 ? pnl/evSum : 0;
-  const effW= evWSum>0? pnl/evWSum: 0;
-  const wins = withSize.filter(r=> r.gross_event>0).length;
-  const hit = selected.length? wins/selected.length : 0;
-  const evPos = p2.length? p2.filter(r=> r.ev_final>=0).length/p2.length : 0;
-
-  const impulses = withSize.map(r=> ({ t:r.exit, v:r.pnl })).sort((a,b)=>a.t-b.t);
-  let cum=0; const series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
-
-  const dayMap={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); dayMap[k]=(dayMap[k]||0)+r.pnl; });
-  const days = Object.keys(dayMap).sort().map(k=> ({ day:k, pnl: dayMap[k] }));
-
-  const scatter = withSize.map(r=> ({ x:r.ev_final, y:r.pnl }));
-
-  const evs = p2.map(r=> r.ev_final);
-
-  // Drawdown
-  let peak = 0, eq=0, ddSeries=[];
-  series.forEach(s=>{ eq=s.cum; peak=Math.max(peak, eq); ddSeries.push({t:s.t, dd: peak - eq}); });
-
-  // Deciles
-  const evSel = selected.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
-  const buckets = 10;
-  let cuts=[]; for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
-  function bucketOf(v){ let b=0; while(b<cuts.length && v>cuts[b]) b++; return b; }
-  const agg = Array.from({length:buckets},()=>({cnt:0, ev:0, real:0}));
-  withSize.forEach(r=>{ const b = bucketOf(r.ev_final); agg[b].cnt++; agg[b].ev += r.ev_final; agg[b].real += r.pnl; });
-  const dec = agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
-
-  return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries, deciles:dec, tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
-}
-
-function mkChart(id, cfg){
-  if(charts[id]) charts[id].destroy();
-  charts[id] = new Chart(document.getElementById(id), cfg);
-}
-
-function draw(d){
-  const $ = id=> document.getElementById(id);
-  $("#k_trades").innerText = d.trades;
-  $("#k_hit").innerText = (d.hit*100).toFixed(1)+"%";
-  $("#k_pnl").innerText = d.pnl.toFixed(4);
-  $("#k_evpos").innerText = (d.evPos*100).toFixed(1)+"%";
-  $("#k_eff").innerText = d.eff.toFixed(3);
-  $("#k_effw").innerText = d.effW.toFixed(3);
-
-  const show = id=> document.getElementById(id).style.display = 'block';
-  const hide = id=> document.getElementById(id).style.display = 'none';
-  const on = id=> document.getElementById(id).checked;
-
-  (on("showEquity")?show:hide)("panelEquity");
-  (on("showBars")?show:hide)("panelBars");
-  (on("showScatter")?show:hide)("panelScatter");
-  (on("showHist")?show:hide)("panelHist");
-  (on("showDD")?show:hide)("panelDD");
-
-  // Equity
-  if(on("showEquity")){
-    const labels = d.series.map(s=> s.t);
-    const data = d.series.map(s=> s.cum);
-    const smooth = parseInt(document.getElementById("smooth").value||"1",10);
-    let smData=data;
-    if(smooth>1 && data.length>smooth){
-      smData=[]; for(let i=0;i<data.length;i++){ const a=Math.max(0, i-smooth+1); const chunk=data.slice(a,i+1); smData.push(chunk.reduce((x,y)=>x+y,0)/chunk.length); }
-    }
-    mkChart('equity', {
-      type:'line',
-      data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
-      options:{ parsing:false, scales:{ x:{ type:'time' } },
-        plugins:{ zoom: (Chart.registry.plugins.get('zoom')? { zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } : {}) }
+    return rows.map(r=>{
+      const o={};
+      for(const req of Object.keys(synonyms)){
+        const k = dict[req];
+        if(k !== undefined){ o[req] = r[k]; }
       }
+      for(const k in r){ if(!(k in o)) o[k]=r[k]; }
+      return o;
     });
   }
 
-  if(on("showBars")){
-    mkChart('barPnL', {
-      type:'bar',
-      data:{ labels: d.days.map(x=> x.day), datasets:[{ label:'Daily PnL', data: d.days.map(x=> x.pnl) }]},
-      options:{ scales:{ x:{ ticks:{ maxRotation:0 } } } }
-    });
+  function adaptRows(rows){
+    if(!rows || rows.length===0) return rows;
+    rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
+    rows = mapHeaders(rows);
+    const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
+    let out = rows.map(r=>({...r}));
+    if(!has("ev_final") && has("ev_net")) out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
+    const miss = needCols.filter(c=> !(c in out[0]));
+    if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
+    return out;
   }
 
-  if(on("showDD")){
-    mkChart('drawdown', {
-      type:'line',
-      data:{ labels: d.ddSeries.map(s=> s.t), datasets:[{ label:'Drawdown', data: d.ddSeries.map(s=> s.dd), pointRadius:0 }]},
-      options:{ parsing:false, scales:{ x:{ type:'time' } } }
-    });
+  function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
+    const p = rows.map(r=>({ ...r,
+      time: safeParseTime(r.time), regime_id: Number(r.regime_id), H_row: Number(r.H_row||1),
+      ev_final: Number(r.ev_final||0), entry_flag: Number(r.entry_flag||0), size: Number(r.size||0),
+      gross_event: Number(r.gross_event||0), net_event: Number(r.net_event||0),
+    })).filter(r=> ridMask[r.regime_id]);
+    const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
+
+    const selected = p2.filter(r=> r.entry_flag===1);
+    const withSize = selected.map(r=> ({...r, pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
+
+    const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
+    const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
+    const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
+    const eff = evSum>0 ? pnl/evSum : 0;
+    const effW= evWSum>0? pnl/evWSum: 0;
+    const wins = withSize.filter(r=> r.gross_event>0).length;
+    const hit = selected.length? wins/selected.length : 0;
+    const evPos = p2.length? p2.filter(r=> r.ev_final>=0).length/p2.length : 0;
+
+    const impulses = withSize.map(r=> ({ t:r.exit, v:r.pnl })).sort((a,b)=>a.t-b.t);
+    let cum=0; const series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
+
+    const dayMap={}; withSize.forEach(r=>{ const k=r.exit.toISOString().slice(0,10); dayMap[k]=(dayMap[k]||0)+r.pnl; });
+    const days = Object.keys(dayMap).sort().map(k=> ({ day:k, pnl: dayMap[k] }));
+
+    const scatter = withSize.map(r=> ({ x:r.ev_final, y:r.pnl }));
+    const evs = p2.map(r=> r.ev_final);
+
+    // Drawdown
+    let peak = 0, eq=0, ddSeries=[];
+    series.forEach(s=>{ eq=s.cum; peak=Math.max(peak, eq); ddSeries.push({t:s.t, dd: peak - eq}); });
+
+    // Deciles
+    const evSel = selected.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
+    const buckets = 10;
+    let cuts=[]; for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
+    function bucketOf(v){ let b=0; while(b<cuts.length && v>cuts[b]) b++; return b; }
+    const agg = Array.from({length:buckets},()=>({cnt:0, ev:0, real:0}));
+    withSize.forEach(r=>{ const b = bucketOf(r.ev_final); agg[b].cnt++; agg[b].ev += r.ev_final; agg[b].real += r.pnl; });
+    const dec = agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
+
+    return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries, deciles:dec,
+             tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
   }
 
-  if(on("showScatter")){
-    mkChart('scatter', {
-      type:'scatter',
-      data:{ datasets:[{ label:'EV vs Realized', data: d.scatter }]},
-      options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} } }
-    });
+  function mkChart(id, cfg){
+    const el=$(id);
+    if(!el) return;
+    if(charts[id]) charts[id].destroy();
+    charts[id] = new Chart(el, cfg);
   }
 
-  if(on("showHist")){
-    const evs = d.evs.slice().sort((a,b)=>a-b);
-    const bins = 30; const min = evs.length? evs[0]:0; const max = evs.length? evs[evs.length-1]:1;
-    const step = (max-min)/(bins||1) || 1;
-    const edges = Array.from({length:bins}, (_,i)=> min + i*step);
-    const counts = Array.from({length:bins}, ()=>0);
-    evs.forEach(v=>{ const idx = Math.max(0, Math.min(bins-1, Math.floor((v-min)/step))); counts[idx]++; });
-    const centers = edges.map((e,i)=> e + step/2);
-    mkChart('hist', { type:'bar', data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]}, options:{ scales:{ x:{ ticks:{ display:false }}} } });
-  }
+  function draw(d){
+    safe("k_trades", String(d.trades));
+    safe("k_hit", (d.hit*100).toFixed(1)+"%");
+    safe("k_pnl", d.pnl.toFixed(4));
+    safe("k_evpos", (d.evPos*100).toFixed(1)+"%");
+    safe("k_eff", d.eff.toFixed(3));
+    safe("k_effw", d.effW.toFixed(3));
 
-  // Deciles
-  const tb = document.querySelector("#deciles tbody"); tb.innerHTML="";
-  d.deciles.forEach(g=>{
-    const tr=document.createElement("tr");
-    const eff = (g.ev>0)? (g.real/g.ev) : 0;
-    tr.innerHTML = `<td>${g.bucket}</td><td>${g.cnt}</td><td>${g.ev.toFixed(4)}</td><td class="${g.real>=0?'pos':'neg'}">${g.real.toFixed(4)}</td><td>${eff.toFixed(3)}</td>`;
-    tb.appendChild(tr);
-  });
-}
+    const display = (panelId, flagId)=>{ const p=$(panelId), f=$(flagId); if(p&&f) p.style.display = f.checked? 'block':'none'; };
+    display("panelEquity","showEquity"); display("panelBars","showBars"); display("panelScatter","showScatter"); display("panelHist","showHist"); display("panelDD","showDD");
 
-function getFilters(){
-  const s = document.getElementById("start").value;
-  const e = document.getElementById("end").value;
-  const start = s ? new Date(s) : null;
-  const end   = e ? new Date(e) : null;
-  const ridMask = {0:document.getElementById("rid0").checked, 1:document.getElementById("rid1").checked, 2:document.getElementById("rid2").checked};
-  const smooth = parseInt(document.getElementById("smooth").value||"1",10);
-  return { start, end, ridMask, smooth };
-}
-
-function refresh(){
-  if(!ALL || !ALL.rows) return;
-  const { start, end, ridMask, smooth } = getFilters();
-  const d = derive(ALL.rows, start, end, ridMask, smooth);
-  FILT = d;
-  document.getElementById("schemaInfo").innerText = "viewer_schema: " + (ALL.metrics?.viewer_schema || "v1?");
-  draw(d);
-}
-
-function afterLoad(){
-  if(!RAW && !MET){ setStatus("-"); return; }
-  const name1 = ALL?.names?.preds || "-";
-  const name2 = ALL?.names?.metrics || "-";
-  setStatus(`로드됨: ${name1} / ${name2} (rows=${(ALL.rows||[]).length||0})`);
-  try{
-    const rows = ALL.rows;
-    if(rows && rows.length){
-      const t0 = safeParseTime(rows[0].time);
-      const t1 = safeParseTime(rows[rows.length-1].time);
-      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-      document.getElementById("start").value = toLocal(t0);
-      document.getElementById("end").value   = toLocal(t1);
+    if($("showEquity")?.checked){
+      const labels = d.series.map(s=> s.t);
+      const data = d.series.map(s=> s.cum);
+      const smooth = parseInt($("smooth")?.value||"1",10);
+      let smData=data;
+      if(smooth>1 && data.length>smooth){
+        smData=[]; for(let i=0;i<data.length;i++){ const a=Math.max(0, i-smooth+1); const chunk=data.slice(a,i+1); smData.push(chunk.reduce((x,y)=>x+y,0)/chunk.length); }
+      }
+      const zoomCfg = (Chart?.registry?.plugins?.plugins || {})["zoom"] ?
+        { zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } : undefined;
+      mkChart('equity', { type:'line', data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
+        options:{ parsing:false, scales:{ x:{ type:'time' } }, plugins:{ zoom: zoomCfg } } });
     }
-  }catch(err){}
-  refresh();
-}
 
-async function handleFiles(files){
-  const arr = Array.from(files||[]);
-  if(arr.length===0) return;
-  let changed=false;
-  for(const f of arr){
+    if($("showBars")?.checked){
+      mkChart('barPnL', { type:'bar', data:{ labels: d.days.map(x=> x.day), datasets:[{ label:'Daily PnL', data: d.days.map(x=> x.pnl) }]},
+                           options:{ scales:{ x:{ ticks:{ maxRotation:0 } } } } });
+    }
+
+    if($("showDD")?.checked){
+      mkChart('drawdown', { type:'line', data:{ labels: d.ddSeries.map(s=> s.t), datasets:[{ label:'Drawdown', data: d.ddSeries.map(s=> s.dd), pointRadius:0 }]},
+                            options:{ parsing:false, scales:{ x:{ type:'time' } } } });
+    }
+
+    if($("showScatter")?.checked){
+      mkChart('scatter', { type:'scatter', data:{ datasets:[{ label:'EV vs Realized', data: d.scatter }]},
+                           options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} } } });
+    }
+
+    if($("showHist")?.checked){
+      const evs = d.evs.slice().sort((a,b)=>a-b);
+      const bins = 30; const min = evs.length? evs[0]:0; const max = evs.length? evs[evs.length-1]:1;
+      const step = (max-min)/(bins||1) || 1;
+      const edges = Array.from({length:bins}, (_,i)=> min + i*step);
+      const counts = Array.from({length:bins}, ()=>0);
+      evs.forEach(v=>{ const idx = Math.max(0, Math.min(bins-1, Math.floor((v-min)/step))); counts[idx]++; });
+      const centers = edges.map((e,i)=> e + step/2);
+      mkChart('hist', { type:'bar', data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]},
+                        options:{ scales:{ x:{ ticks:{ display:false }}} } });
+    }
+
+    const tb = document.querySelector("#deciles tbody"); if(tb){ tb.innerHTML=""; d.deciles.forEach(g=>{
+      const tr=document.createElement("tr");
+      const eff = (g.ev>0)? (g.real/g.ev) : 0;
+      tr.innerHTML = `<td>${g.bucket}</td><td>${g.cnt}</td><td>${g.ev.toFixed(4)}</td><td class="${g.real>=0?'pos':'neg'}">${g.real.toFixed(4)}</td><td>${eff.toFixed(3)}</td>`;
+      tb.appendChild(tr);
+    }); }
+  }
+
+  function getFilters(){
+    const s = $('start')?.value;
+    const e = $('end')?.value;
+    const start = s ? new Date(s) : null;
+    const end   = e ? new Date(e) : null;
+    const ridMask = {0:$('rid0')?.checked!==false, 1:$('rid1')?.checked!==false, 2:$('rid2')?.checked!==false};
+    const smooth = parseInt($('smooth')?.value||"1",10);
+    return { start, end, ridMask, smooth };
+  }
+
+  function refresh(){
+    if(!ALL || !ALL.rows) return;
+    const { start, end, ridMask, smooth } = getFilters();
+    const d = derive(ALL.rows, start, end, ridMask, smooth);
+    FILT = d;
+    const sch = ALL.metrics?.viewer_schema || "v1?";
+    const el=$('schemaInfo'); if(el) el.innerText = "viewer_schema: " + sch;
+    draw(d);
+  }
+
+  function afterLoad(){
+    if(!RAW && !MET){ setStatus("-"); return; }
+    const name1 = ALL?.names?.preds || "-";
+    const name2 = ALL?.names?.metrics || "-";
+    setStatus(`로드됨: ${name1} / ${name2} (rows=${(ALL.rows||[]).length||0})`);
     try{
-      if(f.name.endsWith(".csv")){
-        const r = await new Promise((res,rej)=> Papa.parse(f,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}));
-        RAW = adaptRows(r); changed=true;
-        ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
-      }else if(f.name.endsWith(".json")){
-        const text = await f.text(); MET = JSON.parse(text); changed=true;
-        ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
-      }else{
-        toast("지원하지 않는 파일: "+f.name);
+      const rows = ALL.rows;
+      if(rows && rows.length){
+        const t0 = safeParseTime(rows[0].time);
+        const t1 = safeParseTime(rows[rows.length-1].time);
+        const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+        if($('start')) $('start').value = toLocal(t0);
+        if($('end'))   $('end').value   = toLocal(t1);
       }
-    }catch(err){
-      toast("로딩 실패: "+err.message);
-      console.error(err);
-    }
+    }catch(err){}
+    refresh();
   }
-  if(changed) afterLoad();
-}
 
-async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
+  async function handleFiles(files){
+    const arr = Array.from(files||[]);
+    if(arr.length===0) return;
+    let changed=false;
+    for(const f of arr){
+      try{
+        if(f.name.endsWith(".csv")){
+          const r = await new Promise((res,rej)=> Papa.parse(f,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}));
+          RAW = adaptRows(r); changed=true;
+          ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
+        }else if(f.name.endsWith(".json")){
+          const text = await f.text(); MET = JSON.parse(text); changed=true;
+          ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
+        }else{
+          toast("지원하지 않는 파일: "+f.name);
+        }
+      }catch(err){
+        toast("로딩 실패: "+err.message);
+        console.error(err);
+      }
+    }
+    if(changed) afterLoad();
+  }
 
-// Inputs
-document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
-document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
-document.getElementById("btnForceRefresh").addEventListener("click", refresh);
-["rid0","rid1","rid2","showEquity","showBars","showScatter","showHist","showDD","smooth"].forEach(id=>{
-  document.getElementById(id).addEventListener("change", refresh);
-});
-document.querySelectorAll(".preset .btn").forEach(btn=>{
-  btn.addEventListener("click", ()=>{
-    if(!ALL?.rows?.length) return;
-    const rows = ALL.rows;
-    const last = new Date(rows[rows.length-1].time);
-    const first= new Date(rows[0].time);
-    function minusDays(d){ const x = new Date(last); x.setDate(x.getDate()-d); return x; }
-    let s=first, e=last;
-    const label = btn.getAttribute("data-range");
-    if(label==="1D") s = minusDays(1);
-    if(label==="1W") s = minusDays(7);
-    if(label==="1M") s = minusDays(30);
-    if(label==="3M") s = minusDays(90);
-    if(label==="YTD"){ s = new Date(last.getFullYear(),0,1); }
-    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-    document.getElementById("start").value = toLocal(s);
-    document.getElementById("end").value   = toLocal(e);
+  async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
+
+  // Wire events after DOM ready
+  $('predsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
+  $('metricsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
+  $('btnForceRefresh')?.addEventListener("click", refresh);
+  ['rid0','rid1','rid2','showEquity','showBars','showScatter','showHist','showDD','smooth'].forEach(id=>{
+    const el=$(id); if(el) el.addEventListener("change", refresh);
+  });
+  document.querySelectorAll(".preset .btn").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      if(!ALL?.rows?.length) return;
+      const rows = ALL.rows;
+      const last = new Date(rows[rows.length-1].time);
+      const first= new Date(rows[0].time);
+      function minusDays(d){ const x = new Date(last); x.setDate(x.getDate()-d); return x; }
+      let s=first, e=last;
+      const label = btn.getAttribute("data-range");
+      if(label==="1D") s = minusDays(1);
+      if(label==="1W") s = minusDays(7);
+      if(label==="1M") s = minusDays(30);
+      if(label==="3M") s = minusDays(90);
+      if(label==="YTD"){ s = new Date(last.getFullYear(),0,1); }
+      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+      if($('start')) $('start').value = toLocal(s);
+      if($('end'))   $('end').value   = toLocal(e);
+      refresh();
+    });
+  });
+  $('btnApplyRange')?.addEventListener("click", refresh);
+  $('btnResetZoom')?.addEventListener("click", ()=>{ try{ charts.equity?.resetZoom(); }catch(e){} });
+  $('btnResetAll')?.addEventListener("click", ()=>{
+    if($('rid0')) $('rid0').checked=true; if($('rid1')) $('rid1').checked=true; if($('rid2')) $('rid2').checked=true;
+    if($('showEquity')) $('showEquity').checked=true; if($('showBars')) $('showBars').checked=true; if($('showScatter')) $('showScatter').checked=true;
+    if($('showHist')) $('showHist').checked=true; if($('showDD')) $('showDD').checked=true; if($('smooth')) $('smooth').value="1";
+    if(ALL?.rows?.length){
+      const t0 = new Date(ALL.rows[0].time); const t1 = new Date(ALL.rows[ALL.rows.length-1].time);
+      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+      if($('start')) $('start').value = toLocal(t0); if($('end')) $('end').value = toLocal(t1);
+    }
     refresh();
   });
-});
-document.getElementById("btnApplyRange").addEventListener("click", refresh);
-document.getElementById("btnResetZoom").addEventListener("click", ()=>{ try{ charts.equity.resetZoom(); }catch(e){} });
-document.getElementById("btnResetAll").addEventListener("click", ()=>{
-  document.getElementById("rid0").checked=true;
-  document.getElementById("rid1").checked=true;
-  document.getElementById("rid2").checked=true;
-  document.getElementById("showEquity").checked=true;
-  document.getElementById("showBars").checked=true;
-  document.getElementById("showScatter").checked=true;
-  document.getElementById("showHist").checked=true;
-  document.getElementById("showDD").checked=true;
-  document.getElementById("smooth").value="1";
-  if(ALL?.rows?.length){
-    const t0 = new Date(ALL.rows[0].time);
-    const t1 = new Date(ALL.rows[ALL.rows.length-1].time);
-    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-    document.getElementById("start").value = toLocal(t0);
-    document.getElementById("end").value   = toLocal(t1);
-  }
-  refresh();
-});
 
-// Window-wide drag & drop
-["dragenter","dragover","dragleave","drop"].forEach(evt=>{
-  document.addEventListener(evt, e=>{
-    if(evt!=="drop"){ e.preventDefault(); }
-  }, false);
-});
-document.addEventListener("dragover", e=>{ e.preventDefault(); document.getElementById("drop").style.background="#0b1220"; });
-document.addEventListener("dragleave", e=>{ document.getElementById("drop").style.background=""; });
-document.addEventListener("drop", e=>{
-  e.preventDefault(); document.getElementById("drop").style.background="";
-  const items = e.dataTransfer?.files;
-  if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
-});
+  // Window-wide drag & drop
+  ["dragenter","dragover","dragleave","drop"].forEach(evt=>{
+    document.addEventListener(evt, e=>{ if(evt!=="drop"){ e.preventDefault(); } }, false);
+  });
+  document.addEventListener("dragover", e=>{ e.preventDefault(); $('drop').style.background="#0b1220"; });
+  document.addEventListener("dragleave", e=>{ $('drop').style.background=""; });
+  document.addEventListener("drop", e=>{
+    e.preventDefault(); $('drop').style.background="";
+    const items = e.dataTransfer?.files;
+    if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
+  });
 
-document.getElementById("btnLoadURL").addEventListener("click", async ()=>{
-  const u1 = document.getElementById("predsURL").value.trim();
-  const u2 = document.getElementById("metricsURL").value.trim();
-  document.getElementById("loadMsg").innerText = "불러오는 중...";
-  try{
-    if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); ALL = ALL || {}; ALL.rows=RAW; ALL.names=ALL.names||{}; ALL.names.preds=u1; }
-    if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); ALL = ALL || {}; ALL.metrics=MET; ALL.names=ALL.names||{}; ALL.names.metrics=u2; }
-    document.getElementById("loadMsg").innerText = "완료";
-    afterLoad();
-  }catch(err){
-    document.getElementById("loadMsg").innerText = "실패: "+err.message;
-  }
+  // Try to load zoom plugin; even if it fails, app works.
+  loadZoomPlugin((ok)=>{ console.log("[viewer] zoom plugin ready?", ok); });
 });
 </script>
 </body>
