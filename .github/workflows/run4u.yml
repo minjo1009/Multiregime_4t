@@ -1,0 +1,140 @@
+name: Run 4u Backtest (Algov2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_path:
+        description: "데이터 경로 (예: ETHUSDT_1min_2025H1.csv 또는 .zip)"
+        required: true
+        type: string
+      train_start:
+        description: "학습 시작 (UTC, 'YYYY-MM-DD HH:MM:SS')"
+        required: true
+        default: "2025-01-01 00:00:00"
+        type: string
+      train_end:
+        description: "학습 종료 (UTC)"
+        required: true
+        default: "2025-04-30 23:59:00"
+        type: string
+      test_start:
+        description: "테스트 시작 (UTC)"
+        required: true
+        default: "2025-05-01 00:00:00"
+        type: string
+      test_end:
+        description: "테스트 종료 (UTC)"
+        required: true
+        default: "2025-06-30 23:59:00"
+        type: string
+      H:
+        description: "홀드 바(분) - 예: 15"
+        required: true
+        default: "15"
+        type: string
+      fee_bps:
+        description: "수수료(bp)"
+        required: true
+        default: "1.0"
+        type: string
+      slip_bps:
+        description: "슬리피지(bp)"
+        required: true
+        default: "0.5"
+        type: string
+      out_dir:
+        description: "출력 디렉토리"
+        required: true
+        default: "_out_4u"
+        type: string
+      python_version:
+        description: "Python 버전"
+        required: true
+        default: "3.11"
+        type: string
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout (pinned full SHA)
+        # actions/checkout v5.0.0 (2025-08-11), full commit SHA
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0  # 태그/버전 필요시 안전
+
+      - name: Set up Python (pinned full SHA)
+        # actions/setup-python v5.6.0 (2025-04-24), full commit SHA
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ inputs.python_version }}
+          cache: 'pip'
+
+      - name: Install deps (minimal)
+        run: |
+          python -m pip install -U pip
+          pip install "pandas>=2.0" "numpy>=1.24"
+
+      - name: Prepare data
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATA="${{ inputs.data_path }}"
+          mkdir -p data
+          if [[ ! -e "$DATA" ]]; then
+            echo "ERROR: data_path '$DATA' not found in repo." >&2
+            exit 1
+          fi
+          if [[ "$DATA" == *.zip ]]; then
+            unzip -q "$DATA" -d data
+          else
+            cp -f "$DATA" data/
+          fi
+          echo "Data prepared under ./data"
+          ls -lh data | sed 's/^/  /'
+
+      - name: Run backtest
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python
+          OUT="${{ inputs.out_dir }}"
+          mkdir -p "$OUT"
+          # CSV 파일이 하나라고 가정(여러 개면 첫 번째 것을 사용)
+          CSV=$(ls -1 data/*.csv | head -n1)
+          echo "Using CSV: $CSV"
+          $PY trade4v/run_4u.py \
+            --data "$CSV" \
+            --train_start "${{ inputs.train_start }}" \
+            --train_end   "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}" \
+            --test_end    "${{ inputs.test_end }}" \
+            --H "${{ inputs.H }}" \
+            --fee_bps "${{ inputs.fee_bps }}" \
+            --slip_bps "${{ inputs.slip_bps }}" \
+            --out_dir "$OUT"
+
+      - name: Show outputs
+        if: always()
+        run: |
+          echo "=== tree of ${{ inputs.out_dir }} ==="
+          find "${{ inputs.out_dir }}" -maxdepth 3 -type f -print | sed 's/^/  /'
+          echo "== preview =="
+          head -n 5 "${{ inputs.out_dir }}"/run/preds_test.csv || true
+          tail -n 5 "${{ inputs.out_dir }}"/run/preds_test.csv || true
+          echo "metrics:"
+          cat "${{ inputs.out_dir }}"/run/metrics_oos.json || true
+
+      - name: Upload artifact (pinned full SHA)
+        # actions/upload-artifact v4.6.2 (2025-03-19), full commit SHA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: out_4u
+          path: |
+            ${{ inputs.out_dir }}/run/preds_test.csv
+            ${{ inputs.out_dir }}/run/metrics_oos.json
+          if-no-files-found: error
+          retention-days: 14
