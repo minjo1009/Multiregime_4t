@@ -1,4 +1,4 @@
-name: Run 4u Backtest (robust script discovery, cache OFF)
+name: Run 4u Backtest (robust unzip & flatten, cache OFF)
 
 on:
   workflow_dispatch:
@@ -60,20 +60,24 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout (pinned)
+      - name: Checkout (pinned full SHA)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
-      - name: Set up Python (cache OFF, pinned)
+      - name: Set up Python (cache OFF, pinned full SHA)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ inputs.python_version }}
 
-      - name: Install deps (minimal)
+      - name: Install deps (pandas/numpy + safety extras)
         run: |
+          set -euo pipefail
           python -m pip install -U pip
+          # 필수
           pip install "pandas>=2.0" "numpy>=1.24"
+          # 안전장치(필요 없으면 그냥 설치만 되고 사용 안함)
+          pip install "pyarrow>=14" "scikit-learn>=1.3"
 
       - name: Prepare data
         shell: bash
@@ -85,51 +89,87 @@ jobs:
             echo "::error::data_path '$DATA' not found in repo root"; exit 1
           fi
           if [[ "$DATA" == *.zip ]]; then
-            unzip -q "$DATA" -d data
+            unzip -o -q "$DATA" -d data
           else
             cp -f "$DATA" data/
           fi
           echo "Using CSV:"
           ls -1 data/*.csv | head -n1
 
-      - name: Locate strategy runner (auto-unzip + auto-find)
+      - name: Locate strategy runner (robust unzip & flatten)
         id: findscript
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          # 1) 압축 패키지 형식이면 모두 해제
-          for z in trade4v*.zip trend4u*.zip *trade4v*.zip; do
+          shopt -s nullglob dotglob
+
+          # 깨끗하게 시작
+          rm -rf __extracted trade4v_tmp || true
+          mkdir -p __extracted
+
+          # 루트의 trade4v/trend4u 관련 ZIP을 비대화형으로 해제(-o)
+          mapfile -t ZIPS < <(ls -1 *.zip 2>/dev/null | sort -u | grep -E 'trade4v|trend4u' || true)
+          echo "ZIPs: ${ZIPS[*]:-<none>}"
+          for z in "${ZIPS[@]:-}"; do
             echo "Unzipping $z"
-            unzip -q "$z"
+            unzip -o -q "$z" -d "__extracted/${z%.zip}"
           done
-          # 2) 흔한 경로 우선 시도
-          CANDIDATES=(
-            "trade4v/run_4u.py"
-            "src/trade4v/run_4u.py"
-            "*/trade4v/run_4u.py"
-          )
-          SCRIPT=""
-          for p in "${CANDIDATES[@]}"; do
-            if [[ -f $p ]]; then SCRIPT="$p"; break; fi
-          done
-          # 3) 백업: run_4u*.py 패턴 전체 검색
-          if [[ -z "${SCRIPT}" ]]; then
-            SCRIPT=$(find . -maxdepth 4 -type f -name "run_4u*.py" | head -n1 || true)
+
+          # 평탄화: 어디에 있든 최종 ./trade4v/ 로 맞춤
+          mkdir -p trade4v_tmp
+
+          # temp 내부의 모든 'trade4v' 디렉토리 내용을 하나로 합치기
+          if find __extracted -type d -name trade4v | grep -q .; then
+            while IFS= read -r d; do
+              echo "Merging $d -> trade4v_tmp/"
+              if command -v rsync >/dev/null 2>&1; then
+                rsync -a "$d/." trade4v_tmp/
+              else
+                cp -a "$d/." trade4v_tmp/ || true
+              fi
+            done < <(find __extracted -type d -name trade4v | sort)
           fi
-          if [[ -z "${SCRIPT}" ]]; then
-            echo "::group::Repo tree (maxdepth 3)"; find . -maxdepth 3 -type d -print; echo "::endgroup::"
-            echo "::error::run_4u.py를 찾지 못했습니다. 루트에 trade4v/가 있는지, 또는 ZIP을 커밋했다면 파일명이 'trade4v*.zip'인지 확인하세요."
+
+          # 그래도 run_4u.py가 없으면, run_4u.py가 들어있는 폴더를 통째로 합침
+          if [[ ! -f trade4v_tmp/run_4u.py ]]; then
+            PARENT="$(dirname "$(find __extracted -type f -name 'run_4u.py' | head -n1 || true)")"
+            if [[ -n "${PARENT}" && -d "${PARENT}" ]]; then
+              echo "Merging runner parent ${PARENT} -> trade4v_tmp/"
+              if command -v rsync >/dev/null 2>&1; then
+                rsync -a "${PARENT}/." trade4v_tmp/
+              else
+                cp -a "${PARENT}/." trade4v_tmp/ || true
+              fi
+            fi
+          fi
+
+          # 리포에 이미 trade4v/가 있으면 그쪽 우선
+          if [[ -d trade4v && -f trade4v/run_4u.py ]]; then
+            echo "Using committed ./trade4v/"
+          else
+            if [[ -f trade4v_tmp/run_4u.py ]]; then
+              rm -rf trade4v || true
+              mv trade4v_tmp trade4v
+            fi
+          fi
+
+          # 최종 검증
+          if [[ ! -f trade4v/run_4u.py ]]; then
+            echo "::group::Extracted tree (preview)"
+            find __extracted -maxdepth 4 -print
+            echo "::endgroup::"
+            echo "::error::run_4u.py not found after extraction/flattening. ZIP 구조/파일명을 확인하세요."
             exit 1
           fi
-          echo "SCRIPT=${SCRIPT}" >> $GITHUB_OUTPUT
-          echo "Using SCRIPT=${SCRIPT}"
+
+          echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+          echo "Using SCRIPT=trade4v/run_4u.py"
 
       - name: Run backtest (dynamic path)
         shell: bash
         run: |
           set -euo pipefail
-          export PYTHONPATH="$PWD"  # 내부 import 보호
+          export PYTHONPATH="$PWD"
           PY=python
           OUT="${{ inputs.out_dir }}"
           CSV=$(ls -1 data/*.csv | head -n1)
@@ -157,7 +197,7 @@ jobs:
           echo "metrics:"
           cat "${{ inputs.out_dir }}"/run/metrics_oos.json || true
 
-      - name: Upload artifact (pinned)
+      - name: Upload artifact (pinned full SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_4u
