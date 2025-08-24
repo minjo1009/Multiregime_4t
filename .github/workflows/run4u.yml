@@ -92,34 +92,37 @@ jobs:
           set -euo pipefail
           shopt -s nullglob dotglob
 
-          # 1) 커밋된 폴더 우선
+          # 0) 커밋된 폴더 우선
           if [[ -f trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [[ -f trade4v/trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"; exit 0
           fi
 
-          # 2) 루트의 *trade4v*.zip 자동 탐색 → 임시 폴더에 비대화형 해제
+          # 1) 임시 폴더 준비 (★ 이전 오류 원인 fix: mkdir -p __extracted)
           rm -rf __extracted trade4v || true
+          mkdir -p __extracted
+
+          # 2) 루트의 *trade4v*.zip 자동 탐색 → 비대화형 해제
           mapfile -t ZIPS < <(ls -1 *.zip 2>/dev/null | grep -i 'trade4v' || true)
           if (( ${#ZIPS[@]} == 0 )); then
             echo "::error::No trade4v code folder or trade4v*.zip found"; exit 1
           fi
+
           for z in "${ZIPS[@]}"; do
             echo "Unzipping $z"
+            # zip 이름별로 고유 하위폴더에 해제
+            mkdir -p "__extracted/${z%.zip}"
             unzip -o -q "$z" -d "__extracted/${z%.zip}"
           done
 
           # 3) run_4u.py가 들어있는 '가장 안쪽 trade4v' 폴더를 ./trade4v 로 평탄화
-          PARENT="$(dirname "$(find __extracted -type f -name 'run_4u.py' | head -n1 || true)")"
+          PARENT="$(dirname "$(find __extracted -type f -name 'run_4u.py' -print -quit || true)")"
           [[ -n "$PARENT" ]] || { echo "::error::run_4u.py not found after extraction"; exit 1; }
-          # 깊이 상관없이 PARENT를 trade4v로 이동
           mv "$PARENT" trade4v
 
-          # 4) 스크립트 경로 결정
+          # 4) 스크립트 경로 확정
           if [[ -f trade4v/run_4u.py ]]; then
             echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
           elif [[ -f trade4v/trade4v/run_4u.py ]]; then
