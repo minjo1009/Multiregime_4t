@@ -1,17 +1,17 @@
-name: trade4v-run
+name: trade4v-run-s1s2
 on:
   workflow_dispatch:
     inputs:
       project_zip:  { description: "project zip in repo", default: "trade4v.zip", required: true }
-      data_zip:     { description: "ETH 1m zip OR csv in repo", default: "ETHUSDT_1min_2020_2025.csv", required: true }
+      data_file:    { description: "ETH 1m zip OR csv in repo", default: "ETHUSDT_1min_2020_2025.csv", required: true }
       train_range:  { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
       test_range:   { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
-      H:            { description: "base H (used if H_map missing)", default: "15", required: true }
-      H_map:        { description: "per-regime H, e.g., 0:9,1:11,2:15", default: "0:9,1:11,2:15", required: true }
-      regime:       { description: "vol,z_low,z_high (or vol,z_thr)", default: "64,1.0,2.0", required: true }
-      goal:         { description: "objective (e.g., pnl,300-700)", default: "pnl,300-700", required: true }
-      goal_maps:    { description: "per-regime monthly bounds", default: "0:20-80,1:30-120,2:300-700", required: true }
-      params:       { description: "pack: cal;fee;gate;ev;size;filters;deoverlap", default: "cal=0.40,200;fee=10;gate=soft,0.1,20;ev=1.5;size=kelly,0.02,1.0;filters=0,20,0;deoverlap=1", required: true }
+      H:            { description: "base H (fallback)", default: "15", required: true }
+      H_map:        { description: "per-regime H (e.g. 0:13,1:17,2:25)", default: "0:13,1:17,2:25", required: true }
+      bar_map:      { description: "rid:TPbps,SLbps,Hmax;...", default: "0:20,12,15;1:30,20,20;2:70,35,45", required: true }
+      k_day:        { description: "Top-K per day per regime", default: "0:3,1:4,2:14", required: true }
+      ev_anneal:    { description: "EV-floor multipliers (fee units)", default: "0.0", required: true }
+      params_pack:  { description: "fee;slip;size;regime;session;exp  (e.g., fee=10;slip=0;size=kelly,0.02,0.8;regime=64,1.0,2.0;session=AS:1.0,EU:1.0,US:1.0;exp=1,0.7,1.8)", default: "fee=10;slip=0;size=kelly,0.02,0.8;regime=64,1.0,2.0;session=AS:1.0,EU:1.0,US:1.0;exp=1,0.7,1.8", required: true }
 
 jobs:
   run:
@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DATA_IN="${{ github.event.inputs.data_zip }}"
+          DATA_IN="${{ github.event.inputs.data_file }}"
           if [[ -f "$DATA_IN" ]]; then
             FOUND="$DATA_IN"
           else
@@ -52,11 +52,12 @@ jobs:
           if [[ "$FOUND" == *.zip ]]; then unzip -q "$FOUND" -d data; else cp "$FOUND" data/; fi
           python - <<'PY'
           import glob, pandas as pd, numpy as np
-          src = sorted(glob.glob("data/*.csv"))[0]
-          df = pd.read_csv(src)
+          srcs = sorted(glob.glob("data/*.csv"))
+          assert srcs, "No CSV after extraction"
+          df = pd.read_csv(srcs[0])
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
-          if tcol is None: raise SystemExit("No time/open_time/ts column found")
+          if tcol is None: raise SystemExit("No time/open_time/ts/timestamp column")
           s = df[tcol]
           if np.issubdtype(s.dtype, np.number):
               med = float(s.iloc[len(s)//2]); unit = "ms" if med > 1e11 else "s"
@@ -68,7 +69,8 @@ jobs:
           if "volume" not in df.columns:
               cand = [c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
               assert cand, "Missing volume"; df["volume"] = df[cand[0]]
-          df[["time","open","high","low","close","volume"]].to_csv("normalized.csv", index=False)
+          out = df[["time","open","high","low","close","volume"]].sort_values("time").drop_duplicates("time")
+          out.to_csv("normalized.csv", index=False)
           PY
           echo "DATA_PATH=normalized.csv" >> $GITHUB_ENV
 
@@ -78,53 +80,50 @@ jobs:
           set -euo pipefail
           IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
           IFS=',' read -r TEST_S  TEST_E  <<< "${{ github.event.inputs.test_range }}"
-          echo "TRAIN_S=$TRAIN_S" >> $GITHUB_ENV
-          echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
-          echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
-          echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
-          CAL="0.40,200"; FEE_BPS="10"
-          GATE_MODE="soft"; THIN_FACTOR="0.1"; THIN_FLOOR="20"
-          EV_FLOOR_MULT="1.5"
-          SIZE_MODE="kelly"; RISK_BUDGET="0.02"; SIZE_MAX="1.0"
-          MIN_RANGE_BP="0"; RANGE_K="20"; SPIKE_BPS="0"
-          DOVL="1"
-          PARAMS="${{ github.event.inputs.params }}"
+          {
+            echo "TRAIN_S=$TRAIN_S"
+            echo "TRAIN_E=$TRAIN_E"
+            echo "TEST_S=$TEST_S"
+            echo "TEST_E=$TEST_E"
+          } >> $GITHUB_ENV
+
+          # Defaults
+          FEE_BPS="10"; SLIP_BPS="0"
+          SIZE_MODE="kelly"; RISK_BUDGET="0.02"; SIZE_MAX="0.8"
+          REGIME="64,1.0,2.0"
+          SESSION_FEE_MULT="AS:1.0,EU:1.0,US:1.0"
+          USE_EXP="1"; SCALE_CLIP="0.7,1.8"
+
+          PARAMS="${{ github.event.inputs.params_pack }}"
           IFS=';' read -ra KV <<< "$PARAMS"
           for pair in "${KV[@]}"; do
             key="${pair%%=*}"; val="${pair#*=}"
             case "$key" in
-              cal) CAL="$val" ;;
               fee) FEE_BPS="$val" ;;
-              gate) IFS=',' read -r GATE_MODE THIN_FACTOR THIN_FLOOR <<< "$val" ;;
-              ev) EV_FLOOR_MULT="$val" ;;
+              slip) SLIP_BPS="$val" ;;
               size) IFS=',' read -r SIZE_MODE RISK_BUDGET SIZE_MAX <<< "$val" ;;
-              filters) IFS=',' read -r MIN_RANGE_BP RANGE_K SPIKE_BPS <<< "$val" ;;
-              deoverlap) DOVL="$val" ;;
+              regime) REGIME="$val" ;;
+              session) SESSION_FEE_MULT="$val" ;;     # e.g., AS:1.0,EU:1.0,US:1.0
+              exp) IFS=',' read -r USE_EXP SCALE_LO SCALE_HI <<< "$val"; SCALE_CLIP="$SCALE_LO,$SCALE_HI" ;;
             esac
           done
           {
-            echo "CAL=$CAL"
             echo "FEE_BPS=$FEE_BPS"
-            echo "GATE_MODE=$GATE_MODE"
-            echo "THIN_FACTOR=$THIN_FACTOR"
-            echo "THIN_FLOOR=$THIN_FLOOR"
-            echo "EV_FLOOR_MULT=$EV_FLOOR_MULT"
+            echo "SLIP_BPS=$SLIP_BPS"
             echo "SIZE_MODE=$SIZE_MODE"
             echo "RISK_BUDGET=$RISK_BUDGET"
             echo "SIZE_MAX=$SIZE_MAX"
-            echo "MIN_RANGE_BP=$MIN_RANGE_BP"
-            echo "RANGE_K=$RANGE_K"
-            echo "SPIKE_BPS=$SPIKE_BPS"
-            echo "DOVL=$DOVL"
+            echo "REGIME=$REGIME"
+            echo "SESSION_FEE_MULT=$SESSION_FEE_MULT"
+            echo "USE_EXP=$USE_EXP"
+            echo "SCALE_CLIP=$SCALE_CLIP"
           } >> $GITHUB_ENV
 
-      - name: Run backtest (v1.5.1 EV-floor + sizing + H_map)
+      - name: Run backtest (S1+S2 EV-TopK + Expansion)
         env: { PYTHONWARNINGS: "ignore::FutureWarning" }
         shell: bash
         run: |
           set -euo pipefail
-          DOVL_FLAG=""
-          if [[ "${DOVL}" == "1" ]]; then DOVL_FLAG="--deoverlap"; fi
           python trade4v/run_4u.py \
             --data        "${DATA_PATH}" \
             --train_start "${TRAIN_S}" \
@@ -134,22 +133,17 @@ jobs:
             --H           "${{ github.event.inputs.H }}" \
             --H_map       "${{ github.event.inputs.H_map }}" \
             --fee_bps     "${FEE_BPS}" \
-            --regime      "${{ github.event.inputs.regime }}" \
-            --goal        "${{ github.event.inputs.goal }}" \
-            --goal_maps   "${{ github.event.inputs.goal_maps }}" \
-            --cal         "${CAL}" \
-            ${DOVL_FLAG} \
-            --gate_mode   "${GATE_MODE}" \
-            --thin_factor "${THIN_FACTOR}" \
-            --thin_floor  "${THIN_FLOOR}" \
-            --ev_floor_mult "${EV_FLOOR_MULT}" \
+            --slip_bps    "${SLIP_BPS}" \
+            --session_fee_mult "${SESSION_FEE_MULT}" \
+            --regime      "${REGIME}" \
+            --bar_map     "${{ github.event.inputs.bar_map }}" \
+            --k_day       "${{ github.event.inputs.k_day }}" \
+            --ev_anneal   "${{ github.event.inputs.ev_anneal }}" \
             --size_mode   "${SIZE_MODE}" \
             --risk_budget "${RISK_BUDGET}" \
             --size_max    "${SIZE_MAX}" \
-            --min_range_bp "${MIN_RANGE_BP}" \
-            --range_k     "${RANGE_K}" \
-            --spike_bps   "${SPIKE_BPS}" \
-            --max_train_rows 200000 \
+            --use_expansion "${USE_EXP}" \
+            --scale_clip    "${SCALE_CLIP}" \
             --out_dir _out_4u/github
 
       - name: Upload outputs
