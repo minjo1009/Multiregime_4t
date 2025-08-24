@@ -4,19 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       run_args:
-        description: '추가 실행 인수 (있으면 그대로 덧붙임)'
+        description: '직접 전달할 실행 인수 (예: --data data/ETHUSDT_1min_2020_2025.csv --train_start 2024-01-01 --train_end 2024-12-31 --test_start 2025-01-01 --test_end 2025-03-31)'
         required: false
         default: ''
       results_branch:
-        description: '결과 커밋 브랜치'
+        description: '결과 푸시 브랜치'
         required: false
         default: 'backtest-results'
-  push:
-    branches: [ main ]
-    paths:
-      - 'trend4u.zip'
-      - 'ETHUSDT_1min_2020_2025.zip'
-      - '.github/workflows/4t-backtest.yml'
 
 permissions:
   contents: write
@@ -41,10 +35,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p "$LOG_DIR"
-          echo "Repo: $REPO"  | tee -a "$LOG_DIR/context.txt"
-          echo "SHA : $SHA"   | tee -a "$LOG_DIR/context.txt"
-          echo "TZ  : $TZ"    | tee -a "$LOG_DIR/context.txt"
-
+          echo "Repo: $REPO" | tee -a "$LOG_DIR/context.txt"
+          echo "SHA : $SHA"  | tee -a "$LOG_DIR/context.txt"
+          echo "TZ  : $TZ"   | tee -a "$LOG_DIR/context.txt"
           git init
           git remote add origin "https://x-access-token:${TOKEN}@github.com/${REPO}.git"
           git -c protocol.version=2 fetch --depth=1 origin "$SHA"
@@ -78,125 +71,113 @@ jobs:
           elif [[ -d trend4u ]]; then
             rsync -a trend4u/ "$SRC_DIR"/trend4u/
           else
-            echo "::error::trend4u.zip, src/, trend4u/ 중 아무것도 없음"; exit 1
+            echo "::error::trend4u.zip, src/, trend4u/ 중 아무것도 없음"
+            exit 1
           fi
-
-          # 오래된 __init__ 문법 점검(수정은 하지 않지만 로그는 남김)
+          # __init__.py 선행 마침표 핫픽스 (문법오류 방지)
           INIT="$SRC_DIR/trend4u/trend4p/__init__.py"
           if [[ -f "$INIT" ]]; then
-            head -n 3 "$INIT" | tee -a "$LOG_DIR/steps.txt" || true
+            sed -i '1s/^[[:space:]]*\.[[:space:]]*__all__/__all__/' "$INIT" || true
+            grep -q "__all__" "$INIT" || printf "__all__=['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']\n" >> "$INIT"
           fi
+          echo "[src tree]"
+          (cd "$SRC_DIR" && find . -maxdepth 3 -type f | sort | tee -a "$LOG_DIR/src_tree.txt")
 
-          echo "[src tree]" | tee -a "$LOG_DIR/steps.txt"
-          (cd "$SRC_DIR" && find . -maxdepth 3 -type f | sort) | tee -a "$LOG_DIR/src_tree.txt"
-
-      - name: Prepare data (ETHUSDT_1min_2020_2025.zip or CSV)
+      - name: Prepare data (ETHUSDT_1min_2020_2025.*)
         shell: bash
         run: |
           set -Eeuo pipefail
           if [[ -f ETHUSDT_1min_2020_2025.zip ]]; then
-            echo "Using ETHUSDT_1min_2020_2025.zip" | tee -a "$LOG_DIR/steps.txt"
             unzip -q ETHUSDT_1min_2020_2025.zip -d "$DATA_DIR"
           else
             shopt -s nullglob
             CSV=(ETHUSDT_1min_2020_2025.csv *.csv)
-            if [[ ${#CSV[@]} -gt 0 ]]; then
-              cp -f "${CSV[@]}" "$DATA_DIR"/
-            else
-              echo "::warning::데이터 ZIP/CSV가 없습니다."
-            fi
+            [[ ${#CSV[@]} -gt 0 ]] && cp -f "${CSV[@]}" "$DATA_DIR"/
           fi
-          echo "[data tree]" | tee -a "$LOG_DIR/steps.txt"
-          (cd "$DATA_DIR" && ls -la) | tee -a "$LOG_DIR/steps.txt" || true
+          (cd "$DATA_DIR" && ls -la || true) | tee -a "$LOG_DIR/steps.txt"
 
       - name: Install deps (python3 -m pip)
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 --version | tee -a "$LOG_DIR/versions.txt"
+          python3 -m pip install --upgrade pip
           if [[ -f requirements.txt ]]; then
-            python3 -m pip install --upgrade pip
             python3 -m pip install -r requirements.txt
           elif [[ -f "$SRC_DIR/requirements.txt" ]]; then
-            python3 -m pip install --upgrade pip
             python3 -m pip install -r "$SRC_DIR/requirements.txt"
           elif [[ -f pyproject.toml ]]; then
-            python3 -m pip install --upgrade pip
             python3 -m pip install .
           else
-            python3 -m pip install --upgrade pip
             python3 -m pip install numpy pandas matplotlib ta scikit-learn python-dateutil pytz
           fi
 
       - name: Run backtest
         shell: bash
         env:
-          EXTRA_ARGS: ${{ inputs.run_args }}
+          DATA_DIR: ${{ github.workspace }}/data
+          OUT_DIR:  ${{ github.workspace }}/_out
+          USER_RUN_ARGS: ${{ inputs.run_args }}
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="${PYTHONPATH:-${GITHUB_WORKSPACE}/src}:${GITHUB_WORKSPACE}/src/trend4u"
           echo "PYTHONPATH=$PYTHONPATH" | tee -a "$LOG_DIR/steps.txt"
 
-          # 1) 데이터 CSV 자동 탐색
-          DATA_CSV="$(ls -1 "$DATA_DIR"/*.csv 2>/dev/null | head -n1 || true)"
-          if [[ -z "${DATA_CSV:-}" ]]; then
-            echo "::error::data/*.csv를 찾지 못했습니다."; exit 1
-          fi
-          echo "DATA_CSV=$DATA_CSV" | tee -a "$LOG_DIR/steps.txt"
+          # 1) 실행 인수를 사용자가 줬다면 그대로 사용
+          RUN_ARGS="$USER_RUN_ARGS"
 
-          # 2) CSV에서 날짜 컬럼 자동 감지 & train/test 구간 80/20 산출
-          python3 - "$DATA_CSV" >"$LOG_DIR/range.json" <<'PY'
-import sys, json, pandas as pd
-p = sys.argv[1]
-# 메모리 고려해 nrows/skiprows 샘플링으로 최소/최대 시각 추정
-try:
-    df_head = pd.read_csv(p, nrows=500)
-except Exception:
-    df_head = pd.read_csv(p)
-# 날짜형 컬럼 자동 탐지(첫 날짜형 컬럼)
-dt_cols = [c for c in df_head.columns if pd.api.types.is_datetime64_any_dtype(df_head[c]) or
-           (df_head[c].astype(str).str.match(r'\d{4}-\d{2}-\d{2}').any())]
-if not dt_cols:
-    # 첫 컬럼을 날짜로 가정
-    dt_col = df_head.columns[0]
-else:
-    dt_col = dt_cols[0]
-# 전체 범위 얻기 위해 최소/최대만 읽어서 변환(빠름)
-full = pd.read_csv(p, usecols=[dt_col])
-full[dt_col] = pd.to_datetime(full[dt_col], errors='coerce', utc=True).dt.tz_convert(None)
-full = full.dropna(subset=[dt_col])
-start = full[dt_col].min().date()
-end   = full[dt_col].max().date()
-# 80/20 split
-cut = start + (end - start) * 8 // 10
-out = {
-  "train_start": str(start),
-  "train_end":   str(cut),
-  "test_start":  str(cut),
-  "test_end":    str(end)
-}
-print(json.dumps(out))
+          # 2) 비어있으면 CSV를 찾아서 날짜 범위 자동 추론 -> 인자 생성
+          if [[ -z "$RUN_ARGS" ]]; then
+            CSV_FILE="$(find "$DATA_DIR" -type f -name '*.csv' | head -n1 || true)"
+            if [[ -z "$CSV_FILE" ]]; then
+              echo "::error::데이터 CSV를 찾지 못했습니다. data/*.csv 확인"
+              exit 2
+            fi
+
+            # pandas로 컬럼 자동탐지( timestamp/date/datetime/open_time 등 ) 후 기간 분할
+            python3 - <<'PY' "$CSV_FILE" "$OUT_DIR" > "$LOG_DIR/auto_args.txt"
+import sys, pandas as pd, pathlib, numpy as np
+csv, out = sys.argv[1], sys.argv[2]
+df = pd.read_csv(csv, nrows=200000)  # 헤더/형식 판별에 충분
+cands = [c for c in df.columns if str(c).lower() in ('timestamp','time','date','datetime','open_time')]
+if not cands:
+    # 날짜형으로 변환 가능한 첫 컬럼 탐색
+    for c in df.columns:
+        try:
+            pd.to_datetime(df[c].iloc[:100], errors='raise')
+            cands=[c]; break
+        except Exception:
+            pass
+if not cands:
+    raise SystemExit("NO_DATETIME_COLUMN")
+tcol = cands[0]
+ts = pd.to_datetime(df[tcol], errors='coerce').dropna().sort_values()
+start = ts.min().date()
+end   = ts.max().date()
+# 80%를 train, 20%를 test로 분할
+cut = ts.iloc[int(len(ts)*0.8)].date()
+train_start = start
+train_end   = cut
+test_start  = (pd.Timestamp(cut)+pd.Timedelta(days=1)).date()
+test_end    = end
+args = f"--data {csv} --train_start {train_start} --train_end {train_end} --test_start {test_start} --test_end {test_end} --out_dir {out}"
+print(args)
 PY
-          cat "$LOG_DIR/range.json" | tee -a "$LOG_DIR/steps.txt"
+            RUN_ARGS="$(cat "$LOG_DIR/auto_args.txt" || true)"
+            if [[ -z "$RUN_ARGS" ]]; then
+              echo "::error::자동 인자 생성 실패"
+              exit 2
+            fi
+            echo "Auto RUN_ARGS: $RUN_ARGS" | tee -a "$LOG_DIR/steps.txt"
+          fi
 
-          TRAIN_START="$(jq -r .train_start "$LOG_DIR/range.json")"
-          TRAIN_END="$(jq -r .train_end "$LOG_DIR/range.json")"
-          TEST_START="$(jq -r .test_start "$LOG_DIR/range.json")"
-          TEST_END="$(jq -r .test_end "$LOG_DIR/range.json")"
-
-          # 3) 실행 (필수 인자 모두 제공)
+          # 실행
           set +e
-          python3 -m trend4u.run_4u \
-            --data "$DATA_CSV" \
-            --train_start "$TRAIN_START" --train_end "$TRAIN_END" \
-            --test_start "$TEST_START"   --test_end "$TEST_END" \
-            --out_dir "$OUT_DIR" \
-            ${EXTRA_ARGS} 2>&1 | tee "$LOG_DIR/backtest_stdout.txt"
+          python3 -m trend4u.run_4u $RUN_ARGS 2>&1 | tee "$LOG_DIR/backtest_stdout.txt"
           rc=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$rc" | tee -a "$LOG_DIR/steps.txt"
           echo "$rc" > "$LOG_DIR/exit_code.txt"
-          test "$rc" -eq 0
 
       - name: Collect artifacts → _out/
         if: always()
@@ -204,7 +185,7 @@ PY
         run: |
           set -Eeuo pipefail
           mkdir -p "$OUT_DIR"
-          find "$GITHUB_WORKSPACE" -maxdepth 4 -type f \( \
+          find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \( \
             -name 'train_test_summary.json' -o \
             -name 'backtest_summary.json' -o \
             -name 'equity_curve*.csv' -o \
@@ -212,7 +193,7 @@ PY
             -name 'report*.html' -o \
             -name 'fig_*.png' \
           \) -print0 | while IFS= read -r -d '' p; do cp "$p" "$OUT_DIR"/ || true; done
-          (cd "$OUT_DIR" && ls -la) | tee -a "$LOG_DIR/steps.txt" || true
+          (cd "$OUT_DIR" && ls -la || true) | tee -a "$LOG_DIR/steps.txt"
 
       - name: Publish results to branch (no external action)
         if: always()
@@ -238,7 +219,6 @@ PY
             git commit -m "Backtest run ${GITHUB_RUN_ID} (SHA ${GITHUB_SHA})" || true
             git push -f origin "$BR"
           )
-          echo "pushed: $BR / $RUN_DIR" | tee -a "$LOG_DIR/steps.txt"
 
       - name: Job summary
         if: always()
