@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trade4V Viewer (Schema v1)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+    .kpi { min-width: 150px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap: 12px; }
+    .muted { color: #6b7280; font-size: 12px; }
+    #drop { border: 2px dashed #94a3b8; padding: 16px; border-radius: 12px; text-align: center; color: #64748b; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h1>Trade4V Backtest Viewer (Schema v1)</h1>
+  <p class="muted">필수 파일: <code>viewer_v1/preds.csv</code>, <code>viewer_v1/metrics_oos.json</code></p>
+  <div class="row">
+    <div class="card">
+      <div><strong>metrics_oos.json</strong></div>
+      <input type="file" id="metricsFile" accept="application/json" />
+    </div>
+    <div class="card">
+      <div><strong>preds.csv</strong></div>
+      <input type="file" id="predsFile" accept=".csv,text/csv" />
+    </div>
+    <div id="drop" class="card">여기로 파일 2개를 드래그 앤 드롭</div>
+  </div>
+
+  <div class="grid" style="margin-top:14px;">
+    <div class="card kpi"><div class="muted">Trades</div><div id="k_trades" style="font-weight:600;font-size:20px;">-</div></div>
+    <div class="card kpi"><div class="muted">Hit rate</div><div id="k_hit" style="font-weight:600;font-size:20px;">-</div></div>
+    <div class="card kpi"><div class="muted">PnL (sum)</div><div id="k_pnl" style="font-weight:600;font-size:20px;">-</div></div>
+    <div class="card kpi"><div class="muted">EV≥0 ratio</div><div id="k_evpos" style="font-weight:600;font-size:20px;">-</div></div>
+    <div class="card kpi"><div class="muted">Eff (real/EV)</div><div id="k_eff" style="font-weight:600;font-size:20px;">-</div></div>
+    <div class="card kpi"><div class="muted">Eff (real/EV·size)</div><div id="k_effw" style="font-weight:600;font-size:20px;">-</div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px;">
+    <canvas id="equity" height="120"></canvas>
+  </div>
+  <div class="card" style="margin-top:14px;">
+    <canvas id="scatter" height="140"></canvas>
+  </div>
+
+<script>
+let METRICS=null, PREDS=null;
+const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
+function fmtPct(x){ if(!isFinite(x)) return "-"; return (x*100).toFixed(1)+"%"; }
+function fmtNum(x, d=4){ if(!isFinite(x)) return "-"; return Number(x).toFixed(d); }
+
+function ensureV1(rows){
+  if(rows.length===0) return rows;
+  const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
+  if(!has("ev_final") && has("ev_net")){
+    rows = rows.map(r=>({...r, ev_final:Number(r.ev_net)}));
+  }
+  return rows;
+}
+function parseCSV(file){
+  return new Promise((res,rej)=>{ Papa.parse(file,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}); });
+}
+function setKPIs(d){
+  document.getElementById("k_trades").innerText = METRICS?.trades ?? d.selected.length;
+  document.getElementById("k_hit").innerText    = fmtPct(METRICS?.hit_rate ?? d.hit);
+  document.getElementById("k_pnl").innerText    = fmtNum(METRICS?.pnl ?? d.sumRealized);
+  document.getElementById("k_evpos").innerText  = fmtPct(d.evPosRatio);
+  document.getElementById("k_eff").innerText    = fmtNum(d.eff);
+  document.getElementById("k_effw").innerText   = fmtNum(d.effW);
+}
+let eqChart=null, scChart=null;
+function drawCharts(d){
+  const eqx = d.series.map(s=>s.t.toISOString().slice(0,16).replace('T',' '));
+  const eqy = d.series.map(s=>s.cum);
+  if(eqChart){ eqChart.destroy(); }
+  eqChart = new Chart(document.getElementById('equity'), {
+    type:'line', data:{ labels:eqx, datasets:[{ label:'Cumulative PnL', data:eqy, fill:false }]},
+    options:{ scales:{ x:{ ticks:{ autoSkip:true, maxRotation:0 }}}}
+  });
+  const scx = d.scatter.map(s=>s.ev), scy = d.scatter.map(s=>s.real);
+  if(scChart){ scChart.destroy(); }
+  scChart = new Chart(document.getElementById('scatter'), {
+    type:'scatter',
+    data:{ datasets:[{ label:'EV vs Realized', data: scx.map((x,i)=>({x, y: scy[i]})) }]},
+    options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} }}
+  });
+}
+function derive(preds){
+  const p = preds.map(r=>({ ...r,
+    time: new Date(r.time),
+    regime_id: Number(r.regime_id),
+    H_row: Number(r.H_row||1),
+    ev_final: Number(r.ev_final||0),
+    entry_flag: Number(r.entry_flag||0),
+    size: Number(r.size||0),
+    gross_event: Number(r.gross_event||0),
+    net_event: Number(r.net_event||0),
+  }));
+  const selected = p.filter(r=>r.entry_flag===1);
+  const withSize = selected.map(r=>({...r, pnl: r.net_event*r.size}));
+  const sumReal = withSize.reduce((a,r)=>a+r.pnl,0);
+  const sumEV   = withSize.reduce((a,r)=>a+r.ev_final,0);
+  const sumEVw  = withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
+  const eff = sumEV>0? sumReal/sumEV:0;
+  const effW= sumEVw>0? sumReal/sumEVw:0;
+  const wins = withSize.filter(r=>r.gross_event>0).length;
+  const hit = selected.length? wins/selected.length : 0;
+  const evPosRatio = p.length? p.filter(r=>r.ev_final>=0).length/p.length : 0;
+  const impulses = withSize.map(r=>({ t: new Date(r.time.getTime()+r.H_row*60*1000), v:r.pnl })).sort((a,b)=>a.t-b.t);
+  let cum=0; const series = impulses.map(s=>({ t:s.t, cum:(cum+=s.v) }));
+  const scatter = withSize.map(r=>({ ev:r.ev_final, real:r.pnl }));
+  return { selected, hit, sumRealized:sumReal, sumEV, sumEVw, eff, effW, evPosRatio, series, scatter };
+}
+async function onFiles(files){
+  const arr = Array.from(files||[]);
+  const metricsFile = arr.find(f=>f.name.endsWith(".json"));
+  const predsFile   = arr.find(f=>f.name.endsWith(".csv"));
+  if(metricsFile){ METRICS = JSON.parse(await metricsFile.text()); }
+  if(predsFile){
+    let rows = await parseCSV(predsFile);
+    rows = ensureV1(rows);
+    const miss = needCols.filter(c=> !(c in rows[0]));
+    if(miss.length){ alert("필수 컬럼 누락: "+miss.join(", ")); return; }
+    PREDS = rows;
+  }
+  if(METRICS && PREDS){
+    const d = derive(PREDS);
+    setKPIs(d);
+    drawCharts(d);
+  }
+}
+document.getElementById("metricsFile").addEventListener("change", e=> onFiles(e.target.files));
+document.getElementById("predsFile").addEventListener("change", e=> onFiles(e.target.files));
+const drop = document.getElementById("drop");
+drop.addEventListener("dragover", e=>{ e.preventDefault(); drop.style.background="#f1f5f9"; });
+drop.addEventListener("dragleave", e=>{ e.preventDefault(); drop.style.background=""; });
+drop.addEventListener("drop", e=>{ e.preventDefault(); drop.style.background=""; onFiles(e.dataTransfer.files); });
+</script>
+</body>
+</html>
