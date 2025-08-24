@@ -1,172 +1,170 @@
-name: Run trade4v v3 backtest
+name: trade4v run (v3.3 + diagnostics)
 
 on:
   workflow_dispatch:
     inputs:
-      data_path:
-        description: "데이터 경로 (예: ETHUSDT_1min_2025H1.csv 또는 .zip)"
-        required: true
-        type: string
-      train_start:
-        description: "학습 시작(UTC)"
-        required: true
-        default: "2025-01-01 00:00:00"
-        type: string
-      train_end:
-        description: "학습 종료(UTC)"
-        required: true
-        default: "2025-04-30 23:59:00"
-        type: string
-      test_start:
-        description: "테스트 시작(UTC)"
-        required: true
-        default: "2025-05-01 00:00:00"
-        type: string
-      test_end:
-        description: "테스트 종료(UTC)"
-        required: true
-        default: "2025-06-30 23:59:00"
-        type: string
-      H:
-        description: "홀드 분(H)"
-        required: true
-        default: "15"
-        type: string
-      fee_bps:
-        description: "수수료(bp)"
-        required: true
-        default: "1.0"
-        type: string
-      slip_bps:
-        description: "슬리피지(bp)"
-        required: true
-        default: "0.5"
-        type: string
-      ev_margin_bps:
-        description: "EV 마진(bp) — fee+slip 위에 추가"
-        required: true
-        default: "1.0"
-        type: string
-      K_day:
-        description: "레짐별 K/일 (예: 0:5,1:10,2:20)"
-        required: true
-        default: "0:5,1:10,2:20"
-        type: string
+      train_start: { description: "훈련 시작(UTC)", required: true, default: "2025-01-01 00:00:00" }
+      train_end:   { description: "훈련 종료(UTC)", required: true, default: "2025-04-30 23:59:00" }
+      test_start:  { description: "테스트 시작(UTC)", required: true, default: "2025-05-01 00:00:00" }
+      test_end:    { description: "테스트 종료(UTC)", required: true, default: "2025-06-30 23:59:00" }
+      H:           { description: "예측지평(분)", required: true, default: "15" }
+      fee_bps:     { description: "수수료(bp)", required: true, default: "1.0" }
+      slip_bps:    { description: "슬리피지(bp)", required: true, default: "0.5" }
+      ev_margin_bps: { description: "EV 마진(bp) (현재 v3.3에선 내부 미사용/예비)", required: true, default: "1.0" }
+      K_day:       { description: "일별 Top-K 맵 (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
 
 jobs:
-  backtest:
+  run:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
 
     steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      # 1) Checkout (pinned SHA)
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
+
+      # 2) Python setup (pinned SHA)
+      - name: Setup Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
-          fetch-depth: 0
+          python-version: "3.11"
 
-      - name: Setup Python 3.11 (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11'
-
-      - name: Install deps
-        run: |
-          python -m pip install -U pip
-          pip install "pandas>=2.0" "numpy>=1.24"
-
-      - name: Prepare data
+      # 3) Minimal deps (requirements.txt 없어도 동작)
+      - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
-          DATA="${{ inputs.data_path }}"
-          mkdir -p data
-          [[ -e "$DATA" ]] || { echo "::error::data_path '$DATA' not found"; exit 1; }
-          if [[ "$DATA" == *.zip ]]; then unzip -o -q "$DATA" -d data; else cp -f "$DATA" data/; fi
-          echo "Using CSV:"; ls -1 data/*.csv | head -n1
+          python -V
+          python - <<'PY'
+          import sys, subprocess
+          subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade","pip","setuptools","wheel"])
+          base = ["numpy","pandas","pyarrow","scipy","scikit-learn","statsmodels"]
+          subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
+          PY
 
-      - name: Prepare code (auto-detect folder or unzip *trade4v*.zip)
-        id: codeprep
+      # 4) Unzip project (trade4v.zip -> ./trade4v)
+      - name: Unzip project
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob dotglob
-
-          # 0) 커밋된 폴더 우선
-          if [[ -f trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if [[ -f trade4v/trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-
-          # 1) 임시 폴더 준비 (★ 이전 오류 원인 fix: mkdir -p __extracted)
-          rm -rf __extracted trade4v || true
           mkdir -p __extracted
-
-          # 2) 루트의 *trade4v*.zip 자동 탐색 → 비대화형 해제
-          mapfile -t ZIPS < <(ls -1 *.zip 2>/dev/null | grep -i 'trade4v' || true)
-          if (( ${#ZIPS[@]} == 0 )); then
-            echo "::error::No trade4v code folder or trade4v*.zip found"; exit 1
+          if [ -f trade4v.zip ]; then
+            unzip -o -q trade4v.zip -d __extracted
+            if [ -d __extracted/trade4v ]; then
+              rm -rf trade4v || true
+              mv __extracted/trade4v ./trade4v
+            fi
           fi
+          test -d trade4v
 
-          for z in "${ZIPS[@]}"; do
-            echo "Unzipping $z"
-            # zip 이름별로 고유 하위폴더에 해제
-            mkdir -p "__extracted/${z%.zip}"
-            unzip -o -q "$z" -d "__extracted/${z%.zip}"
-          done
-
-          # 3) run_4u.py가 들어있는 '가장 안쪽 trade4v' 폴더를 ./trade4v 로 평탄화
-          PARENT="$(dirname "$(find __extracted -type f -name 'run_4u.py' -print -quit || true)")"
-          [[ -n "$PARENT" ]] || { echo "::error::run_4u.py not found after extraction"; exit 1; }
-          mv "$PARENT" trade4v
-
-          # 4) 스크립트 경로 확정
-          if [[ -f trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
-          elif [[ -f trade4v/trade4v/run_4u.py ]]; then
-            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::run_4u.py not found in ./trade4v"; exit 1
-          fi
-
-      - name: Run backtest (v3)
+      # 5) Prepare data (CSV/ZIP 자동탐색 + 헤더 정규화)
+      - name: Prepare ETH 1m data
         shell: bash
         run: |
           set -euo pipefail
-          export PYTHONPATH="$PWD/trade4v:$PWD"
-          OUT="_out_4u"
-          CSV=$(ls -1 data/*.csv | head -n1)
-          mkdir -p "$OUT"
-          python "${{ steps.codeprep.outputs.SCRIPT }}" \
-            --data "$CSV" \
-            --train_start "${{ inputs.train_start }}" \
-            --train_end   "${{ inputs.train_end }}" \
-            --test_start  "${{ inputs.test_start }}" \
-            --test_end    "${{ inputs.test_end }}" \
-            --H "${{ inputs.H }}" \
-            --fee_bps "${{ inputs.fee_bps }}" \
-            --slip_bps "${{ inputs.slip_bps }}" \
-            --ev_margin_bps "${{ inputs.ev_margin_bps }}" \
-            --K_day "${{ inputs.K_day }}" \
-            --out_dir "$OUT"
+          mkdir -p data
+          CSV=$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)
+          if [ -z "${CSV}" ] && ls -1 *.zip 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
+            ZIP=$(ls -1 ETHUSDT_1min_*.zip | head -n1)
+            unzip -o -q "$ZIP" -d data
+            CSV=$(ls -1 data/*.csv | head -n1)
+          fi
+          if [ -z "${CSV}" ] && ls -1 *.csv 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
+            CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1)
+            mv "$CSV" data/
+            CSV="data/$(basename "$CSV")"
+          fi
+          if [ -z "${CSV}" ]; then
+            echo "ERROR: CSV 데이터가 필요합니다 (예: data/ETHUSDT_1min_2020_2025.csv)"; exit 2
+          fi
+          echo "Using CSV: ${CSV}"
+          python - "$CSV" <<'PY'
+          import sys, pandas as pd
+          p=sys.argv[1]
+          df=pd.read_csv(p)
+          rename={}
+          for k in list(df.columns):
+            kl=k.strip().lower()
+            if kl in ("open time","opentime","time","timestamp"): rename[k]="open_time"
+            elif kl=="open":  rename[k]="open"
+            elif kl=="high":  rename[k]="high"
+            elif kl=="low":   rename[k]="low"
+            elif kl in ("close","close price","price"): rename[k]="close"
+            elif kl in ("volume","vol"): rename[k]="volume"
+          if rename: df=df.rename(columns=rename)
+          if "open_time" not in df.columns: raise SystemExit("open_time 컬럼이 필요합니다.")
+          df.to_csv("normalized.csv", index=False)
+          PY
 
-      - name: Show outputs (preview)
-        if: always()
+      # 6) Run backtest (v3.3, S1/S2/게이팅 포함)
+      - name: Run backtest (v3.3)
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
+          CSV: normalized.csv
+          TRAIN_S: ${{ inputs.train_start }}
+          TRAIN_E: ${{ inputs.train_end }}
+          TEST_S:  ${{ inputs.test_start }}
+          TEST_E:  ${{ inputs.test_end }}
+          H:       ${{ inputs.H }}
+          FEE:     ${{ inputs.fee_bps }}
+          SLIP:    ${{ inputs.slip_bps }}
+          KDAY:    ${{ inputs.K_day }}
+          OUT:     _out_4u
+          # 게이팅/QA 기본 설정(필요시 내부 수정)
+          QTP: "0.90"
+          QSL: "0.60"
+          OVERLAP_MODE: "cap"       # cap|pyramid|none
+          MAX_CONC: "2"
+          MIN_GAP: "5"
+          STRICT_QA: "0"            # 0=경고만, 1=하드 실패
         run: |
-          echo "== files =="; find "_out_4u" -maxdepth 3 -type f -print | sed 's/^/  /'
-          echo "== run.log tail =="; tail -n 80 "_out_4u/run/run.log" || true
-          echo "== metrics =="; cat "_out_4u/run/metrics_oos.json" || true
-          echo "== preds head =="; head -n 5 "_out_4u/run/preds_test.csv" || true
+          set -euo pipefail
+          mkdir -p "$OUT"
+          python "trade4v/run_4u.py" \
+            --data "$CSV" \
+            --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
+            --test_start "$TEST_S"   --test_end "$TEST_E" \
+            --H "$H" \
+            --fee_bps "$FEE" --slip_bps "$SLIP" \
+            --K_day "$KDAY" \
+            --q_tp "$QTP" --q_sl "$QSL" \
+            --overlap_mode "$OVERLAP_MODE" --max_concurrent "$MAX_CONC" --min_gap_bars "$MIN_GAP" \
+            --strict_qa "$STRICT_QA" \
+            --out_dir "$OUT"
+          ls -al "$OUT" || true
+          ls -al "$OUT/run" || true
 
-      - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      # 6.5) Diagnostics (S1/S2/게이팅 리포트 자동 생성)
+      - name: Run diagnostics
+        if: always()
+        shell: bash
+        env:
+          PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
+          KDAY:    ${{ inputs.K_day }}
+          H:       ${{ inputs.H }}
+        run: |
+          set -euo pipefail
+          if [ -f "_out_4u/run/preds_test.csv" ]; then
+            python -m trade4v.diag.run_diag \
+              --preds _out_4u/run/preds_test.csv \
+              --metrics _out_4u/run/metrics_oos.json \
+              --k_day "$KDAY" \
+              --H "$H" || true
+            echo "diag_report.json:"
+            test -f "_out_4u/run/diag_report.json" && tail -n +1 "_out_4u/run/diag_report.json" | head -n 100 || true
+          else
+            echo "WARN: preds_test.csv 미존재 → 진단 생략"
+          fi
+
+      # 7) Upload outputs (pinned SHA)
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: out_4u_v3
+          name: _out_4u
           path: |
-            _out_4u/run/preds_test.csv
-            _out_4u/run/metrics_oos.json
-            _out_4u/run/run.log
-          if-no-files-found: error
-          retention-days: 14
+            _out_4u/**
+            !**/__pycache__/**
