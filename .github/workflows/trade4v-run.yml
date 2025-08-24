@@ -9,13 +9,12 @@ on:
       H:           { description: "H forward bars", default: "5", required: true }
       fee_bps:     { description: "one-way fee bps (0.1% = 10)", default: "10", required: true }
       regime:      { description: "vol_window,z_thr", default: "64,1.5", required: true }
-      coverage:    { description: "cov_min-cov_max", default: "0.10-0.30", required: true }
+      goal:        { description: "objective (e.g., mcc or pnl,400)", default: "pnl,400", required: true }
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      # SHA pinned actions (보안정책 대응)
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Setup Python
@@ -30,7 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r trade4v/requirements.txt
 
-      # 데이터 ZIP 해제 + 헤더/시간 정규화 → normalized.csv
       - name: Prepare ETH 1m data (normalize headers & time)
         run: |
           unzip -q "${{ github.event.inputs.data_zip }}" -d data
@@ -40,19 +38,15 @@ jobs:
           assert srcs, "No CSV inside the uploaded zip"
           src = srcs[0]
           df = pd.read_csv(src)
-          # 1) 헤더 표준화
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
-          # 2) time/open_time/ts 탐색
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
           if tcol is None: raise SystemExit("No time/open_time/ts column found")
           s = df[tcol]
-          # 3) epoch(ms/s) 또는 문자열 처리
           if np.issubdtype(s.dtype, np.number):
             med = float(s.iloc[len(s)//2]); unit = "ms" if med > 1e11 else "s"
             df["time"] = pd.to_datetime(s, unit=unit, utc=True)
           else:
             df["time"] = pd.to_datetime(s, utc=True)
-          # 4) 필수 컬럼 체크/매핑
           for c in ["open","high","low","close"]:
             if c not in df.columns: raise SystemExit(f"Missing column: {c}")
           if "volume" not in df.columns:
@@ -63,24 +57,20 @@ jobs:
           PY
           echo "DATA_PATH=normalized.csv" >> $GITHUB_ENV
 
-      # compact inputs 파싱
       - name: Parse compact inputs
         shell: bash
         run: |
           IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
           IFS=',' read -r TEST_S  TEST_E  <<< "${{ github.event.inputs.test_range }}"
           IFS=',' read -r VOLW    ZTHR    <<< "${{ github.event.inputs.regime }}"
-          IFS='-' read -r COV_MIN COV_MAX <<< "${{ github.event.inputs.coverage }}"
           echo "TRAIN_S=$TRAIN_S" >> $GITHUB_ENV
           echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
           echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
           echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
           echo "VOLW=$VOLW"       >> $GITHUB_ENV
           echo "ZTHR=$ZTHR"       >> $GITHUB_ENV
-          echo "COV_MIN=$COV_MIN" >> $GITHUB_ENV
-          echo "COV_MAX=$COV_MAX" >> $GITHUB_ENV
 
-      - name: Run backtest (Isotonic holdout & bins)
+      - name: Run backtest (PnL objective)
         env:
           PYTHONWARNINGS: "ignore::FutureWarning"
         run: |
@@ -94,8 +84,7 @@ jobs:
             --fee_bps     ${{ github.event.inputs.fee_bps }} \
             --vol_window  "${{ env.VOLW }}" \
             --z_thr       "${{ env.ZTHR }}" \
-            --cov_min     "${{ env.COV_MIN }}" \
-            --cov_max     "${{ env.COV_MAX }}" \
+            --goal        "${{ github.event.inputs.goal }}" \
             --max_train_rows 200000 \
             --cal_frac 0.2 \
             --cal_bins 50 \
