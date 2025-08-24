@@ -4,16 +4,12 @@ on:
     inputs:
       project_zip: { description: "project zip", default: "trade4v.zip", required: true }
       data_zip:    { description: "ETH 1m zip in repo", default: "ETHUSDT_1min_2020_2025.zip", required: true }
-      train_start: { description: "YYYY-MM-DD", default: "2025-01-01", required: true }
-      train_end:   { description: "YYYY-MM-DD", default: "2025-04-30", required: true }
-      test_start:  { description: "YYYY-MM-DD", default: "2025-05-01", required: true }
-      test_end:    { description: "YYYY-MM-DD", default: "2025-06-30", required: true }
+      train_range: { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
+      test_range:  { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
       H:           { description: "H forward bars", default: "5", required: true }
       fee_bps:     { description: "one-way fee bps (0.1% = 10)", default: "10", required: true }
-      vol_window:  { description: "regime vol window", default: "64", required: true }
-      z_thr:       { description: "regime z-threshold", default: "1.5", required: true }
-      cov_min:     { description: "min coverage", default: "0.10", required: true }
-      cov_max:     { description: "max coverage", default: "0.30", required: true }
+      regime:      { description: "vol_window,z_thr", default: "64,1.5", required: true }
+      coverage:    { description: "cov_min-cov_max", default: "0.10-0.30", required: true }
 
 jobs:
   run:
@@ -32,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r trade4v/requirements.txt
 
-      # ✅ 데이터 ZIP을 풀고, 헤더/시간컬럼 정규화 → normalized.csv 생성
+      # 데이터 ZIP 해제 + 헤더/시간 정규화
       - name: Prepare ETH 1m data (normalize headers & time)
         run: |
           unzip -q "${{ github.event.inputs.data_zip }}" -d data
@@ -42,27 +38,25 @@ jobs:
           assert files, "No CSV inside the uploaded zip"
           src = files[0]
           df = pd.read_csv(src)
-          # 1) 헤더 표준화(소문자, 공백→언더스코어)
+          # 1) 헤더 표준화
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
-          # 2) time 컬럼 찾기 (open_time 우선)
+          # 2) time/open_time/ts 찾기
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
           if tcol is None:
             raise SystemExit("No time/open_time/ts column found")
           s = df[tcol]
-          # 3) epoch 숫자(ms/s) vs 문자열 처리
+          # 3) epoch(ms/s) 또는 문자열 처리
           if np.issubdtype(s.dtype, np.number):
             med = float(s.iloc[len(s)//2])
             unit = "ms" if med > 1e11 else "s"
             df["time"] = pd.to_datetime(s, unit=unit, utc=True)
           else:
             df["time"] = pd.to_datetime(s, utc=True)
-          # 4) 가격/체결 필수 컬럼 보정
-          need_price = ["open","high","low","close"]
-          for c in need_price:
-            if c not in df.columns:
-              raise SystemExit(f"Missing column: {c}")
+          # 4) 필수 컬럼 체크/매핑
+          need = ["open","high","low","close"]
+          for c in need:
+            if c not in df.columns: raise SystemExit(f"Missing column: {c}")
           if "volume" not in df.columns:
-            # 후보 중 하나를 volume으로 사용
             cand = [c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
             if not cand: raise SystemExit("Missing volume column")
             df["volume"] = df[cand[0]]
@@ -72,20 +66,37 @@ jobs:
           PY
           echo "DATA_PATH=normalized.csv" >> $GITHUB_ENV
 
+      # 문자열 입력 파싱 → 환경변수로 변환
+      - name: Parse compact inputs
+        shell: bash
+        run: |
+          IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
+          IFS=',' read -r TEST_S  TEST_E  <<< "${{ github.event.inputs.test_range }}"
+          IFS=',' read -r VOLW    ZTHR    <<< "${{ github.event.inputs.regime }}"
+          IFS='-' read -r COV_MIN COV_MAX <<< "${{ github.event.inputs.coverage }}"
+          echo "TRAIN_S=$TRAIN_S" >> $GITHUB_ENV
+          echo "TRAIN_E=$TRAIN_E" >> $GITHUB_ENV
+          echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
+          echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
+          echo "VOLW=$VOLW"       >> $GITHUB_ENV
+          echo "ZTHR=$ZTHR"       >> $GITHUB_ENV
+          echo "COV_MIN=$COV_MIN" >> $GITHUB_ENV
+          echo "COV_MAX=$COV_MAX" >> $GITHUB_ENV
+
       - name: Run backtest
         run: |
           python trade4v/run_4u.py \
             --data        "${{ env.DATA_PATH }}" \
-            --train_start "${{ github.event.inputs.train_start }}" \
-            --train_end   "${{ github.event.inputs.train_end }}" \
-            --test_start  "${{ github.event.inputs.test_start }}" \
-            --test_end    "${{ github.event.inputs.test_end }}" \
+            --train_start "${{ env.TRAIN_S }}" \
+            --train_end   "${{ env.TRAIN_E }}" \
+            --test_start  "${{ env.TEST_S }}" \
+            --test_end    "${{ env.TEST_E }}" \
             --H           ${{ github.event.inputs.H }} \
             --fee_bps     ${{ github.event.inputs.fee_bps }} \
-            --vol_window  ${{ github.event.inputs.vol_window }} \
-            --z_thr       ${{ github.event.inputs.z_thr }} \
-            --cov_min     ${{ github.event.inputs.cov_min }} \
-            --cov_max     ${{ github.event.inputs.cov_max }} \
+            --vol_window  "${{ env.VOLW }}" \
+            --z_thr       "${{ env.ZTHR }}" \
+            --cov_min     "${{ env.COV_MIN }}" \
+            --cov_max     "${{ env.COV_MAX }}" \
             --out_dir     _out_4u/github
 
       - name: Upload outputs
