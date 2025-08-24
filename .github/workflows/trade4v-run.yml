@@ -3,15 +3,15 @@ on:
   workflow_dispatch:
     inputs:
       project_zip: { description: "project zip", default: "trade4v.zip", required: true }
-      data_zip:    { description: "ETH 1m zip in repo", default: "ETHUSDT_1min_2020_2025.zip", required: true }
+      data_zip:    { description: "ETH 1m zip in repo", default: "ETHUSDT_1min_2025H1.zip", required: true }
       train_range: { description: "train_start,train_end", default: "2025-01-01,2025-04-30", required: true }
       test_range:  { description: "test_start,test_end",  default: "2025-05-01,2025-06-30",  required: true }
-      H:           { description: "H forward bars", default: "9", required: true }
+      H:           { description: "H forward bars", default: "11", required: true }
       fee_bps:     { description: "one-way fee bps (0.1% = 10)", default: "10", required: true }
       regime:      { description: "vol,z_low,z_high (or vol,z_thr)", default: "64,1.0,2.0", required: true }
-      goal:        { description: "objective (e.g., pnl,400-900)", default: "pnl,400-900", required: true }
-      goal_maps:   { description: "per-regime bounds (e.g., 0:350-700,1:200-400,2:150-350)", default: "0:350-700,1:200-400,2:150-350", required: true }
-      cal:         { description: "cal_frac,cal_bins", default: "0.35,150", required: true }
+      goal:        { description: "objective (e.g., pnl,300-700)", default: "pnl,300-700", required: true }
+      goal_maps:   { description: "per-regime bounds (e.g., 0:150-400,1:180-320,2:60-180)", default: "0:150-400,1:180-320,2:60-180", required: true }
+      cal:         { description: "cal_frac,cal_bins", default: "0.40,200", required: true }
 
 jobs:
   run:
@@ -31,35 +31,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r trade4v/requirements.txt
 
-      - name: Prepare ETH 1m data (normalize headers & time)
+      - name: Prepare ETH 1m data
         run: |
           unzip -q "${{ github.event.inputs.data_zip }}" -d data
           python - <<'PY'
           import glob, pandas as pd, numpy as np
-          srcs = sorted(glob.glob("data/*.csv"))
-          assert srcs, "No CSV inside uploaded zip"
-          src = srcs[0]
-          df = pd.read_csv(src)
+          srcs = sorted(glob.glob("data/*.csv")); assert srcs, "No CSV in data zip"
+          df = pd.read_csv(srcs[0])
           df = df.rename(columns={c: c.strip().lower().replace(" ", "_") for c in df.columns})
           tcol = next((c for c in ["time","open_time","ts","timestamp"] if c in df.columns), None)
-          if tcol is None: raise SystemExit("No time/open_time/ts column found")
           s = df[tcol]
           if np.issubdtype(s.dtype, np.number):
-            med = float(s.iloc[len(s)//2]); unit = "ms" if med > 1e11 else "s"
+            med=float(s.iloc[len(s)//2]); unit='ms' if med>1e11 else 's'
             df["time"] = pd.to_datetime(s, unit=unit, utc=True)
           else:
             df["time"] = pd.to_datetime(s, utc=True)
-          for c in ["open","high","low","close"]:
-            if c not in df.columns: raise SystemExit(f"Missing column: {c}")
+          for c in ["open","high","low","close"]: 
+            assert c in df.columns, f"Missing {c}"
           if "volume" not in df.columns:
-            cand = [c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
-            if not cand: raise SystemExit("Missing volume column")
-            df["volume"] = df[cand[0]]
+            cand=[c for c in ["vol","base_volume","quote_asset_volume","volume_usdt","volume_usd"] if c in df.columns]
+            assert cand, "Missing volume"; df["volume"]=df[cand[0]]
           df[["time","open","high","low","close","volume"]].to_csv("normalized.csv", index=False)
           PY
           echo "DATA_PATH=normalized.csv" >> $GITHUB_ENV
 
-      - name: Parse compact inputs
+      - name: Parse ranges
         shell: bash
         run: |
           IFS=',' read -r TRAIN_S TRAIN_E <<< "${{ github.event.inputs.train_range }}"
@@ -69,9 +65,8 @@ jobs:
           echo "TEST_S=$TEST_S"   >> $GITHUB_ENV
           echo "TEST_E=$TEST_E"   >> $GITHUB_ENV
 
-      - name: Run backtest (pnl objective with goal maps + deoverlap + gating)
-        env:
-          PYTHONWARNINGS: "ignore::FutureWarning"
+      - name: Run backtest (EV+quota, soft gating)
+        env: { PYTHONWARNINGS: "ignore::FutureWarning" }
         run: |
           python trade4v/run_4u.py \
             --data        "${{ env.DATA_PATH }}" \
@@ -86,12 +81,12 @@ jobs:
             --goal_maps   "${{ github.event.inputs.goal_maps }}" \
             --cal         "${{ github.event.inputs.cal }}" \
             --deoverlap \
-            --gate_negative \
+            --gate_mode soft \
+            --thin_factor 0.2 \
+            --thin_floor 30 \
             --max_train_rows 200000 \
             --out_dir _out_4u/github
 
       - name: Upload outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: trade4v-out
-          path: _out_4u/github/
+        with: { name: trade4v-out, path: _out_4u/github/ }
