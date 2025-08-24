@@ -59,7 +59,6 @@ jobs:
             echo "Using trend4u.zip" | tee -a "$LOG_DIR/steps.txt"
             rm -rf _code_tmp && mkdir -p _code_tmp
             unzip -q trend4u.zip -d _code_tmp
-            # 네가 준 구조: 최상위가 trend4u/
             if [[ -d _code_tmp/trend4u ]]; then
               rsync -a _code_tmp/trend4u/ "$SRC_DIR"/trend4u/
             elif [[ -d _code_tmp/src ]]; then
@@ -77,15 +76,6 @@ jobs:
             exit 1
           fi
 
-          # trend4p/__init__.py 과거 문법오류 핫픽스 (. __all__ → __all__)
-          INIT="$SRC_DIR/trend4u/trend4p/__init__.py"
-          if [[ -f "$INIT" ]]; then
-            sed -i '1s/^[[:space:]]*\.[[:space:]]*__all__/__all__/' "$INIT" || true
-            if ! grep -q "__all__" "$INIT"; then
-              printf "__all__=['data_utils','features_4u','labeling','model_4u','execution_4u','selector_4u']\n" >> "$INIT"
-            fi
-          fi
-
           echo "[src tree]"
           (cd "$SRC_DIR" && find . -maxdepth 3 -type f | sort | tee -a "$LOG_DIR/src_tree.txt")
 
@@ -97,19 +87,17 @@ jobs:
             echo "Using ETHUSDT_1min_2020_2025.zip" | tee -a "$LOG_DIR/steps.txt"
             unzip -q ETHUSDT_1min_2020_2025.zip -d "$DATA_DIR"
           else
-            # 루트 CSV 폴백
             shopt -s nullglob
             CSV=(ETHUSDT_1min_2020_2025.csv *.csv)
             if [[ ${#CSV[@]} -gt 0 ]]; then
               mkdir -p "$DATA_DIR"
               cp -f "${CSV[@]}" "$DATA_DIR"/
             else
-              echo "::warning::데이터 ZIP/CSV가 없습니다. 코드가 내부에서 다운로드하지 않으면 결과가 비어 있을 수 있음."
+              echo "::warning::데이터 ZIP/CSV가 없습니다."
             fi
           fi
           echo "[data tree]"
           (cd "$DATA_DIR" && ls -la || true) | tee -a "$LOG_DIR/steps.txt"
-          head -n 5 "$(find "$DATA_DIR" -type f -name '*.csv' | head -n1)" 2>/dev/null | tee "$LOG_DIR/sample_data_head.txt" || true
 
       - name: Install deps (python3 -m pip)
         shell: bash
@@ -135,12 +123,10 @@ jobs:
         env:
           DATA_DIR: ${{ github.workspace }}/data
           OUT_DIR:  ${{ github.workspace }}/_out
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/src/trend4u
         run: |
           set -Eeuo pipefail
-          export PYTHONPATH="${PYTHONPATH:-${GITHUB_WORKSPACE}/src}"
           echo "PYTHONPATH=$PYTHONPATH" | tee -a "$LOG_DIR/steps.txt"
-
-          # 표준 엔트리
           set +e
           python3 -m trend4u.run_4u ${{ inputs.run_args }} 2>&1 | tee "$LOG_DIR/backtest_stdout.txt"
           rc=${PIPESTATUS[0]}
