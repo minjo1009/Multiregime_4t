@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro v2 (Schema v1)</title>
+  <title>Trade4V Viewer Pro v2.1 (Schema v1)</title>
   <style>
     :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; }
     html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     .wrap { display:flex; height:100%; }
-    .side { width:340px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
+    .side { width:360px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
     .main { flex:1; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto; }
     h1 { margin:0 0 12px; font-size:18px; font-weight:600; }
     .section { margin-bottom:16px; }
@@ -36,13 +36,13 @@
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro v2</h1>
+    <h1>Trade4V Viewer Pro v2.1</h1>
     <div class="section">
-      <div class="muted">파일 드래그 앤 드롭 (창 어디든 드롭 가능)</div>
+      <div class="muted">파일 드래그 앤 드롭 (창 아무 곳이나 가능)</div>
       <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
       <div style="height:8px"></div>
       <div class="row"><input class="input" type="file" id="predsFile" accept=".csv" /><input class="input" type="file" id="metricsFile" accept="application/json" /></div>
-      <div class="muted" id="status">-</div>
+      <div class="row"><button class="btn" id="btnForceRefresh">강제 새로고침</button><span id="status" class="muted">-</span></div>
     </div>
     <div class="section">
       <div class="muted">URL로 불러오기 (raw 링크)</div>
@@ -132,6 +132,16 @@
 Chart.register(window['chartjs-plugin-zoom']);
 let RAW=null, MET=null, FILT=null, ALL=null;
 const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
+const synonyms = {
+  time: ["time","timestamp","open_time","date"],
+  regime_id: ["regime_id","regime","state"],
+  H_row: ["H_row","H_used","H","h_row","h_used","h"],
+  ev_final: ["ev_final","ev_net","edge","pnl_pred","ev"],
+  entry_flag: ["entry_flag","signal","enter","trade","flag"],
+  size: ["size","kelly","weight","position","w","kelly_size"],
+  gross_event: ["gross_event","event_gross","gross","ret_gross","gross_ret"],
+  net_event: ["net_event","event_net","net","ret_net","net_ret","realized"]
+};
 
 function toast(msg){
   const t=document.getElementById('toast'); t.innerText=msg; t.style.display='block';
@@ -142,25 +152,58 @@ function setStatus(msg){ document.getElementById('status').innerText = msg; }
 function safeParseTime(v){
   if(typeof v === 'number'){ return new Date(v); }
   if(typeof v === 'string'){
-    // add 'Z' if no timezone
     if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
     return new Date(v);
   }
   return new Date(v);
 }
+
+function mapHeaders(rows){
+  if(!rows || !rows.length) return rows;
+  const first = rows[0];
+  const keys = Object.keys(first);
+  const up = k=> k.toLowerCase().replace(/\s+/g,'');
+  const dict = {};
+  // Build mapping
+  for(const req in synonyms){
+    const cands = synonyms[req];
+    for(const k of keys){
+      const K = up(k);
+      for(const c of cands){
+        if(K === up(c)){ dict[req] = k; break; }
+      }
+      if(dict[req]) break;
+    }
+  }
+  // Apply mapping
+  return rows.map(r=>{
+    const o={};
+    for(const req of Object.keys(synonyms)){
+      const k = dict[req];
+      if(k !== undefined){
+        o[req] = r[k];
+      }
+    }
+    // keep extras
+    for(const k in r){ if(!(k in o)) o[k]=r[k]; }
+    return o;
+  });
+}
+
 function adaptRows(rows){
   if(!rows || rows.length===0) return rows;
-  const norm = rows.map(obj=>{
-    const r={}; for(const k in obj){ r[k.trim()] = obj[k]; }
-    return r;
-  });
-  const has = k=> Object.prototype.hasOwnProperty.call(norm[0], k);
-  let out = norm.map(r=>({...r}));
+  // trim header whitespace
+  rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
+  // try synonym mapping
+  rows = mapHeaders(rows);
+  const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
+  let out = rows.map(r=>({...r}));
   if(!has("ev_final") && has("ev_net")) out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
   const miss = needCols.filter(c=> !(c in out[0]));
   if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
   return out;
 }
+
 function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
   const p = rows.map(r=>({ ...r,
     time: safeParseTime(r.time),
@@ -310,7 +353,7 @@ function getFilters(){
 }
 
 function refresh(){
-  if(!ALL) return;
+  if(!ALL || !ALL.rows) return;
   const { start, end, ridMask, smooth } = getFilters();
   const d = derive(ALL.rows, start, end, ridMask, smooth);
   FILT = d;
@@ -322,8 +365,7 @@ function afterLoad(){
   if(!RAW && !MET){ setStatus("-"); return; }
   const name1 = ALL?.names?.preds || "-";
   const name2 = ALL?.names?.metrics || "-";
-  setStatus(`로드됨: ${name1} / ${name2}`);
-  // preset ALL range into pickers
+  setStatus(`로드됨: ${name1} / ${name2} (rows=${(ALL.rows||[]).length||0})`);
   try{
     const rows = ALL.rows;
     if(rows && rows.length){
@@ -342,15 +384,20 @@ async function handleFiles(files){
   if(arr.length===0) return;
   let changed=false;
   for(const f of arr){
-    if(f.name.endsWith(".csv")){
-      const r = await new Promise((res,rej)=> Papa.parse(f,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}));
-      RAW = adaptRows(r); changed=true;
-      ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
-    }else if(f.name.endsWith(".json")){
-      const text = await f.text(); MET = JSON.parse(text); changed=true;
-      ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
-    }else{
-      toast("지원하지 않는 파일: "+f.name);
+    try{
+      if(f.name.endsWith(".csv")){
+        const r = await new Promise((res,rej)=> Papa.parse(f,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}));
+        RAW = adaptRows(r); changed=true;
+        ALL = ALL || {}; ALL.rows = RAW; ALL.names = ALL.names || {}; ALL.names.preds = f.name;
+      }else if(f.name.endsWith(".json")){
+        const text = await f.text(); MET = JSON.parse(text); changed=true;
+        ALL = ALL || {}; ALL.metrics = MET; ALL.names = ALL.names || {}; ALL.names.metrics = f.name;
+      }else{
+        toast("지원하지 않는 파일: "+f.name);
+      }
+    }catch(err){
+      toast("로딩 실패: "+err.message);
+      console.error(err);
     }
   }
   if(changed) afterLoad();
@@ -360,8 +407,30 @@ async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(
 
 document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
 document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
+document.getElementById("btnForceRefresh").addEventListener("click", refresh);
 ["rid0","rid1","rid2","showEquity","showBars","showScatter","showHist","showDD","smooth"].forEach(id=>{
   document.getElementById(id).addEventListener("change", refresh);
+});
+document.querySelectorAll(".preset .btn").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    if(!ALL?.rows?.length) return;
+    const rows = ALL.rows;
+    const last = new Date(rows[rows.length-1].time);
+    const first= new Date(rows[0].time);
+    function minusDays(d){ const x = new Date(last); x.setDate(x.getDate()-d); return x; }
+    let s=first, e=last;
+    const label = btn.getAttribute("data-range");
+    if(label==="1D") s = minusDays(1);
+    if(label==="1W") s = minusDays(7);
+    if(label==="1M") s = minusDays(30);
+    if(label==="3M") s = minusDays(90);
+    if(label==="YTD"){ s = new Date(last.getFullYear(),0,1); }
+    // set pickers to local
+    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+    document.getElementById("start").value = toLocal(s);
+    document.getElementById("end").value   = toLocal(e);
+    refresh();
+  });
 });
 document.getElementById("btnApplyRange").addEventListener("click", refresh);
 document.getElementById("btnResetZoom").addEventListener("click", ()=>{ if(charts.equity) charts.equity.resetZoom(); });
@@ -376,8 +445,8 @@ document.getElementById("btnResetAll").addEventListener("click", ()=>{
   document.getElementById("showDD").checked=true;
   document.getElementById("smooth").value="1";
   if(ALL?.rows?.length){
-    const t0 = safeParseTime(ALL.rows[0].time);
-    const t1 = safeParseTime(ALL.rows[ALL.rows.length-1].time);
+    const t0 = new Date(ALL.rows[0].time);
+    const t1 = new Date(ALL.rows[ALL.rows.length-1].time);
     const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
     document.getElementById("start").value = toLocal(t0);
     document.getElementById("end").value   = toLocal(t1);
@@ -385,15 +454,15 @@ document.getElementById("btnResetAll").addEventListener("click", ()=>{
   refresh();
 });
 
-// Window-wide drag & drop
+// Window-wide drag & drop (document-level)
 ["dragenter","dragover","dragleave","drop"].forEach(evt=>{
-  window.addEventListener(evt, e=>{
+  document.addEventListener(evt, e=>{
     if(evt!=="drop"){ e.preventDefault(); }
   }, false);
 });
-window.addEventListener("dragover", e=>{ e.preventDefault(); document.getElementById("drop").style.background="#0b1220"; });
-window.addEventListener("dragleave", e=>{ document.getElementById("drop").style.background=""; });
-window.addEventListener("drop", e=>{
+document.addEventListener("dragover", e=>{ e.preventDefault(); document.getElementById("drop").style.background="#0b1220"; });
+document.addEventListener("dragleave", e=>{ document.getElementById("drop").style.background=""; });
+document.addEventListener("drop", e=>{
   e.preventDefault(); document.getElementById("drop").style.background="";
   const items = e.dataTransfer?.files;
   if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
