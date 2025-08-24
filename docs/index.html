@@ -3,94 +3,151 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer (Schema v1)</title>
+  <title>Trade4V Viewer Pro (Schema v1)</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
-    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
-    .kpi { min-width: 150px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap: 12px; }
-    .muted { color: #6b7280; font-size: 12px; }
-    #drop { border: 2px dashed #94a3b8; padding: 16px; border-radius: 12px; text-align: center; color: #64748b; }
+    :root { --bg:#0b1220; --panel:#111827; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; }
+    html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { display:flex; height:100%; }
+    .side { width:320px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
+    .main { flex:1; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto; }
+    h1 { margin:0 0 12px; font-size:18px; font-weight:600; }
+    .section { margin-bottom:16px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn { background:#1f2937; border:1px solid #374151; color:#e5e7eb; border-radius:8px; padding:8px 10px; cursor:pointer; }
+    .btn:hover { border-color:#4b5563; }
+    .input, select { background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
+    .card { background: var(--card); border:1px solid #1f2937; border-radius:12px; padding:12px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap:10px; }
+    .muted { color: var(--muted); font-size:12px; }
+    .switch { display:flex; align-items:center; gap:8px; }
+    .kpi { font-size:22px; font-weight:700; }
+    .sep { height:1px; background:#1f2937; margin:12px 0; }
+    .badge { font-size:11px; background:#0b1220; padding:2px 6px; border-radius:6px; border:1px solid #1f2937; }
+    a.link { color:#93c5fd; text-decoration:none; }
+    a.link:hover { text-decoration:underline; }
+    .drpz { border:2px dashed #334155; border-radius:12px; padding:12px; text-align:center; color:#9ca3af; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
 </head>
 <body>
-  <h1>Trade4V Backtest Viewer (Schema v1)</h1>
-  <p class="muted">필수 파일: <code>viewer_v1/preds.csv</code>, <code>viewer_v1/metrics_oos.json</code></p>
-  <div class="row">
-    <div class="card">
-      <div><strong>metrics_oos.json</strong></div>
-      <input type="file" id="metricsFile" accept="application/json" />
+<div class="wrap">
+  <aside class="side">
+    <h1>Trade4V Viewer Pro</h1>
+    <div class="section">
+      <div class="muted">파일 드래그 앤 드롭</div>
+      <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
+      <div style="height:8px"></div>
+      <div class="row"><input class="input" type="file" id="predsFile" accept=".csv" /><input class="input" type="file" id="metricsFile" accept="application/json" /></div>
     </div>
-    <div class="card">
-      <div><strong>preds.csv</strong></div>
-      <input type="file" id="predsFile" accept=".csv,text/csv" />
+    <div class="section">
+      <div class="muted">URL로 불러오기 (raw 링크)</div>
+      <input class="input" id="predsURL" placeholder="preds.csv raw URL">
+      <input class="input" id="metricsURL" placeholder="metrics.json raw URL">
+      <div class="row"><button class="btn" id="btnLoadURL">불러오기</button><span id="loadMsg" class="muted"></span></div>
     </div>
-    <div id="drop" class="card">여기로 파일 2개를 드래그 앤 드롭</div>
-  </div>
+    <div class="sep"></div>
+    <div class="section">
+      <div class="muted">기간 선택</div>
+      <div class="row">
+        <input class="input" id="start" type="datetime-local">
+        <input class="input" id="end" type="datetime-local">
+      </div>
+      <div class="row">
+        <button class="btn" id="btnApplyRange">적용</button>
+        <button class="btn" id="btnResetZoom">줌 리셋</button>
+      </div>
+    </div>
+    <div class="section">
+      <div class="muted">레짐 필터</div>
+      <div class="row">
+        <label class="switch"><input type="checkbox" id="rid0" checked> R0</label>
+        <label class="switch"><input type="checkbox" id="rid1" checked> R1</label>
+        <label class="switch"><input type="checkbox" id="rid2" checked> R2</label>
+      </div>
+    </div>
+    <div class="section">
+      <div class="muted">표시 요소</div>
+      <div class="row" style="flex-direction:column; align-items:flex-start;">
+        <label class="switch"><input type="checkbox" id="showEquity" checked> 누적 PnL 라인</label>
+        <label class="switch"><input type="checkbox" id="showBars" checked> 일별 PnL 바</label>
+        <label class="switch"><input type="checkbox" id="showScatter" checked> EV vs 실현 산포</label>
+        <label class="switch"><input type="checkbox" id="showHist" checked> EV 히스토그램</label>
+      </div>
+    </div>
+    <div class="section">
+      <div class="muted">세부</div>
+      <div class="row">
+        <label>스무딩(롤링):
+          <select id="smooth" class="input">
+            <option value="1">x1</option>
+            <option value="5">x5</option>
+            <option value="15">x15</option>
+          </select>
+        </label>
+        <button class="btn" id="btnExport">analytics.json 저장</button>
+      </div>
+    </div>
+    <div class="sep"></div>
+    <div class="section">
+      <div class="muted">스키마</div>
+      <div id="schemaInfo" class="badge">-</div>
+    </div>
+  </aside>
 
-  <div class="grid" style="margin-top:14px;">
-    <div class="card kpi"><div class="muted">Trades</div><div id="k_trades" style="font-weight:600;font-size:20px;">-</div></div>
-    <div class="card kpi"><div class="muted">Hit rate</div><div id="k_hit" style="font-weight:600;font-size:20px;">-</div></div>
-    <div class="card kpi"><div class="muted">PnL (sum)</div><div id="k_pnl" style="font-weight:600;font-size:20px;">-</div></div>
-    <div class="card kpi"><div class="muted">EV≥0 ratio</div><div id="k_evpos" style="font-weight:600;font-size:20px;">-</div></div>
-    <div class="card kpi"><div class="muted">Eff (real/EV)</div><div id="k_eff" style="font-weight:600;font-size:20px;">-</div></div>
-    <div class="card kpi"><div class="muted">Eff (real/EV·size)</div><div id="k_effw" style="font-weight:600;font-size:20px;">-</div></div>
-  </div>
-
-  <div class="card" style="margin-top:14px;">
-    <canvas id="equity" height="120"></canvas>
-  </div>
-  <div class="card" style="margin-top:14px;">
-    <canvas id="scatter" height="140"></canvas>
-  </div>
+  <main class="main">
+    <div class="grid">
+      <div class="card"><div class="muted">Trades</div><div id="k_trades" class="kpi">-</div></div>
+      <div class="card"><div class="muted">Hit rate</div><div id="k_hit" class="kpi">-</div></div>
+      <div class="card"><div class="muted">PnL (sum)</div><div id="k_pnl" class="kpi">-</div></div>
+      <div class="card"><div class="muted">EV≥0 ratio</div><div id="k_evpos" class="kpi">-</div></div>
+      <div class="card"><div class="muted">Eff (real/EV)</div><div id="k_eff" class="kpi">-</div></div>
+      <div class="card"><div class="muted">Eff (real/EV·size)</div><div id="k_effw" class="kpi">-</div></div>
+    </div>
+    <div id="panelEquity" class="card"><canvas id="equity" height="120"></canvas></div>
+    <div id="panelBars" class="card"><canvas id="barPnL" height="120"></canvas></div>
+    <div id="panelScatter" class="card"><canvas id="scatter" height="120"></canvas></div>
+    <div id="panelHist" class="card"><canvas id="hist" height="120"></canvas></div>
+  </main>
+</div>
 
 <script>
-let METRICS=null, PREDS=null;
+Chart.register(window['chartjs-plugin-zoom']);
+let RAW=null, MET=null, FILT=null;
 const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
+
 function fmtPct(x){ if(!isFinite(x)) return "-"; return (x*100).toFixed(1)+"%"; }
 function fmtNum(x, d=4){ if(!isFinite(x)) return "-"; return Number(x).toFixed(d); }
+function toISO(dt){ return dt.toISOString().slice(0,16); }
 
-function ensureV1(rows){
-  if(rows.length===0) return rows;
+// Schema adapter (v1 stable, forward compatible)
+function adaptRows(rows){
+  if(!rows || rows.length===0) return rows;
   const has = k=> Object.prototype.hasOwnProperty.call(rows[0], k);
+  let out=rows.map(r=>({...r}));
   if(!has("ev_final") && has("ev_net")){
-    rows = rows.map(r=>({...r, ev_final:Number(r.ev_net)}));
+    out = out.map(r=>({...r, ev_final:Number(r.ev_net)}));
   }
-  return rows;
+  // Ensure required
+  const miss = needCols.filter(c=> !(c in out[0]));
+  if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
+  return out;
 }
+
 function parseCSV(file){
-  return new Promise((res,rej)=>{ Papa.parse(file,{header:true,dynamicTyping:true,complete:r=>res(r.data),error:rej}); });
+  return new Promise((res,rej)=>{ Papa.parse(file,{ header:true, dynamicTyping:true, complete:r=>res(r.data), error:rej }); });
 }
-function setKPIs(d){
-  document.getElementById("k_trades").innerText = METRICS?.trades ?? d.selected.length;
-  document.getElementById("k_hit").innerText    = fmtPct(METRICS?.hit_rate ?? d.hit);
-  document.getElementById("k_pnl").innerText    = fmtNum(METRICS?.pnl ?? d.sumRealized);
-  document.getElementById("k_evpos").innerText  = fmtPct(d.evPosRatio);
-  document.getElementById("k_eff").innerText    = fmtNum(d.eff);
-  document.getElementById("k_effw").innerText   = fmtNum(d.effW);
+async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
+
+function setSchemaBadge(){
+  const v = (MET && MET.viewer_schema) ? MET.viewer_schema : "v1?";
+  document.getElementById("schemaInfo").innerText = "viewer_schema: "+v;
 }
-let eqChart=null, scChart=null;
-function drawCharts(d){
-  const eqx = d.series.map(s=>s.t.toISOString().slice(0,16).replace('T',' '));
-  const eqy = d.series.map(s=>s.cum);
-  if(eqChart){ eqChart.destroy(); }
-  eqChart = new Chart(document.getElementById('equity'), {
-    type:'line', data:{ labels:eqx, datasets:[{ label:'Cumulative PnL', data:eqy, fill:false }]},
-    options:{ scales:{ x:{ ticks:{ autoSkip:true, maxRotation:0 }}}}
-  });
-  const scx = d.scatter.map(s=>s.ev), scy = d.scatter.map(s=>s.real);
-  if(scChart){ scChart.destroy(); }
-  scChart = new Chart(document.getElementById('scatter'), {
-    type:'scatter',
-    data:{ datasets:[{ label:'EV vs Realized', data: scx.map((x,i)=>({x, y: scy[i]})) }]},
-    options:{ scales:{ x:{ title:{display:true,text:'EV(final)'}}, y:{ title:{display:true,text:'Realized(net*size)'}} }}
-  });
-}
-function derive(preds){
-  const p = preds.map(r=>({ ...r,
+
+function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
+  const p = rows.map(r=>({ ...r,
     time: new Date(r.time),
     regime_id: Number(r.regime_id),
     H_row: Number(r.H_row||1),
@@ -99,46 +156,176 @@ function derive(preds){
     size: Number(r.size||0),
     gross_event: Number(r.gross_event||0),
     net_event: Number(r.net_event||0),
-  }));
-  const selected = p.filter(r=>r.entry_flag===1);
-  const withSize = selected.map(r=>({...r, pnl: r.net_event*r.size}));
-  const sumReal = withSize.reduce((a,r)=>a+r.pnl,0);
-  const sumEV   = withSize.reduce((a,r)=>a+r.ev_final,0);
-  const sumEVw  = withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
-  const eff = sumEV>0? sumReal/sumEV:0;
-  const effW= sumEVw>0? sumReal/sumEVw:0;
-  const wins = withSize.filter(r=>r.gross_event>0).length;
+  })).filter(r=> ridMask[r.regime_id]);
+  const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
+  const selected = p2.filter(r=> r.entry_flag===1);
+  const withSize = selected.map(r=> ({...r, pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
+  // KPIs
+  const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
+  const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
+  const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
+  const eff = evSum>0 ? pnl/evSum : 0;
+  const effW= evWSum>0? pnl/evWSum: 0;
+  const wins = withSize.filter(r=> r.gross_event>0).length;
   const hit = selected.length? wins/selected.length : 0;
-  const evPosRatio = p.length? p.filter(r=>r.ev_final>=0).length/p.length : 0;
-  const impulses = withSize.map(r=>({ t: new Date(r.time.getTime()+r.H_row*60*1000), v:r.pnl })).sort((a,b)=>a.t-b.t);
-  let cum=0; const series = impulses.map(s=>({ t:s.t, cum:(cum+=s.v) }));
-  const scatter = withSize.map(r=>({ ev:r.ev_final, real:r.pnl }));
-  return { selected, hit, sumRealized:sumReal, sumEV, sumEVw, eff, effW, evPosRatio, series, scatter };
+  const evPos = p2.length? p2.filter(r=> r.ev_final>=0).length/p2.length : 0;
+  // Equity (exit-time impulses)
+  const impulses = withSize.map(r=> ({ t:r.exit, v:r.pnl })).sort((a,b)=>a.t-b.t);
+  let cum=0; let series = impulses.map(s=> ({ t:s.t, cum:(cum+=s.v) }));
+  if(smooth>1 && series.length>smooth){
+    const sm=[]; for(let i=0;i<series.length;i++){const a=Math.max(0,i-smooth+1); const chunk=series.slice(a,i+1); sm.push({t:series[i].t, cum: chunk.reduce((x,y)=>x+y.cum,0)/chunk.length});} series=sm;
+  }
+  // Daily bars
+  const dayMap = {};
+  withSize.forEach(r=>{
+    const key = r.exit.toISOString().slice(0,10);
+    dayMap[key] = (dayMap[key]||0) + r.pnl;
+  });
+  const days = Object.keys(dayMap).sort().map(k=> ({ day:k, pnl: dayMap[k] }));
+  // Scatter
+  const scatter = withSize.map(r=> ({ x:r.ev_final, y:r.pnl }));
+  // Hist EV
+  const evs = p2.map(r=> r.ev_final);
+  return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs };
 }
-async function onFiles(files){
+
+let eqChart=null, barChart=null, scChart=null, histChart=null;
+function draw(d){
+  document.getElementById("k_trades").innerText = d.trades;
+  document.getElementById("k_hit").innerText = fmtPct(d.hit);
+  document.getElementById("k_pnl").innerText = fmtNum(d.pnl);
+  document.getElementById("k_evpos").innerText = fmtPct(d.evPos);
+  document.getElementById("k_eff").innerText = fmtNum(d.eff);
+  document.getElementById("k_effw").innerText = fmtNum(d.effW);
+
+  const showEquity = document.getElementById("showEquity").checked;
+  const showBars   = document.getElementById("showBars").checked;
+  const showScatter= document.getElementById("showScatter").checked;
+  const showHist   = document.getElementById("showHist").checked;
+
+  document.getElementById("panelEquity").style.display = showEquity ? "block":"none";
+  document.getElementById("panelBars").style.display   = showBars   ? "block":"none";
+  document.getElementById("panelScatter").style.display= showScatter? "block":"none";
+  document.getElementById("panelHist").style.display   = showHist   ? "block":"none";
+
+  if(showEquity){
+    const labels = d.series.map(s=> s.t);
+    const data = d.series.map(s=> s.cum);
+    if(eqChart) eqChart.destroy();
+    eqChart = new Chart(document.getElementById("equity"), {
+      type:'line',
+      data:{ labels, datasets:[{ label:'Cumulative PnL', data, pointRadius:0 }]},
+      options:{ parsing:false, scales:{ x:{ type:'time' } }, plugins:{ zoom:{ zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' } } } }
+    });
+  }
+
+  if(showBars){
+    const labels = d.days.map(x=> x.day);
+    const data   = d.days.map(x=> x.pnl);
+    if(barChart) barChart.destroy();
+    barChart = new Chart(document.getElementById("barPnL"), {
+      type:'bar',
+      data:{ labels, datasets:[{ label:'Daily PnL', data }]},
+      options:{ parsing:false, scales:{ x:{ ticks:{ maxRotation:0 } } } }
+    });
+  }
+
+  if(showScatter){
+    if(scChart) scChart.destroy();
+    scChart = new Chart(document.getElementById("scatter"), {
+      type:'scatter',
+      data:{ datasets:[{ label:'EV vs Realized', data: d.scatter }]},
+      options:{ scales:{ x:{ title:{display:true,text:'EV(final)'} }, y:{ title:{display:true,text:'Realized(net*size)'} } } }
+    });
+  }
+
+  if(showHist){
+    // Simple histogram bins
+    const evs = d.evs.slice().sort((a,b)=>a-b);
+    const bins = 30; const min = evs.length? evs[0]:0; const max = evs.length? evs[evs.length-1]:1;
+    const step = (max-min)/(bins||1) || 1;
+    const edges = Array.from({length:bins}, (_,i)=> min + i*step);
+    const counts = Array.from({length:bins}, ()=>0);
+    evs.forEach(v=>{ const idx = Math.max(0, Math.min(bins-1, Math.floor((v-min)/step))); counts[idx]++; });
+    const centers = edges.map((e,i)=> e + step/2);
+    if(histChart) histChart.destroy();
+    histChart = new Chart(document.getElementById("hist"), {
+      type:'bar',
+      data:{ labels: centers, datasets:[{ label:'EV Histogram', data: counts }]},
+      options:{ scales:{ x:{ title:{display:true,text:'EV'}, ticks:{ display:false } } } }
+    });
+  }
+}
+
+function getFilters(){
+  const s = document.getElementById("start").value;
+  const e = document.getElementById("end").value;
+  const start = s ? new Date(s) : null;
+  const end   = e ? new Date(e) : null;
+  const ridMask = {0:document.getElementById("rid0").checked, 1:document.getElementById("rid1").checked, 2:document.getElementById("rid2").checked};
+  const smooth = parseInt(document.getElementById("smooth").value||"1",10);
+  return { start, end, ridMask, smooth };
+}
+
+function refresh(){
+  if(!RAW || !MET) return;
+  const { start, end, ridMask, smooth } = getFilters();
+  const d = derive(RAW, start, end, ridMask, smooth);
+  FILT = d;
+  setSchemaBadge();
+  draw(d);
+}
+
+async function handleFiles(files){
   const arr = Array.from(files||[]);
-  const metricsFile = arr.find(f=>f.name.endsWith(".json"));
-  const predsFile   = arr.find(f=>f.name.endsWith(".csv"));
-  if(metricsFile){ METRICS = JSON.parse(await metricsFile.text()); }
+  const metricsFile = arr.find(f=> f.name.endsWith(".json"));
+  const predsFile   = arr.find(f=> f.name.endsWith(".csv"));
   if(predsFile){
     let rows = await parseCSV(predsFile);
-    rows = ensureV1(rows);
-    const miss = needCols.filter(c=> !(c in rows[0]));
-    if(miss.length){ alert("필수 컬럼 누락: "+miss.join(", ")); return; }
-    PREDS = rows;
+    RAW = adaptRows(rows);
   }
-  if(METRICS && PREDS){
-    const d = derive(PREDS);
-    setKPIs(d);
-    drawCharts(d);
+  if(metricsFile){
+    MET = JSON.parse(await metricsFile.text());
   }
+  refresh();
 }
-document.getElementById("metricsFile").addEventListener("change", e=> onFiles(e.target.files));
-document.getElementById("predsFile").addEventListener("change", e=> onFiles(e.target.files));
+
+document.getElementById("predsFile").addEventListener("change", e=> handleFiles(e.target.files));
+document.getElementById("metricsFile").addEventListener("change", e=> handleFiles(e.target.files));
+["rid0","rid1","rid2","showEquity","showBars","showScatter","showHist","smooth"].forEach(id=>{
+  document.getElementById(id).addEventListener("change", refresh);
+});
+document.getElementById("btnApplyRange").addEventListener("click", refresh);
+document.getElementById("btnResetZoom").addEventListener("click", ()=>{ if(eqChart) eqChart.resetZoom(); });
+
 const drop = document.getElementById("drop");
-drop.addEventListener("dragover", e=>{ e.preventDefault(); drop.style.background="#f1f5f9"; });
-drop.addEventListener("dragleave", e=>{ e.preventDefault(); drop.style.background=""; });
-drop.addEventListener("drop", e=>{ e.preventDefault(); drop.style.background=""; onFiles(e.dataTransfer.files); });
+drop.addEventListener("dragover", e=>{ e.preventDefault(); drop.style.background="#0b1220"; });
+drop.addEventListener("dragleave", e=>{ drop.style.background=""; });
+drop.addEventListener("drop", e=>{ e.preventDefault(); drop.style.background=""; handleFiles(e.dataTransfer.files); });
+
+document.getElementById("btnLoadURL").addEventListener("click", async ()=>{
+  const u1 = document.getElementById("predsURL").value.trim();
+  const u2 = document.getElementById("metricsURL").value.trim();
+  document.getElementById("loadMsg").innerText = "불러오는 중...";
+  try{
+    if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); }
+    if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); }
+    document.getElementById("loadMsg").innerText = "완료";
+    refresh();
+  }catch(err){
+    document.getElementById("loadMsg").innerText = "실패: "+err.message;
+  }
+});
+
+document.getElementById("btnExport").addEventListener("click", ()=>{
+  if(!FILT){ alert("데이터가 없습니다."); return; }
+  const blob = new Blob([JSON.stringify(FILT, null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "analytics.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
 </script>
 </body>
 </html>
