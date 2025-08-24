@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trade4V Viewer Pro v2.3 (Schema v1)</title>
+  <title>Trade4V Viewer Pro v2.4 (Schema v1)</title>
   <style>
     :root { --bg:#0b1220; --panel:#0e1628; --card:#111827; --muted:#9ca3af; --fg:#e5e7eb; --accent:#60a5fa; --good:#10b981; --bad:#ef4444; }
     html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     .wrap { display:flex; height:100%; }
-    .side { width:360px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
+    .side { width:380px; background: var(--panel); padding:16px; border-right:1px solid #1f2937; overflow:auto; }
     .main { flex:1; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:auto; }
     h1 { margin:0 0 12px; font-size:18px; font-weight:600; }
     .section { margin-bottom:16px; }
@@ -28,7 +28,6 @@
     th:first-child, td:first-child { text-align:left; }
     .pos { color: var(--good); } .neg { color: var(--bad); }
   </style>
-  <!-- Core libs (pinned) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
@@ -36,7 +35,7 @@
 <body>
 <div class="wrap">
   <aside class="side">
-    <h1>Trade4V Viewer Pro v2.3</h1>
+    <h1>Trade4V Viewer Pro v2.4</h1>
     <div class="section">
       <div class="muted">파일 드래그 앤 드롭 (창 어디든 가능)</div>
       <div id="drop" class="drpz">여기로 <b>preds.csv</b> + <b>metrics_oos.json</b> 드롭</div>
@@ -69,9 +68,9 @@
       </div>
       <div class="row">
         <button class="btn" id="btnApplyRange">적용</button>
-        <button class="btn" id="btnResetZoom">줌 리셋</button>
         <button class="btn" id="btnResetAll">전체 리셋</button>
       </div>
+      <div class="muted">휠 줌: 차트 위에서 마우스 휠(확대/축소), Shift+휠(좌/우로 이동)</div>
     </div>
     <div class="section">
       <div class="muted">레짐 필터</div>
@@ -89,6 +88,7 @@
         <label><input type="checkbox" id="showScatter" checked> EV vs 실현 산포</label>
         <label><input type="checkbox" id="showHist" checked> EV 히스토그램</label>
         <label><input type="checkbox" id="showDD" checked> 드로우다운</label>
+        <label><input type="checkbox" id="showMCC" checked> 기간별 MCC</label>
       </div>
     </div>
     <div class="section">
@@ -114,14 +114,22 @@
       <div class="card"><div class="muted">Eff (real/EV)</div><div id="k_eff" class="kpi">-</div></div>
       <div class="card"><div class="muted">Eff (real/EV·size)</div><div id="k_effw" class="kpi">-</div></div>
     </div>
-    <div id="panelEquity" class="card"><canvas id="equity" height="120"></canvas></div>
-    <div id="panelBars" class="card"><canvas id="barPnL" height="120"></canvas></div>
-    <div id="panelDD" class="card"><canvas id="drawdown" height="120"></canvas></div>
+    <div id="panelEquity" class="card"><canvas id="equity" height="140"></canvas></div>
+    <div id="panelBars" class="card"><canvas id="barPnL" height="140"></canvas></div>
+    <div id="panelDD" class="card"><canvas id="drawdown" height="140"></canvas></div>
     <div id="panelScatter" class="card"><canvas id="scatter" height="140"></canvas></div>
     <div id="panelHist" class="card"><canvas id="hist" height="120"></canvas></div>
+    <div id="panelMCC" class="card" style="display:none;"><canvas id="mccChart" height="120"></canvas></div>
     <div class="card">
       <div class="muted">EV Deciles</div>
       <table id="deciles"><thead><tr><th>Bucket</th><th>Count</th><th>EV Sum</th><th>Realized Sum</th><th>Eff</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <div class="muted">Period Breakdown (Monthly)</div>
+      <table id="periodTable">
+        <thead><tr><th>Period</th><th>Trades</th><th>Hit%</th><th>PnL Sum</th><th>Cum PnL</th><th>Max DD</th><th>MCC</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
   </main>
 </div>
@@ -129,30 +137,8 @@
 <div id="toast" class="toast" style="display:none"></div>
 
 <script>
-// Dynamic loader for chartjs-plugin-zoom with fallback and no hard failure.
-function loadZoomPlugin(callback){
-  const urls = [
-    "https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js",
-    "https://unpkg.com/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"
-  ];
-  let i=0;
-  (function tryLoad(){
-    if(i>=urls.length){ console.warn("[viewer] zoom plugin not found; continue without zoom."); callback(false); return; }
-    const s=document.createElement("script");
-    s.src=urls[i++]; s.async=true; s.onload=()=>{ try{
-      if(window.Chart && window.Chart.register && window["ChartZoom"]){ window.Chart.register(window.ChartZoom); callback(true); }
-      else if(window.Chart && window.Chart.register && window["chartjs-plugin-zoom"]){ window.Chart.register(window["chartjs-plugin-zoom"]); callback(true); }
-      else { callback(false); }
-    }catch(e){ console.warn("[viewer] zoom plugin register failed:", e); callback(false); } };
-    s.onerror=()=>{ tryLoad(); };
-    document.head.appendChild(s);
-  })();
-}
-</script>
-
-<script>
 window.addEventListener('DOMContentLoaded', () => {
-  let RAW=null, MET=null, FILT=null, ALL=null, charts={};
+  let RAW=null, MET=null, ALL=null, FILT=null, charts={};
   const needCols = ["time","regime_id","H_row","ev_final","entry_flag","size","gross_event","net_event"];
   const synonyms = {
     time: ["time","timestamp","open_time","date"],
@@ -164,24 +150,15 @@ window.addEventListener('DOMContentLoaded', () => {
     gross_event: ["gross_event","event_gross","gross","ret_gross","gross_ret"],
     net_event: ["net_event","event_net","net","ret_net","net_ret","realized"]
   };
-
   const $ = id => document.getElementById(id);
   const safe = (id, text) => { const el=$(id); if(el) el.innerText = text; };
-
-  function toast(msg){
-    const t=$('toast'); t.innerText=msg; t.style.display='block'; setTimeout(()=>{ t.style.display='none'; }, 2500);
-  }
+  function toast(msg){ const t=$('toast'); t.innerText=msg; t.style.display='block'; setTimeout(()=>{ t.style.display='none'; }, 2500); }
   function setStatus(msg){ const el=$('status'); if(el) el.innerText = msg; }
-
   function safeParseTime(v){
     if(typeof v === 'number'){ return new Date(v); }
-    if(typeof v === 'string'){
-      if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z';
-      return new Date(v);
-    }
+    if(typeof v === 'string'){ if(!/[zZ]|[+\-]\d{2}:\d{2}$/.test(v)) v = v.replace(' ', 'T') + 'Z'; return new Date(v); }
     return new Date(v);
   }
-
   function mapHeaders(rows){
     if(!rows || !rows.length) return rows;
     const keys = Object.keys(rows[0]);
@@ -205,7 +182,6 @@ window.addEventListener('DOMContentLoaded', () => {
       return o;
     });
   }
-
   function adaptRows(rows){
     if(!rows || rows.length===0) return rows;
     rows = rows.map(obj=>{ const r={}; for(const k in obj){ r[k.trim()] = obj[k]; } return r; });
@@ -217,7 +193,6 @@ window.addEventListener('DOMContentLoaded', () => {
     if(miss.length) throw new Error("필수 컬럼 누락: "+miss.join(", "));
     return out;
   }
-
   function derive(rows, start=null, end=null, ridMask={0:true,1:true,2:true}, smooth=1){
     const p = rows.map(r=>({ ...r,
       time: safeParseTime(r.time), regime_id: Number(r.regime_id), H_row: Number(r.H_row||1),
@@ -225,10 +200,9 @@ window.addEventListener('DOMContentLoaded', () => {
       gross_event: Number(r.gross_event||0), net_event: Number(r.net_event||0),
     })).filter(r=> ridMask[r.regime_id]);
     const p2 = p.filter(r=> (!start || r.time>=start) && (!end || r.time<=end));
-
     const selected = p2.filter(r=> r.entry_flag===1);
-    const withSize = selected.map(r=> ({...r, pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
-
+    const withSize = selected.map(r=> ({...r, dir_pred: Math.sign(r.ev_final||0)||1, dir_real: Math.sign(r.gross_event||0)||-1,
+                                         pnl: r.net_event*r.size, exit: new Date(r.time.getTime()+r.H_row*60*1000)}));
     const pnl = withSize.reduce((a,r)=>a+r.pnl,0);
     const evSum = withSize.reduce((a,r)=>a+r.ev_final,0);
     const evWSum= withSize.reduce((a,r)=>a+r.ev_final*r.size,0);
@@ -251,22 +225,62 @@ window.addEventListener('DOMContentLoaded', () => {
     let peak = 0, eq=0, ddSeries=[];
     series.forEach(s=>{ eq=s.cum; peak=Math.max(peak, eq); ddSeries.push({t:s.t, dd: peak - eq}); });
 
-    // Deciles
-    const evSel = selected.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
-    const buckets = 10;
-    let cuts=[]; for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
+    // Period breakdown (monthly)
+    function yyyymm(d){ return d.getUTCFullYear()+"-"+String(d.getUTCMonth()+1).padStart(2,'0'); }
+    const per = {};
+    let cumPnL=0;
+    const byExit = withSize.slice().sort((a,b)=>a.exit-b.exit);
+    let eqPeak=0, eqNow=0;
+    byExit.forEach(r=>{
+      const m = yyyymm(r.exit);
+      per[m] = per[m] || { trades:0, wins:0, pnl:0, cum:0, mccN:{tp:0,tn:0,fp:0,fn:0}, dd:0, eq:0 };
+      per[m].trades += 1;
+      per[m].wins += (r.gross_event>0?1:0);
+      per[m].pnl  += r.pnl;
+      // MCC on executed trades using dir_pred vs dir_real
+      const pred = r.dir_pred>=0? 1:0;
+      const real = r.dir_real>=0? 1:0;
+      if(pred===1 && real===1) per[m].mccN.tp += 1;
+      else if(pred===0 && real===0) per[m].mccN.tn += 1;
+      else if(pred===1 && real===0) per[m].mccN.fp += 1;
+      else if(pred===0 && real===1) per[m].mccN.fn += 1;
+      // rolling equity & drawdown
+      eqNow += r.pnl; eqPeak = Math.max(eqPeak, eqNow); const dd = eqPeak - eqNow;
+      per[m].dd = Math.max(per[m].dd, dd);
+    });
+    const periods = Object.keys(per).sort();
+    const periodRows = [];
+    periods.forEach(m=>{
+      const o = per[m];
+      cumPnL += o.pnl;
+      const n = o.trades||1;
+      const hr = o.wins/n;
+      const N = o.mccN; const denom = (N.tp+N.fp)*(N.tp+N.fn)*(N.tn+N.fp)*(N.tn+N.fn);
+      let mcc = 0; if(denom>0){
+        mcc = ((N.tp*N.tn - N.fp*N.fn) / Math.sqrt(denom)) || 0;
+      }
+      periodRows.push({ period:m, trades:o.trades, hit:hr, pnl:o.pnl, cum:cumPnL, maxdd:o.dd, mcc:mcc });
+    });
+
+    // MCC time series for chart
+    const mccSeries = periodRows.map(r=> ({ x:r.period, y:r.mcc }));
+
+    return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries,
+             deciles: computeDeciles(withSize), periodRows, mccSeries,
+             tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
+  }
+  function computeDeciles(withSize){
+    const evSel = withSize.map(r=> r.ev_final).slice().sort((a,b)=>a-b);
+    const buckets = 10; let cuts=[];
+    for(let i=1;i<buckets;i++){ const q = i/buckets; const idx = Math.floor(q*(evSel.length-1)); cuts.push(evSel.length? evSel[idx]:0); }
     function bucketOf(v){ let b=0; while(b<cuts.length && v>cuts[b]) b++; return b; }
     const agg = Array.from({length:buckets},()=>({cnt:0, ev:0, real:0}));
     withSize.forEach(r=>{ const b = bucketOf(r.ev_final); agg[b].cnt++; agg[b].ev += r.ev_final; agg[b].real += r.pnl; });
-    const dec = agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
-
-    return { selected, pnl, hit, evPos, eff, effW, trades:selected.length, series, days, scatter, evs, ddSeries, deciles:dec,
-             tmin: p2.length? p2[0].time : null, tmax: p2.length? p2[p2.length-1].time : null };
+    return agg.map((g,i)=>({ bucket:`D${i+1}`, cnt:g.cnt, ev:g.ev, real:g.real, eff: (g.ev>0? g.real/g.ev:0) }));
   }
 
   function mkChart(id, cfg){
-    const el=$(id);
-    if(!el) return;
+    const el=$(id); if(!el) return;
     if(charts[id]) charts[id].destroy();
     charts[id] = new Chart(el, cfg);
   }
@@ -279,9 +293,11 @@ window.addEventListener('DOMContentLoaded', () => {
     safe("k_eff", d.eff.toFixed(3));
     safe("k_effw", d.effW.toFixed(3));
 
-    const display = (panelId, flagId)=>{ const p=$(panelId), f=$(flagId); if(p&&f) p.style.display = f.checked? 'block':'none'; };
-    display("panelEquity","showEquity"); display("panelBars","showBars"); display("panelScatter","showScatter"); display("panelHist","showHist"); display("panelDD","showDD");
+    const show = (panel, flag)=>{ const p=$(panel), f=$(flag); if(p&&f) p.style.display = f.checked? 'block':'none'; };
+    show("panelEquity","showEquity"); show("panelBars","showBars"); show("panelScatter","showScatter"); show("panelHist","showHist"); show("panelDD","showDD");
+    show("panelMCC","showMCC");
 
+    // Equity (cum PnL)
     if($("showEquity")?.checked){
       const labels = d.series.map(s=> s.t);
       const data = d.series.map(s=> s.cum);
@@ -290,10 +306,8 @@ window.addEventListener('DOMContentLoaded', () => {
       if(smooth>1 && data.length>smooth){
         smData=[]; for(let i=0;i<data.length;i++){ const a=Math.max(0, i-smooth+1); const chunk=data.slice(a,i+1); smData.push(chunk.reduce((x,y)=>x+y,0)/chunk.length); }
       }
-      const zoomCfg = (Chart?.registry?.plugins?.plugins || {})["zoom"] ?
-        { zoom:{ wheel:{enabled:true}, pinch:{enabled:true}, mode:'x' }, pan:{ enabled:true, mode:'x' }, drag:{ enabled:true, modifierKey:'alt' } } : undefined;
       mkChart('equity', { type:'line', data:{ labels, datasets:[{ label:'Cumulative PnL', data: smData, pointRadius:0 }]},
-        options:{ parsing:false, scales:{ x:{ type:'time' } }, plugins:{ zoom: zoomCfg } } });
+        options:{ parsing:false, scales:{ x:{ type:'time' } } } });
     }
 
     if($("showBars")?.checked){
@@ -323,12 +337,28 @@ window.addEventListener('DOMContentLoaded', () => {
                         options:{ scales:{ x:{ ticks:{ display:false }}} } });
     }
 
+    // MCC chart
+    if($("showMCC")?.checked){
+      mkChart('mccChart', { type:'bar', data:{ labels: d.mccSeries.map(p=> p.x), datasets:[{ label:'MCC by Month', data: d.mccSeries.map(p=> p.y) }]},
+                            options:{ scales:{ y:{ min:-1, max:1 } } } });
+    }
+
+    // Deciles table
     const tb = document.querySelector("#deciles tbody"); if(tb){ tb.innerHTML=""; d.deciles.forEach(g=>{
       const tr=document.createElement("tr");
       const eff = (g.ev>0)? (g.real/g.ev) : 0;
       tr.innerHTML = `<td>${g.bucket}</td><td>${g.cnt}</td><td>${g.ev.toFixed(4)}</td><td class="${g.real>=0?'pos':'neg'}">${g.real.toFixed(4)}</td><td>${eff.toFixed(3)}</td>`;
       tb.appendChild(tr);
     }); }
+
+    // Period table
+    const pt = document.querySelector("#periodTable tbody"); if(pt){ pt.innerHTML="";
+      d.periodRows.forEach(r=>{
+        const tr=document.createElement("tr");
+        tr.innerHTML = `<td>${r.period}</td><td>${r.trades}</td><td>${(r.hit*100).toFixed(1)}%</td><td class="${r.pnl>=0?'pos':'neg'}">${r.pnl.toFixed(4)}</td><td>${r.cum.toFixed(4)}</td><td>${r.maxdd.toFixed(4)}</td><td>${r.mcc.toFixed(3)}</td>`;
+        pt.appendChild(tr);
+      });
+    }
   }
 
   function getFilters(){
@@ -344,11 +374,10 @@ window.addEventListener('DOMContentLoaded', () => {
   function refresh(){
     if(!ALL || !ALL.rows) return;
     const { start, end, ridMask, smooth } = getFilters();
-    const d = derive(ALL.rows, start, end, ridMask, smooth);
-    FILT = d;
+    FILT = derive(ALL.rows, start, end, ridMask, smooth);
     const sch = ALL.metrics?.viewer_schema || "v1?";
     const el=$('schemaInfo'); if(el) el.innerText = "viewer_schema: " + sch;
-    draw(d);
+    draw(FILT);
   }
 
   function afterLoad(){
@@ -395,48 +424,39 @@ window.addEventListener('DOMContentLoaded', () => {
 
   async function fetchText(url){ const r=await fetch(url, {cache:'no-store'}); if(!r.ok) throw new Error(r.statusText); return r.text(); }
 
-  // Wire events after DOM ready
+  // Wire inputs
   $('predsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
   $('metricsFile')?.addEventListener("change", e=> handleFiles(e.target.files));
   $('btnForceRefresh')?.addEventListener("click", refresh);
-  ['rid0','rid1','rid2','showEquity','showBars','showScatter','showHist','showDD','smooth'].forEach(id=>{
+  ['rid0','rid1','rid2','showEquity','showBars','showScatter','showHist','showDD','showMCC','smooth'].forEach(id=>{
     const el=$(id); if(el) el.addEventListener("change", refresh);
   });
   document.querySelectorAll(".preset .btn").forEach(btn=>{
     btn.addEventListener("click", ()=>{
       if(!ALL?.rows?.length) return;
-      const rows = ALL.rows;
-      const last = new Date(rows[rows.length-1].time);
-      const first= new Date(rows[0].time);
+      const rows = ALL.rows; const last = new Date(rows[rows.length-1].time); const first= new Date(rows[0].time);
       function minusDays(d){ const x = new Date(last); x.setDate(x.getDate()-d); return x; }
-      let s=first, e=last;
-      const label = btn.getAttribute("data-range");
+      let s=first, e=last; const label = btn.getAttribute("data-range");
       if(label==="1D") s = minusDays(1);
       if(label==="1W") s = minusDays(7);
       if(label==="1M") s = minusDays(30);
       if(label==="3M") s = minusDays(90);
-      if(label==="YTD"){ s = new Date(last.getFullYear(),0,1); }
-      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-      if($('start')) $('start').value = toLocal(s);
-      if($('end'))   $('end').value   = toLocal(e);
-      refresh();
+      if(label==="YTD"){ s = new Date(last.getUTCFullYear(),0,1); }
+      setRange(s,e); refresh();
     });
   });
   $('btnApplyRange')?.addEventListener("click", refresh);
-  $('btnResetZoom')?.addEventListener("click", ()=>{ try{ charts.equity?.resetZoom(); }catch(e){} });
   $('btnResetAll')?.addEventListener("click", ()=>{
-    if($('rid0')) $('rid0').checked=true; if($('rid1')) $('rid1').checked=true; if($('rid2')) $('rid2').checked=true;
-    if($('showEquity')) $('showEquity').checked=true; if($('showBars')) $('showBars').checked=true; if($('showScatter')) $('showScatter').checked=true;
-    if($('showHist')) $('showHist').checked=true; if($('showDD')) $('showDD').checked=true; if($('smooth')) $('smooth').value="1";
     if(ALL?.rows?.length){
       const t0 = new Date(ALL.rows[0].time); const t1 = new Date(ALL.rows[ALL.rows.length-1].time);
-      const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
-      if($('start')) $('start').value = toLocal(t0); if($('end')) $('end').value = toLocal(t1);
+      setRange(t0,t1);
     }
+    ['rid0','rid1','rid2','showEquity','showBars','showScatter','showHist','showDD','showMCC'].forEach(id=>{ if($(id)) $(id).checked=true; });
+    if($('smooth')) $('smooth').value="1";
     refresh();
   });
 
-  // Window-wide drag & drop
+  // Window drag&drop
   ["dragenter","dragover","dragleave","drop"].forEach(evt=>{
     document.addEventListener(evt, e=>{ if(evt!=="drop"){ e.preventDefault(); } }, false);
   });
@@ -448,8 +468,58 @@ window.addEventListener('DOMContentLoaded', () => {
     if(items && items.length){ handleFiles(items); toast("드래그 파일 로드 완료"); }
   });
 
-  // Try to load zoom plugin; even if it fails, app works.
-  loadZoomPlugin((ok)=>{ console.log("[viewer] zoom plugin ready?", ok); });
+  // URL load
+  $('btnLoadURL')?.addEventListener("click", async ()=>{
+    const u1 = $('predsURL')?.value.trim(); const u2 = $('metricsURL')?.value.trim();
+    $('loadMsg').innerText = "불러오는 중...";
+    try{
+      if(u1){ const t1 = await fetchText(u1); RAW = adaptRows(Papa.parse(t1, {header:true, dynamicTyping:true}).data); ALL = ALL || {}; ALL.rows=RAW; ALL.names=ALL.names||{}; ALL.names.preds=u1; }
+      if(u2){ const t2 = await fetchText(u2); MET = JSON.parse(t2); ALL = ALL || {}; ALL.metrics=MET; ALL.names=ALL.names||{}; ALL.names.metrics=u2; }
+      $('loadMsg').innerText = "완료"; afterLoad();
+    }catch(err){ $('loadMsg').innerText = "실패: "+err.message; }
+  });
+
+  // ===== Wheel zoom & pan (no external plugin) =====
+  function setRange(s,e){
+    const toLocal = t=> new Date(t.getTime() - t.getTimezoneOffset()*60000).toISOString().slice(0,16);
+    if($('start')) $('start').value = toLocal(s);
+    if($('end'))   $('end').value   = toLocal(e);
+  }
+  function getCurrentRange(){
+    const s = $('start')?.value; const e = $('end')?.value;
+    let start = s? new Date(s): null; let end = e? new Date(e): null;
+    if(!start || !end){
+      if(ALL?.rows?.length){ start = new Date(ALL.rows[0].time); end = new Date(ALL.rows[ALL.rows.length-1].time); }
+    }
+    return {start, end};
+  }
+  function wheelZoomHandler(e){
+    if(!ALL?.rows?.length) return;
+    e.preventDefault();
+    const {start, end} = getCurrentRange(); if(!start || !end) return;
+    const span = end - start; if(span<=0) return;
+    const factor = 1 + (e.deltaY>0 ? 0.1 : -0.1); // 10% per wheel notch
+    let newSpan = Math.max(60*1000, span * factor); // min 1 minute
+    // center-based zoom
+    const mid = new Date((start.getTime()+end.getTime())/2);
+    let ns = new Date(mid.getTime() - newSpan/2);
+    let ne = new Date(mid.getTime() + newSpan/2);
+    // Shift when Shift key pressed
+    if(e.shiftKey){
+      const shift = span * 0.1 * (e.deltaY>0 ? 1 : -1);
+      ns = new Date(start.getTime() + shift);
+      ne = new Date(end.getTime() + shift);
+    }
+    // clamp to data
+    const d0 = new Date(ALL.rows[0].time); const d1 = new Date(ALL.rows[ALL.rows.length-1].time);
+    if(ns<d0){ ns=d0; ne=new Date(ns.getTime()+newSpan); }
+    if(ne>d1){ ne=d1; ns=new Date(ne.getTime()-newSpan); }
+    setRange(ns, ne); refresh();
+  }
+  ['equity','barPnL','drawdown'].forEach(id=>{
+    const el=$(id); if(el){ el.addEventListener('wheel', wheelZoomHandler, {passive:false}); }
+  });
+
 });
 </script>
 </body>
