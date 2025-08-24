@@ -1,34 +1,39 @@
-name: Run 4u Backtest • build-in codepack (no ZIP needed)
+name: Run trade4v v3 backtest
 
 on:
   workflow_dispatch:
     inputs:
       data_path:
-        description: "데이터 경로 (예: ETHUSDT_1min_2020_2025.csv 또는 .zip)"
+        description: "데이터 경로 (예: ETHUSDT_1min_2025H1.csv 또는 .zip)"
         required: true
         type: string
+      code_zip:
+        description: "코드 ZIP 파일명(리포 루트). 비워두면 trade4v/ 폴더 사용"
+        required: false
+        default: "trade4v_S1S2_codepack_v3.zip"
+        type: string
       train_start:
-        description: "학습 시작 (UTC, 'YYYY-MM-DD HH:MM:SS')"
+        description: "학습 시작(UTC)"
         required: true
         default: "2025-01-01 00:00:00"
         type: string
       train_end:
-        description: "학습 종료 (UTC)"
+        description: "학습 종료(UTC)"
         required: true
         default: "2025-04-30 23:59:00"
         type: string
       test_start:
-        description: "테스트 시작 (UTC)"
+        description: "테스트 시작(UTC)"
         required: true
         default: "2025-05-01 00:00:00"
         type: string
       test_end:
-        description: "테스트 종료 (UTC)"
+        description: "테스트 종료(UTC)"
         required: true
         default: "2025-06-30 23:59:00"
         type: string
       H:
-        description: "홀드 바(분)"
+        description: "홀드 분(H)"
         required: true
         default: "15"
         type: string
@@ -42,15 +47,20 @@ on:
         required: true
         default: "0.5"
         type: string
+      ev_margin_bps:
+        description: "EV 마진(bp) — fee+slip 위에 추가"
+        required: true
+        default: "1.0"
+        type: string
+      K_day:
+        description: "레짐별 K/일 (예: 0:5,1:10,2:20)"
+        required: true
+        default: "0:5,1:10,2:20"
+        type: string
       out_dir:
-        description: "출력 디렉토리"
+        description: "출력 폴더"
         required: true
         default: "_out_4u"
-        type: string
-      python_version:
-        description: "Python 버전"
-        required: true
-        default: "3.11"
         type: string
 
 jobs:
@@ -65,12 +75,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python (pinned)
+      - name: Setup Python 3.11 (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ inputs.python_version }}
+          python-version: '3.11'
 
-      - name: Install deps (pandas/numpy)
+      - name: Install deps (minimal)
         run: |
           python -m pip install -U pip
           pip install "pandas>=2.0" "numpy>=1.24"
@@ -81,378 +91,48 @@ jobs:
           set -euo pipefail
           DATA="${{ inputs.data_path }}"
           mkdir -p data
-          if [[ ! -e "$DATA" ]]; then
-            echo "::error::data_path '$DATA' not found in repo root"; exit 1
-          fi
-          if [[ "$DATA" == *.zip ]]; then
-            unzip -o -q "$DATA" -d data
+          [[ -e "$DATA" ]] || { echo "::error::data_path '$DATA' not found"; exit 1; }
+          if [[ "$DATA" == *.zip ]]; then unzip -o -q "$DATA" -d data; else cp -f "$DATA" data/; fi
+          echo "Using CSV:"; ls -1 data/*.csv | head -n1
+
+      - name: Prepare code (prefer committed ./trade4v, otherwise unzip code_zip)
+        id: codeprep
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODEZIP="${{ inputs.code_zip }}"
+          if [[ -d trade4v && -f trade4v/trade4v/run_4u.py ]]; then
+            echo "Found committed ./trade4v/"
+            echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
           else
-            cp -f "$DATA" data/
+            if [[ -n "$CODEZIP" && -f "$CODEZIP" ]]; then
+              echo "Unzipping $CODEZIP"
+              rm -rf __extracted trade4v || true
+              unzip -o -q "$CODEZIP" -d __extracted
+              # 평탄화: 최상위에 trade4v/ 가 오도록
+              if [[ -d __extracted/trade4v ]]; then mv __extracted/trade4v ./trade4v; else
+                # zip 안에 상위폴더/trade4v 형태 지원
+                TDIR="$(find __extracted -type d -name trade4v | head -n1 || true)"
+                [[ -n "$TDIR" ]] || { echo "::error::trade4v folder not found in zip"; exit 1; }
+                mv "$TDIR" ./trade4v
+              fi
+              echo "SCRIPT=trade4v/trade4v/run_4u.py" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Neither committed ./trade4v nor code_zip exists"; exit 1
+            fi
           fi
-          echo "Using CSV:"
-          ls -1 data/*.csv | head -n1
+          [[ -f ${{ steps.codeprep.outputs.SCRIPT }} ]] || { echo "::error::run_4u.py not found"; exit 1; }
+          echo "Using ${ { steps.codeprep.outputs.SCRIPT } }" || true
 
-      - name: Build codepack in workspace (no ZIPs; full modules)
+      - name: Run backtest (v3)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p trade4v/trend4p trade4v/config
-
-          ############ trade4v/README.md ############
-          cat > trade4v/README.md <<'MD'
-          # Trade4V Full Pack (Patched)
-          - Entry: `trade4v/run_4u.py`
-          - Modules: `trend4p/*` (data/features/regimes/labels/ev_model/sizing/selector_4u/execution_4u/backtest/utils)
-          - Guarantees:
-            - Pandas index reset + `.iloc` for integer position slicing.
-            - CLI compatible with existing YAML.
-            - Outputs: `_out_4u/run/preds_test.csv`, `_out_4u/run/metrics_oos.json`.
-          MD
-
-          ############ trade4v/trend4p/utils.py ############
-          cat > trade4v/trend4p/utils.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def ensure_sorted_reset(df, time_col="time"):
-              if time_col not in df.columns:
-                  raise ValueError(f"'{time_col}' not in dataframe")
-              df = df.sort_values(time_col).reset_index(drop=True)
-              return df
-
-          def to_utc(ts):
-              t = pd.Timestamp(ts)
-              if t.tzinfo is None:
-                  return t.tz_localize("UTC")
-              return t.tz_convert("UTC")
-
-          def take_iloc(obj, idx):
-              idx = np.asarray(idx)
-              if idx.dtype == bool or idx.dtype == np.bool_:
-                  return obj[idx]
-              if np.issubdtype(idx.dtype, np.integer):
-                  return obj.iloc[idx]
-              return obj.loc[idx]
-
-          def rolling_z(x, win):
-              s = pd.Series(x)
-              m = s.rolling(win).mean()
-              v = s.rolling(win).std()
-              return (s - m) / (v.replace(0, np.nan))
-
-          def mcc_from_labels(y_true, y_pred):
-              y_true = np.asarray(y_true).astype(int)
-              y_pred = np.asarray(y_pred).astype(int)
-              mask = y_pred != 0
-              if mask.sum() == 0:
-                  return 0.0, 0.0, 0.0
-              y_true = y_true[mask]; y_pred = y_pred[mask]
-              tp = ((y_pred== 1) & (y_true== 1)).sum()
-              tn = ((y_pred==-1) & (y_true==-1)).sum()
-              fp = ((y_pred== 1) & (y_true==-1)).sum()
-              fn = ((y_pred==-1) & (y_true== 1)).sum()
-              num = (tp*tn - fp*fn)
-              den = float(np.sqrt((tp+fp)*(tp+fn)*(tn+fp)*(tn+fn)) or 1.0)
-              acc = float(tp+tn) / float(tp+tn+fp+fn)
-              cov = float(mask.mean())
-              mcc = float(num/den) if den>0 else 0.0
-              return mcc, acc, cov
-          PY
-
-          ############ trade4v/trend4p/data.py ############
-          cat > trade4v/trend4p/data.py <<'PY'
-          import pandas as pd
-          from .utils import ensure_sorted_reset
-
-          TIME_CANDS = ["time","open_time","timestamp","date"]
-          PRICE_CANDS = ["close","price","Close","ClosePrice","px"]
-          VOL_CANDS = ["volume","QuoteVolume","quote_volume","vol"]
-
-          def _find_col(cols, cands):
-              low = {c.lower(): c for c in cols}
-              for c in cands:
-                  if c.lower() in low:
-                      return low[c.lower()]
-              return None
-
-          def load_csv(path):
-              df = pd.read_csv(path)
-              tcol = _find_col(df.columns, TIME_CANDS)
-              pcol = _find_col(df.columns, PRICE_CANDS)
-              if tcol is None: raise ValueError(f"time-like column not found in {TIME_CANDS}")
-              if pcol is None: raise ValueError(f"price-like column not found in {PRICE_CANDS}")
-              df["time"] = pd.to_datetime(df[tcol], utc=True, errors="coerce")
-              df["price"] = pd.to_numeric(df[pcol], errors="coerce")
-              if (df["time"].isna() | df["price"].isna()).any():
-                  df = df.dropna(subset=["time","price"])
-              vcol = _find_col(df.columns, VOL_CANDS)
-              if vcol:
-                  df["volume"] = pd.to_numeric(df[vcol], errors="coerce").fillna(0.0)
-              else:
-                  df["volume"] = 0.0
-              df = ensure_sorted_reset(df, "time")
-              return df[["time","price","volume"]].copy()
-          PY
-
-          ############ trade4v/trend4p/features.py ############
-          cat > trade4v/trend4p/features.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def compute_basic_features(df):
-              px = df["price"]
-              ret1 = px.pct_change()
-              mom_fast = px.pct_change(20)
-              mom_slow = px.pct_change(60)
-              vol_fast = ret1.rolling(20).std()
-              vol_slow = ret1.rolling(120).std()
-              ofi = ret1.fillna(0.0) * df.get("volume", 0.0).fillna(0.0)
-              feats = pd.DataFrame({
-                  "ret1": ret1,
-                  "mom_fast": mom_fast,
-                  "mom_slow": mom_slow,
-                  "vol_fast": vol_fast,
-                  "vol_slow": vol_slow,
-                  "ofi": ofi,
-              }, index=df.index)
-              return feats
-
-          def dir_signal(feats):
-              score = feats["mom_fast"].fillna(0.0) + 0.5*feats["mom_slow"].fillna(0.0)
-              return np.sign(score).fillna(0.0)
-
-          def expansion_proxy(feats):
-              v = feats["vol_fast"].fillna(0.0)
-              return v.clip(lower=0.0).fillna(0.0)
-          PY
-
-          ############ trade4v/trend4p/regimes.py ############
-          cat > trade4v/trend4p/regimes.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def assign_regimes(feats, n=3):
-              vol = feats["vol_fast"].fillna(0.0)
-              try:
-                  q = pd.qcut(vol, q=n, labels=False, duplicates="drop")
-                  r = q.fillna(n//2).astype(int)
-              except Exception:
-                  r = pd.Series((vol>vol.median()).astype(int), index=vol.index)
-              return r
-          PY
-
-          ############ trade4v/trend4p/labels.py ############
-          cat > trade4v/trend4p/labels.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def future_return(df, H):
-              fut = df["price"].shift(-H)
-              return (fut/df["price"] - 1.0)
-
-          def triple_barrier_like(df, H, tp_mult=1.0, sl_mult=1.0):
-              f = future_return(df, H)
-              lab = np.sign(f).fillna(0.0).astype(int)
-              return lab, f
-          PY
-
-          ############ trade4v/trend4p/ev_model.py ############
-          cat > trade4v/trend4p/ev_model.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def ev_from_dir_expansion(dir_sig, expansion, fee_bps=0.0, slip_bps=0.0):
-              cost = (fee_bps + slip_bps)/10000.0
-              ev = (dir_sig.fillna(0.0) * expansion.fillna(0.0)) - cost
-              return ev
-
-          def entry_flag_from_thresh(ev, feats, gate_strength=0.0):
-              g = feats["mom_fast"].abs().rank(pct=True)
-              gate = (g > (1.0 - gate_strength)).astype(int) if gate_strength>0 else 1
-              return ((ev > 0) & (gate==1)).astype(int)
-          PY
-
-          ############ trade4v/trend4p/sizing.py ############
-          cat > trade4v/trend4p/sizing.py <<'PY'
-          import numpy as np
-          import pandas as pd
-
-          def kelly_like(ev, var_floor=1e-6, cap=1.0):
-              var = (ev.rolling(50).std()**2).fillna(0.0).clip(lower=var_floor)
-              f = (ev.abs() / var).clip(upper=cap).fillna(0.0)
-              return f
-          PY
-
-          ############ trade4v/trend4p/selector_4u.py ############
-          cat > trade4v/trend4p/selector_4u.py <<'PY'
-          import numpy as np
-          import pandas as pd
-          from .utils import take_iloc
-
-          def _estimate_bars_per_month(times):
-              t = pd.to_datetime(times, utc=True)
-              dt = (t.view("int64").astype("float64").diff() / 1e9)
-              med = float(np.nanmedian(dt)) if np.isfinite(dt).any() else 60.0
-              bars_per_day = int(round(86400.0 / max(med, 1.0)))
-              return bars_per_day * 30
-
-          def topk_per_day(df, k, time_col="time", score_col="ev_final"):
-              if k <= 0: return df.index.values
-              t = pd.to_datetime(df[time_col], utc=True)
-              key = t.dt.strftime("%Y-%m-%d")
-              order = np.argsort(-df[score_col].values)
-              keep, used = [], {}
-              for i in order:
-                  d = key.iloc[int(i)]
-                  used.setdefault(d, 0)
-                  if used[d] < k:
-                      keep.append(int(i)); used[d] += 1
-              keep = np.array(sorted(keep))
-              return keep
-
-          def search_theta_for_pnl(ev, realized, times):
-              ev = np.asarray(ev); realized = np.asarray(realized)
-              best_pnl = -1e18; best_theta = 0.0
-              for q in np.linspace(0.0, 1.0, 101):
-                  thr = float(np.quantile(ev, q))
-                  pnl = float(np.nansum(realized[ev >= thr]))
-                  if pnl > best_pnl:
-                      best_pnl, best_theta = pnl, thr
-              return best_theta, best_pnl
-          PY
-
-          ############ trade4v/trend4p/backtest.py ############
-          cat > trade4v/trend4p/backtest.py <<'PY'
-          import numpy as np
-          import pandas as pd
-          from .utils import mcc_from_labels
-
-          def summarize_preds(preds):
-              sel = preds["entry_flag"]==1
-              n_tr = int(sel.sum())
-              pnl  = float(preds.loc[sel, "net_event"].sum()) if n_tr>0 else 0.0
-              wins = int((preds.loc[sel, "gross_event"]>0).sum()) if n_tr>0 else 0
-              hit  = (wins / n_tr) if n_tr>0 else 0.0
-              mcc, acc, cov = mcc_from_labels(np.sign(preds["gross_event"]), np.sign(preds["ev_final"]))
-              return {
-                  "coverage": float(cov),
-                  "acc": float(acc),
-                  "mcc": float(mcc),
-                  "n_trades": n_tr,
-                  "total_return": pnl,
-                  "monthly_return": pnl
-              }
-          PY
-
-          ############ trade4v/trend4p/execution_4u.py ############
-          cat > trade4v/trend4p/execution_4u.py <<'PY'
-          import numpy as np
-          import pandas as pd
-          from .features import compute_basic_features, dir_signal, expansion_proxy
-          from .regimes import assign_regimes
-          from .labels import future_return
-          from .ev_model import ev_from_dir_expansion, entry_flag_from_thresh
-          from .sizing import kelly_like
-
-          def run_pipeline(df, H=15, fee_bps=1.0, slip_bps=0.5):
-              feats = compute_basic_features(df)
-              dir_sig = dir_signal(feats)
-              expn = expansion_proxy(feats)
-              ev = ev_from_dir_expansion(dir_sig, expn, fee_bps=fee_bps, slip_bps=slip_bps)
-              entry = entry_flag_from_thresh(ev, feats, gate_strength=0.0)
-
-              fut_ret = future_return(df, H)
-              gross = dir_sig * fut_ret
-              cost = (fee_bps + slip_bps)/10000.0
-              net = gross - cost*entry
-
-              regime = assign_regimes(feats, n=3).astype(int)
-              size = kelly_like(ev.abs()).fillna(0.0).clip(upper=1.0)
-
-              out = pd.DataFrame({
-                  "time": df["time"],
-                  "regime_id": regime,
-                  "H_row": int(H),
-                  "ev_final": ev.astype(float),
-                  "entry_flag": entry.astype(int),
-                  "size": size.astype(float),
-                  "gross_event": gross.astype(float),
-                  "net_event": net.astype(float),
-              })
-              out = out.iloc[:-H] if H>0 and len(out)>H else out
-              return out
-          PY
-
-          ############ trade4v/run_4u.py ############
-          cat > trade4v/run_4u.py <<'PY'
-          #!/usr/bin/env python3
-          # -*- coding: utf-8 -*-
-          import argparse, os, json
-          import pandas as pd
-          from trend4p.data import load_csv
-          from trend4p.execution_4u import run_pipeline
-          from trend4p.backtest import summarize_preds
-
-          def main():
-              ap = argparse.ArgumentParser()
-              ap.add_argument("--data", required=True)
-              ap.add_argument("--train_start", required=True, type=str)
-              ap.add_argument("--train_end", required=True, type=str)
-              ap.add_argument("--test_start", required=True, type=str)
-              ap.add_argument("--test_end", required=True, type=str)
-              ap.add_argument("--H", default="15", type=str)
-              ap.add_argument("--fee_bps", default="1.0", type=str)
-              ap.add_argument("--slip_bps", default="0.5", type=str)
-              ap.add_argument("--out_dir", default="_out_4u", type=str)
-              args = ap.parse_args()
-
-              H = int(float(args.H))
-              fee = float(args.fee_bps); slip = float(args.slip_bps)
-              out_dir = args.out_dir
-              os.makedirs(os.path.join(out_dir, "run"), exist_ok=True)
-
-              print(f"Using CSV: {args.data}")
-              df = load_csv(args.data)
-
-              preds_all = run_pipeline(df, H=H, fee_bps=fee, slip_bps=slip)
-              t0 = pd.Timestamp(args.test_start); t0 = t0.tz_localize("UTC") if t0.tzinfo is None else t0.tz_convert("UTC")
-              t1 = pd.Timestamp(args.test_end);   t1 = t1.tz_localize("UTC") if t1.tzinfo is None else t1.tz_convert("UTC")
-              m = (preds_all["time"]>=t0) & (preds_all["time"]<=t1)
-              preds_test = preds_all.loc[m].copy()
-
-              out_preds = os.path.join(out_dir, "run", "preds_test.csv")
-              preds_test.to_csv(out_preds, index=False)
-              metrics = {"train":{"start":args.train_start,"end":args.train_end},
-                         "test":{"start":args.test_start,"end":args.test_end},
-                         "H":H,"fee_bps":fee,"slip_bps":slip,
-                         "test_metrics": summarize_preds(preds_test)}
-              with open(os.path.join(out_dir, "run", "metrics_oos.json"), "w", encoding="utf-8") as f:
-                  json.dump(metrics, f, ensure_ascii=False, indent=2)
-              print("Saved:", out_preds)
-              print("Done.")
-
-          if __name__ == "__main__":
-              main()
-          PY
-
-          ############ trade4v/config/default.json ############
-          cat > trade4v/config/default.json <<'JSON'
-          {
-            "version": "fullpack-patch-1"
-          }
-          JSON
-
-          echo "== Created codepack tree =="
-          find trade4v -maxdepth 3 -type f -print | sed 's/^/  /'
-
-      - name: Run backtest
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="$PWD"
+          export PYTHONPATH="$PWD/trade4v"
           OUT="${{ inputs.out_dir }}"
           CSV=$(ls -1 data/*.csv | head -n1)
-          python trade4v/run_4u.py \
+          mkdir -p "$OUT"
+          python "${{ steps.codeprep.outputs.SCRIPT }}" \
             --data "$CSV" \
             --train_start "${{ inputs.train_start }}" \
             --train_end   "${{ inputs.train_end }}" \
@@ -461,23 +141,25 @@ jobs:
             --H "${{ inputs.H }}" \
             --fee_bps "${{ inputs.fee_bps }}" \
             --slip_bps "${{ inputs.slip_bps }}" \
+            --ev_margin_bps "${{ inputs.ev_margin_bps }}" \
+            --K_day "${{ inputs.K_day }}" \
             --out_dir "$OUT"
 
-      - name: Zip codepack + outputs
-        shell: bash
+      - name: Show outputs (preview)
+        if: always()
         run: |
-          set -euo pipefail
-          zip -r -q trade4v_fullpack_patched.zip trade4v
-          echo "== Output tree =="
-          find "${{ inputs.out_dir }}" -maxdepth 3 -type f -print | sed 's/^/  /'
+          echo "== files =="; find "${{ inputs.out_dir }}" -maxdepth 3 -type f -print | sed 's/^/  /'
+          echo "== run.log tail =="; tail -n 50 "${{ inputs.out_dir }}"/run/run.log || true
+          echo "== metrics =="; cat "${{ inputs.out_dir }}"/run/metrics_oos.json || true
+          echo "== preds head =="; head -n 5 "${{ inputs.out_dir }}"/run/preds_test.csv || true
 
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: out_4u_and_codepack
+          name: out_4u_v3
           path: |
             ${{ inputs.out_dir }}/run/preds_test.csv
             ${{ inputs.out_dir }}/run/metrics_oos.json
-            trade4v_fullpack_patched.zip
+            ${{ inputs.out_dir }}/run/run.log
           if-no-files-found: error
           retention-days: 14
