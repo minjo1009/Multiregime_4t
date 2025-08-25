@@ -1,0 +1,118 @@
+name: Scapler_Backtest (ETHUSDT 1m)
+
+on:
+  push:
+    paths:
+      - '**.zip'
+      - '**.py'
+      - 'requirements.txt'
+      - '.github/workflows/backtest.yml'
+  workflow_dispatch: {}
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [ETHUSDT]
+        timeframe: ['1m']
+        slippage: [0.0005]     # 필요시 조정
+        fee: [0.0004]          # 거래소 taker/maker 수수료에 맞게 조정
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
+      - name: Unzip all .zip in repo root
+        run: |
+          shopt -s nullglob
+          mkdir -p unzipped
+          for z in *.zip; do
+            echo "Unzipping $z"
+            mkdir -p "unzipped/${z%.zip}"
+            unzip -oq "$z" -d "unzipped/${z%.zip}"
+          done
+
+          # 전략 zip 안에 *.py 있으면 루트로 복사(이미 있으면 유지)
+          for d in unzipped/*; do
+            if compgen -G "$d/*.py" > /dev/null; then
+              cp -rn "$d"/* .
+            fi
+          done
+
+      - name: Locate ETH 1m data file
+        id: data
+        run: |
+          # 가장 그럴듯한 파일 자동 탐지 (csv 우선, 없으면 parquet)
+          DATA_FILE=$( { find unzipped -type f -iregex '.*ETH.*1.*m.*\.csv$' -o -iregex '.*ETHUSDT.*1.*m.*\.csv$'; } | head -n1 || true)
+          if [ -z "$DATA_FILE" ]; then
+            DATA_FILE=$( { find unzipped -type f -iregex '.*ETH.*1.*m.*\.parquet$' -o -iregex '.*ETHUSDT.*1.*m.*\.parquet$'; } | head -n1 || true)
+          fi
+          if [ -z "$DATA_FILE" ]; then
+            echo "❌ ETH 1분봉 데이터(csv/parquet) 자동탐지 실패. 파일명을 ETH/ETHUSDT & 1m/1min 포함하게 해줘."
+            exit 1
+          fi
+          echo "data_file=$DATA_FILE" >> $GITHUB_OUTPUT
+          echo "✅ DATA_FILE=$DATA_FILE"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # 기본 백테스트 스택(필요 패키지 미정일 때 안전망)
+            pip install backtrader pandas numpy ta matplotlib
+          fi
+
+      - name: Decide RUN_CMD (auto-detect entry)
+        id: run
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+          TIMEFRAME: ${{ matrix.timeframe }}
+          DATA_FILE: ${{ steps.data.outputs.data_file }}
+          SLIPPAGE: ${{ matrix.slippage }}
+          FEE: ${{ matrix.fee }}
+        run: |
+          set -e
+          # 1) 루트의 backtest.py
+          if [ -f "./backtest.py" ]; then
+            CMD="python backtest.py --symbol ${SYMBOL} --timeframe ${TIMEFRAME} --data \"${DATA_FILE}\" --slippage ${SLIPPAGE} --fee ${FEE} --outdir output/${SYMBOL}_${TIMEFRAME}"
+          # 2) 어떤 디렉토리든 backtest*.py 중 하나
+          elif ls **/backtest*.py 1> /dev/null 2>&1; then
+            FILE=$(ls **/backtest*.py | head -n1)
+            CMD="python \"$FILE\" --symbol ${SYMBOL} --timeframe ${TIMEFRAME} --data \"${DATA_FILE}\" --slippage ${SLIPPAGE} --fee ${FEE} --outdir output/${SYMBOL}_${TIMEFRAME}"
+          # 3) Makefile target
+          elif [ -f "Makefile" ] && grep -qE '(^backtest:)|(^run-backtest:)' Makefile; then
+            CMD="make backtest SYMBOL=${SYMBOL} TIMEFRAME=${TIMEFRAME} DATA='${DATA_FILE}' SLIPPAGE=${SLIPPAGE} FEE=${FEE}"
+          else
+            echo "❌ 백테스트 엔트리포인트(backtest.py, **/backtest*.py, 또는 Makefile target)가 없음."
+            echo "👉 레포 루트에 backtest.py 두거나, Makefile에 backtest 타겟을 만들어줘."
+            exit 1
+          fi
+          echo "cmd=$CMD" >> $GITHUB_OUTPUT
+          echo "▶ $CMD"
+
+      - name: Run backtest
+        run: ${{ steps.run.outputs.cmd }}
+
+      - name: Upload artifacts (results/reports/output)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ matrix.symbol }}-${{ matrix.timeframe }}
+          path: |
+            output/**
+            results/**
+            reports/**
+          if-no-files-found: ignore
