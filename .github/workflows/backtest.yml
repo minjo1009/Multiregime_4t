@@ -2,151 +2,139 @@ name: Backtest
 
 on:
   workflow_dispatch:
-    inputs:
-      trade_zip_path:
-        description: "Path to trade pack zip"
-        type: string
-        default: "trade_v1.0.4b_full.zip"
-      data_zip_path:
-        description: "Path to data zip (CSV inside)"
-        type: string
-        default: "ETHUSDT_1min_2020_2025.zip"
 
-permissions:
-  contents: read
+env:
+  REPO_DIR: repo
+  TRADE_ZIP: trade_v1.0.5_full.zip        # 레포 루트에 둔 zip
+  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip   # 레포 루트에 둔 zip
+  RUN_DIR:   tmp/trade
+  DATA_DIR:  tmp/data
+  OUT_DIR:   _out_4u/run
+  CSV_PATH:  tmp/data/ETHUSDT_1min_2020_2025.csv
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    defaults: { run: { shell: bash } }
-    env:
-      WS:           ${{ github.workspace }}
-      REPO_DIR:     ${{ github.workspace }}/repo
-      TRADE_ZIP:    ${{ inputs.trade_zip_path }}
-      DATA_ZIP:     ${{ inputs.data_zip_path }}
-      RUN_DIR:      ${{ github.workspace }}/tmp/trade
-      DATA_DIR:     ${{ github.workspace }}/tmp/data
-      OUT_DIR:      ${{ github.workspace }}/_out_4u/run
-      CSV_PATH:     ${{ github.workspace }}/tmp/data/ETHUSDT_1min_2020_2025.csv
-      OMP_NUM_THREADS: "2"
-      OPENBLAS_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
-      NUMEXPR_NUM_THREADS: "2"
-
     steps:
-      # --- 현재 커밋 수동 체크아웃 (외부 액션 불필요)
-      - name: Manual checkout (no external action)
+      # ---- Checkout (no action; 보안정책 회피) ----
+      - name: Checkout repository (git)
+        shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${REPO_DIR}"
           git init "${REPO_DIR}"
           cd "${REPO_DIR}"
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git -c advice.detachedHead=false fetch --depth=1 origin "${GITHUB_SHA}"
-          git checkout --detach "${GITHUB_SHA}"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+          ls -al
 
-      - name: Prepare working dirs
+      # ---- Prepare & unzip ----
+      - name: Prepare workspace
+        shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-
-      - name: Unzip packs
-        run: |
-          set -euo pipefail
-          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
-          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ data zip not found: ${DATA_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
+          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ data zip not found:  ${DATA_ZIP}";  exit 1; }
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
 
-      # 1차: CSV 자동 탐지 (절대경로로 ENV에 주입)
-      - name: Detect CSV path
-        run: |
-          set -euo pipefail
-          echo "--- data dir tree ---"
-          find "${DATA_DIR}" -maxdepth 4 -type f -name "*.csv" -print | sed 's/^/ - /' || true
-          cand=""
-          for pat in "*ETHUSDT*1min*2020*2025*.csv" "*ETHUSDT*1m*2020*2025*.csv" "*.csv"; do
-            hit=$(find "${DATA_DIR}" -type f -iname "$pat" | sort | head -n1 || true)
-            if [ -n "$hit" ]; then cand="$hit"; break; fi
-          done
-          [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
-          echo "CSV_PATH=${cand}" | tee -a "$GITHUB_ENV"
-          echo "Resolved CSV_PATH=${cand}"
-
+      # ---- Python deps (시스템 Python 사용; 액션 미사용) ----
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
-          python -c 'import sys; print("Python", sys.version)'
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -c 'import sklearn; print("sklearn", sklearn.__version__)'
+          python3 -V
+          python3 -m pip install -U pip
+          python3 -m pip install -r requirements.txt
+          # sklearn 호환 스모크
+          python3 - <<'PY'
+from sklearn.calibration import CalibratedClassifierCV as C
+from sklearn.linear_model import LogisticRegression as L
+try:
+    C(estimator=L()); print("OK: estimator (>=1.5 계열)")
+except TypeError:
+    C(base_estimator=L()); print("OK: base_estimator (<=1.4 계열)")
+PY
 
-      - name: CalibratedClassifierCV smoke test
-        run: |
-          python - <<'PY'
-          from sklearn.calibration import CalibratedClassifierCV as C
-          from sklearn.linear_model import LogisticRegression as L
-          try:
-              C(estimator=L()); print("OK: estimator (>=1.5)")
-          except TypeError:
-              C(base_estimator=L()); print("OK: base_estimator (<=1.4)")
-          PY
-
-      - name: Fingerprint check (v1.0.4 family)
+      # ---- Fingerprint: v1.0.4(레거시) + v1.0.5(신규) 겸용 ----
+      - name: Fingerprint check (v1.0.4 + v1.0.5)
+        shell: bash
         run: |
           set -euo pipefail
-          FILE="${RUN_DIR}/backtest/runner.py"
-          grep -q "Coverage-aligned gating" "$FILE" || { echo "❌ missing: Coverage-aligned gating"; exit 1; }
-          if grep -q "S1 min prob cutoff" "$FILE"; then
-            echo "✅ S1 cutoff (comment)"
-          elif grep -q "df\\['gate'\\] *= *df\\['gate'\\] *\\* *\\(df\\['p_long'\\] *>= *p_cut\\)" "$FILE"; then
-            echo "✅ S1 cutoff (code pattern)"
+          f="${RUN_DIR}/backtest/runner.py"
+          if grep -Eq "Coverage-aligned gating" "$f"; then
+            echo "OK: legacy marker found"
+          elif grep -Eq "rank_session_regime" "$f" && grep -Eq "S1 .*floor" "$f"; then
+            echo "OK: v1.0.5 markers found"
           else
-            echo "❌ missing: S1 cutoff"; exit 1
+            echo "✖ missing: Coverage-aligned gating (legacy) / rank_session_regime + S1 floor (v1.0.5)"
+            sed -n '1,140p' "$f" || true
+            exit 1
           fi
 
+      # ---- Preflight CSV ----
       - name: Preflight CSV
-        run: |
-          python - <<'PY'
-          import os, sys, pandas as pd
-          csv = os.environ['CSV_PATH']
-          print("Using CSV:", csv)
-          df  = pd.read_csv(csv, nrows=2)
-          need = {'open_time','open','high','low','close','volume','number_of_trades'}
-          miss = need - set(df.columns)
-          if miss: print('❌ Missing base columns:', miss); sys.exit(1)
-          hints = {'taker_buy_base_asset_volume','taker_buy_quote_asset_volume'}
-          if not (hints & set(df.columns)): print('❌ Need taker_buy_* volume columns'); sys.exit(1)
-          print('✅ CSV OK')
-          PY
-
-      # 2차: 실행 직전 재확인(없으면 재탐지) — 절대경로 기준
-      - name: Run backtest
-        working-directory: ${{ env.RUN_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
           if [ ! -f "${CSV_PATH}" ]; then
             echo "CSV_PATH not found -> re-detecting…"
-            cand=$(find "${DATA_DIR}" -type f \( -iname "*ETHUSDT*1min*2020*2025*.csv" -o -iname "*ETHUSDT*1m*2020*2025*.csv" -o -iname "*.csv" \) | sort | head -n1 || true)
+            cand=$(find "${DATA_DIR}" -type f \
+                     -iname "*ETHUSDT*1min*2020*2025*.csv" -o \
+                     -iname "*ETHUSDT*1m*2020*2025*.csv"  -o \
+                     -iname "*.csv" | head -n1 || true)
             [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
-            CSV_PATH="$cand"
+            echo "Detected: $cand"
+            echo "CSV_PATH=$cand" >> "$GITHUB_ENV"
+          else
+            echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
           fi
-          echo "Using CSV_PATH=${CSV_PATH}"
-          python run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
-          echo "---- gating debug ----"
-          cat "${OUT_DIR}/gating_debug.json" || true
-          ls -al "${OUT_DIR}"
+          python3 - <<'PY'
+import os, sys, pandas as pd
+csv = os.environ['CSV_PATH']
+need = {'open_time','open','high','low','close','volume','number_of_trades'}
+df = pd.read_csv(csv, nrows=2)
+cols = set(df.columns)
+miss = need - cols
+if miss:
+    print("✖ Missing base columns:", miss); sys.exit(1)
+if 'taker_buy_base_asset_volume' in cols:
+    print("✅ taker_buy_base_asset_volume present")
+elif 'taker_buy_quote_asset_volume' in cols:
+    print("ℹ️ Only quote volume present -> loader will synthesize base volume")
+else:
+    print("ℹ️ No taker_buy_* columns -> loader will synthesize if possible")
+print("✅ CSV OK")
+PY
 
-      - name: Upload artifacts
+      # ---- Run backtest ----
+      - name: Run backtest
+        working-directory: ${{ env.RUN_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="${CSV_PATH}"
+          if [ ! -f "${CSV}" ]; then
+            CSV=$(echo "${{ env.CSV_PATH }}")
+          fi
+          echo "Using CSV_PATH=${CSV}"
+          python3 run_4u.py --data_path "${CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}" --config "conf/config.yml"
+          echo "---- gating debug ----"
+          cat "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
+          ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
+
+      # ---- Upload artifacts (pinned SHA) ----
+      - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/charts/
-            ${{ env.OUT_DIR }}/gating_debug.json
-          if-no-files-found: warn
+            _out_4u/run/summary.json
+            _out_4u/run/gating_debug.json
+            _out_4u/run/trades.csv
+            _out_4u/run/preds_test.csv
+            _out_4u/run/charts/
+          if-no-files-found: error
           retention-days: 30
-          compression-level: 6
