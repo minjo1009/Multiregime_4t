@@ -3,15 +3,21 @@ name: trade4v run (v3.3 • robust + diagnostics + full hotfix)
 on:
   workflow_dispatch:
     inputs:
-      train_start: { description: "훈련 시작(UTC)", required: true, default: "2025-01-01 00:00:00" }
-      train_end:   { description: "훈련 종료(UTC)", required: true, default: "2025-04-30 23:59:00" }
-      test_start:  { description: "테스트 시작(UTC)", required: true, default: "2025-05-01 00:00:00" }
-      test_end:    { description: "테스트 종료(UTC)", required: true, default: "2025-06-30 23:59:00" }
-      H:           { description: "예측지평(분)", required: true, default: "15" }
-      fee_bps:     { description: "수수료(bp)", required: true, default: "1.0" }
-      slip_bps:    { description: "슬리피지(bp)", required: true, default: "0.5" }
-      ev_margin_bps: { description: "EV 마진(bp) (예비)", required: true, default: "1.0" }
-      K_day:       { description: "일별 Top-K 맵 (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
+      train_start:   { description: "훈련 시작(UTC)", required: true,  default: "2025-01-01 00:00:00" }
+      train_end:     { description: "훈련 종료(UTC)", required: true,  default: "2025-04-30 23:59:00" }
+      test_start:    { description: "테스트 시작(UTC)", required: true,  default: "2025-05-01 00:00:00" }
+      test_end:      { description: "테스트 종료(UTC)", required: true,  default: "2025-06-30 23:59:00" }
+      H:             { description: "예측지평(분)",     required: true,  default: "15" }
+      fee_bps:       { description: "수수료(bp)",       required: true,  default: "1.0" }
+      slip_bps:      { description: "슬리피지(bp)",     required: true,  default: "0.5" }
+      ev_margin_bps: { description: "EV 마진(bp)(예비)", required: true, default: "1.0" }
+      K_day:         { description: "일별 Top-K (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
+  pull_request:
+    paths:
+      - "trade4v.zip"
+      - "data/**"
+      - "trade4v/**"
+      - ".github/workflows/run4u.yml"
 
 jobs:
   run:
@@ -20,18 +26,34 @@ jobs:
       contents: read
       actions: read
 
+    # PR로 트리거될 때도 돌아가도록 입력값 기본치 주입
+    env:
+      TRAIN_S: ${{ github.event_name == 'workflow_dispatch' && inputs.train_start   || '2025-01-01 00:00:00' }}
+      TRAIN_E: ${{ github.event_name == 'workflow_dispatch' && inputs.train_end     || '2025-04-30 23:59:00' }}
+      TEST_S:  ${{ github.event_name == 'workflow_dispatch' && inputs.test_start    || '2025-05-01 00:00:00' }}
+      TEST_E:  ${{ github.event_name == 'workflow_dispatch' && inputs.test_end      || '2025-06-30 23:59:00' }}
+      H:       ${{ github.event_name == 'workflow_dispatch' && inputs.H             || '15' }}
+      FEE:     ${{ github.event_name == 'workflow_dispatch' && inputs.fee_bps       || '1.0' }}
+      SLIP:    ${{ github.event_name == 'workflow_dispatch' && inputs.slip_bps      || '0.5' }}
+      EV_M:    ${{ github.event_name == 'workflow_dispatch' && inputs.ev_margin_bps || '1.0' }}
+      KDAY:    ${{ github.event_name == 'workflow_dispatch' && inputs.K_day         || '0:10,1:15,2:30' }}
+      OUT:     _out_4u
+      QTP:     "0.90"
+      QSL:     "0.60"
+      OVERLAP_MODE: "cap"   # cap|pyramid|none
+      MAX_CONC: "2"
+      MIN_GAP:  "5"
+      STRICT_QA: "0"        # 0=경고만, 1=하드 실패
+
     steps:
-      # 1) Checkout (pinned SHA)
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
 
-      # 2) Python setup (pinned SHA)
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps
       - name: Install deps (minimal)
         shell: bash
         run: |
@@ -43,7 +65,6 @@ jobs:
           subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
           PY
 
-      # 4) Unzip project (중첩 폴더 자동 평탄화)
       - name: Unzip project (robust)
         shell: bash
         run: |
@@ -70,14 +91,11 @@ jobs:
           fi
           if [ -d trade4v/trade4v ]; then
             shopt -s dotglob
-            mv trade4v/trade4v/* trade4v/
-            rmdir trade4v/trade4v
+            mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v
           fi
           test -f trade4v/run_4u.py || { echo "run_4u.py not found after flatten"; ls -R; exit 2; }
-          echo "[OK] trade4v layout fixed:"
           ls -al trade4v | head -n 80
 
-      # 5) 데이터 준비 (CSV/ZIP 자동탐색 + 헤더 정규화)
       - name: Prepare ETH 1m data
         shell: bash
         run: |
@@ -91,67 +109,54 @@ jobs:
           fi
           if [ -z "${CSV}" ] && ls -1 *.csv 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
             CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1)
-            mv "$CSV" data/
-            CSV="data/$(basename "$CSV")"
+            mv "$CSV" data/; CSV="data/$(basename "$CSV")"
           fi
-          if [ -z "${CSV}" ]; then
-            echo "ERROR: CSV 데이터가 필요합니다 (예: data/ETHUSDT_1min_2020_2025.csv)"; exit 2
-          fi
+          if [ -z "${CSV}" ]; then echo "ERROR: CSV 필요"; exit 2; fi
           echo "Using CSV: ${CSV}"
           python - "$CSV" <<'PY'
           import sys, pandas as pd
           p=sys.argv[1]
           df=pd.read_csv(p)
-          rename={}
+          rn={}
           for k in list(df.columns):
             kl=k.strip().lower()
-            if kl in ("open time","opentime","time","timestamp"): rename[k]="open_time"
-            elif kl=="open":  rename[k]="open"
-            elif kl=="high":  rename[k]="high"
-            elif kl=="low":   rename[k]="low"
-            elif kl in ("close","close price","price"): rename[k]="close"
-            elif kl in ("volume","vol"): rename[k]="volume"
-          if rename: df=df.rename(columns=rename)
-          if "open_time" not in df.columns: raise SystemExit("open_time 컬럼이 필요합니다.")
+            if kl in ("open time","opentime","time","timestamp"): rn[k]="open_time"
+            elif kl=="open": rn[k]="open"
+            elif kl=="high": rn[k]="high"
+            elif kl=="low": rn[k]="low"
+            elif kl in ("close","close price","price"): rn[k]="close"
+            elif kl in ("volume","vol"): rn[k]="volume"
+          if rn: df=df.rename(columns=rn)
+          assert "open_time" in df.columns, "open_time 컬럼 필요"
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 5.5) Hotfix 1: pandas.cut 중복 라벨 허용(ordered=False)
+      # Hotfix 1: pandas.cut 중복 라벨 허용
       - name: Hotfix pandas cut labels (ordered=False)
         shell: bash
         run: |
           set -euo pipefail
-          F="trade4v/trend4p/utils.py"
-          test -f "$F" || { echo "[ERR] $F not found"; ls -R; exit 2; }
-          sed -i 's/labels=\[0,1,2,2\], include_lowest=True)/labels=[0,1,2,2], include_lowest=True, ordered=False)/' "$F"
-          if ! grep -q "ordered=False" "$F"; then
-            sed -i 's/include_lowest=True)/include_lowest=True, ordered=False)/' "$F"
-          fi
-          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed to apply"; sed -n '1,180p' "$F"; exit 2; }
+          F="trade4v/trend4p/utils.py"; test -f "$F" || { echo "[ERR] $F not found"; ls -R; exit 2; }
+          sed -i 's/labels=\[0,1,2,2\], include_lowest=True)/labels=[0,1,2,2], include_lowest=True, ordered=False)/' "$F" || true
+          grep -q "ordered=False" "$F" || sed -i 's/include_lowest=True)/include_lowest=True, ordered=False)/' "$F"
+          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed"; sed -n '1,180p' "$F"; exit 2; }
           echo "[OK] utils.py hotfix applied"
 
-      # 5.6) Hotfix 2: range_model 인덱스-안전 + no-bfill + run_4u NaN-safe
-      - name: Hotfix (index-safe range + no-bfill labels + NaN-safe trading)
+      # Hotfix 2: range_model index-safe + no-bfill, run_4u NaN-safe
+      - name: Hotfix (index-safe range + no-bfill + NaN-safe trading)
         shell: bash
         run: |
           set -euo pipefail
-          # (A) range_model: index-safe apply_quantile_tables + no-bfill(min_periods=H)
-          F1="trade4v/trend4p/range_model.py"
-          test -f "$F1" || { echo "[ERR] $F1 not found"; ls -R; exit 2; }
+          F1="trade4v/trend4p/range_model.py"; test -f "$F1" || { echo "[ERR] $F1 not found"; ls -R; exit 2; }
           python - "$F1" <<'PY'
           import sys, re, pathlib
-          p = pathlib.Path(sys.argv[1])
-          s = p.read_text(encoding='utf-8')
-
-          # 1) make_range_targets: rolling(H, min_periods=H).sum().shift(-H)  (채우기 없음)
+          p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding='utf-8')
           s = re.sub(
-              r"def\\s+make_range_targets\\s*\\(.*?\\)\\s*:\\n(?:.*?\\n)*?return\\s+r\\..*",
+              r"def\s+make_range_targets\s*\(.*?\)\s*:\n(?:.*?\n)*?return\s+r\..*",
               "def make_range_targets(df, H):\n    import pandas as pd\n    r = pd.Series(df['ret1']).abs().rolling(H, min_periods=H).sum().shift(-H)\n    return r.values",
               s, flags=re.S
           )
-
-          # 2) apply_quantile_tables: 인덱스 정렬형 할당(라벨-안전)
-          pat = r"def\\s+apply_quantile_tables\\s*\\(.*?\\)\\s*:\\n(?:.*?\\n)*?(?=^def\\s|^class\\s|\\Z)"
+          pat = r"def\s+apply_quantile_tables\s*\(.*?\)\s*:\n(?:.*?\n)*?(?=^def\s|^class\s|\Z)"
           repl = '''
 def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regime_id'), eps=1e-6):
     import numpy as np, pandas as pd
@@ -173,21 +178,14 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
     return tp.values, sl.values
 '''.lstrip("\n")
           s, n = re.subn(pat, repl, s, flags=re.M|re.S)
-          if n == 0:
-              print("[ERR] apply_quantile_tables pattern not found"); sys.exit(2)
-
-          p.write_text(s, encoding='utf-8')
-          print("[OK] range_model patched (index-safe + no-bfill).")
+          assert n>0, "apply_quantile_tables not patched"
+          p.write_text(s, encoding='utf-8'); print("[OK] range_model patched")
           PY
 
-          # (B) run_4u: train은 NaN 레이블 드랍, test는 cand=valid
-          F2="trade4v/run_4u.py"
-          test -f "$F2" || { echo "[ERR] $F2 not found"; ls -R; exit 2; }
+          F2="trade4v/run_4u.py"; test -f "$F2" || { echo "[ERR] $F2 not found"; ls -R; exit 2; }
           python - "$F2" <<'PY'
           import pathlib
-          p = pathlib.Path("trade4v/run_4u.py")
-          s = p.read_text(encoding='utf-8')
-
+          p = pathlib.Path("trade4v/run_4u.py"); s = p.read_text(encoding='utf-8')
           s = s.replace(
               "tr = df[(df['time']>=pd.Timestamp(args.train_start, tz='UTC')) & (df['time']<=pd.Timestamp(args.train_end, tz='UTC'))].copy()",
               "tr = df[(df['time']>=pd.Timestamp(args.train_start, tz='UTC')) & (df['time']<=pd.Timestamp(args.train_end, tz='UTC'))].copy()\n    tr = tr[tr['fret'].notna()].copy()"
@@ -200,44 +198,23 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
               "te['realized_gross'] = te['fret'] * te['entry_flag']",
               "te['realized_gross'] = te['fret'].fillna(0.0) * te['entry_flag']"
           )
-
-          p.write_text(s, encoding='utf-8')
-          print("[OK] run_4u patched (drop NaN in train, cand=valid in test).")
+          p.write_text(s, encoding='utf-8'); print("[OK] run_4u patched")
           PY
 
-      # 6) 백테스트 실행
       - name: Run backtest (v3.3)
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
-          CSV: normalized.csv
-          TRAIN_S: ${{ inputs.train_start }}
-          TRAIN_E: ${{ inputs.train_end }}
-          TEST_S:  ${{ inputs.test_start }}
-          TEST_E:  ${{ inputs.test_end }}
-          H:       ${{ inputs.H }}
-          FEE:     ${{ inputs.fee_bps }}
-          SLIP:    ${{ inputs.slip_bps }}
-          KDAY:    ${{ inputs.K_day }}
-          OUT:     _out_4u
-          QTP: "0.90"
-          QSL: "0.60"
-          OVERLAP_MODE: "cap"     # cap|pyramid|none
-          MAX_CONC: "2"
-          MIN_GAP: "5"
-          STRICT_QA: "0"          # 0=경고만, 1=하드 실패
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
-          PY=trade4v/run_4u.py
-          [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
+          PY=trade4v/run_4u.py; [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
           [ -f "$PY" ] || { echo "run_4u.py not found"; ls -R; exit 2; }
           echo "Using script: $PY"
-          echo "CSV: $CSV"
           python "$PY" \
-            --data "$CSV" \
+            --data "normalized.csv" \
             --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
-            --test_start "$TEST_S"   --test_end "$TEST_E" \
+            --test_start  "$TEST_S"  --test_end   "$TEST_E" \
             --H "$H" \
             --fee_bps "$FEE" --slip_bps "$SLIP" \
             --K_day "$KDAY" \
@@ -248,29 +225,25 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      # 6.5) Diagnostics
       - name: Run diagnostics
         if: always()
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
-          KDAY:    ${{ inputs.K_day }}
-          H:       ${{ inputs.H }}
         run: |
           set -euo pipefail
           if [ -f "_out_4u/run/preds_test.csv" ]; then
             python -m trade4v.diag.run_diag \
-              --preds _out_4u/run/preds_test.csv \
+              --preds   _out_4u/run/preds_test.csv \
               --metrics _out_4u/run/metrics_oos.json \
-              --k_day "$KDAY" \
-              --H "$H" || true
+              --k_day   "$KDAY" \
+              --H       "$H" || true
             echo "diag_report.json (head):"
             test -f "_out_4u/run/diag_report.json" && head -n 100 "_out_4u/run/diag_report.json" || true
           else
             echo "WARN: preds_test.csv 미존재 → 진단 생략"
           fi
 
-      # 7) 산출물 업로드
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
