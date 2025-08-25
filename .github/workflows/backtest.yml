@@ -1,21 +1,38 @@
 name: Backtest
 on:
   workflow_dispatch:
+    inputs:
+      trade_zip:
+        description: "Code ZIP filename at repo root"
+        required: false
+        default: "trade_v1.0.5_full.zip"
+      data_zip:
+        description: "Data ZIP filename at repo root"
+        required: false
+        default: "ETHUSDT_1min_2020_2025.zip"
+      csv_glob:
+        description: "CSV filename glob to search inside data dir"
+        required: false
+        default: "*ETHUSDT*1min*2020*2025*.csv"
+      out_dir:
+        description: "Output directory"
+        required: false
+        default: "_out_4u/run"
 
 env:
   REPO_DIR: repo
-  TRADE_ZIP: trade_v1.0.5.zip        # 레포 루트의 코드 zip (이름 꼭 확인)
-  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip   # 레포 루트의 데이터 zip
-  RUN_DIR:   tmp/trade
-  DATA_DIR:  tmp/data
-  OUT_DIR:   _out_4u/run
-  CSV_PATH:  tmp/data/ETHUSDT_1min_2020_2025.csv
+  RUN_DIR:  tmp/trade
+  DATA_DIR: tmp/data
+  # 아래 3개는 초기 기본값(입력으로 덮어씀)
+  TRADE_ZIP: trade_v1.0.5_full.zip
+  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip
+  CSV_GLOB:  "*ETHUSDT*1min*2020*2025*.csv"
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
     steps:
-      # --- Git checkout (actions/checkout 미사용: 정책 충돌 회피)
+      # --- Checkout (actions/checkout 미사용: 정책 충돌 회피) ---
       - name: Checkout repository (git)
         shell: bash
         run: |
@@ -25,28 +42,39 @@ jobs:
           git remote add origin "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}.git"
           git -c protocol.version=2 fetch --depth=1 origin "${GITHUB_SHA}"
           git checkout --force FETCH_HEAD
-          ls -al
 
-      # --- 준비 & 압축 해제 + ZIP SHA/목록 출력
+      # --- Resolve inputs -> $GITHUB_ENV 주입 ---
+      - name: Resolve inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          TZ="${{ github.event.inputs.trade_zip }}";   [ -n "$TZ" ] || TZ="${TRADE_ZIP}"
+          DZ="${{ github.event.inputs.data_zip }}";    [ -n "$DZ" ] || DZ="${DATA_ZIP}"
+          CG="${{ github.event.inputs.csv_glob }}";    [ -n "$CG" ] || CG="${CSV_GLOB}"
+          OD="${{ github.event.inputs.out_dir }}";     [ -n "$OD" ] || OD="_out_4u/run"
+          echo "TRADE_ZIP=$TZ"  >> "$GITHUB_ENV"
+          echo "DATA_ZIP=$DZ"   >> "$GITHUB_ENV"
+          echo "CSV_GLOB=$CG"   >> "$GITHUB_ENV"
+          echo "OUT_DIR=$OD"    >> "$GITHUB_ENV"
+          echo "Resolved: TRADE_ZIP=$TZ, DATA_ZIP=$DZ, CSV_GLOB=$CG, OUT_DIR=$OD"
+
+      # --- Prepare & unzip + SHA/목록 출력 ---
       - name: Prepare workspace
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
-          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ data zip not found:  ${DATA_ZIP}";  exit 1; }
-          echo "Code ZIP SHA256:"
-          sha256sum "${REPO_DIR}/${TRADE_ZIP}" || true
-          echo "Data ZIP SHA256:"
-          sha256sum "${REPO_DIR}/${DATA_ZIP}"  || true
-          echo "Unzipping..."
+          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ missing trade zip: ${TRADE_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ missing data zip:  ${DATA_ZIP}";  exit 1; }
+          echo "Code ZIP SHA256:"; sha256sum "${REPO_DIR}/${TRADE_ZIP}" || true
+          echo "Data ZIP SHA256:"; sha256sum "${REPO_DIR}/${DATA_ZIP}"  || true
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "Top of runner & config:"
-          sed -n '1,60p' "${RUN_DIR}/backtest/runner.py" || true
-          sed -n '1,60p' "${RUN_DIR}/conf/config.yml"     || true
+          echo "[runner.py head]"; sed -n '1,80p' "${RUN_DIR}/backtest/runner.py" || true
+          echo "[config.yml head]"; sed -n '1,80p' "${RUN_DIR}/conf/config.yml" || true
+          echo "[data dir]"; find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" | head -n 10
 
-      # --- 의존성 설치
+      # --- Install deps ---
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
@@ -56,58 +84,56 @@ jobs:
           python3 -m pip install -U pip
           python3 -m pip install -r requirements.txt
 
-      # --- Fingerprint: legacy(v1.0.4) / transitional(1.0.4b) / new(v1.0.5) 모두 허용
-      - name: Fingerprint check (legacy + transitional + v1.0.5)
+      # --- Fingerprint (legacy / 1.0.4b / 1.0.5 모두 허용) ---
+      - name: Fingerprint check
         shell: bash
         run: |
           set -euo pipefail
-          f="${RUN_DIR}/backtest/runner.py"
-          conf="${RUN_DIR}/conf/config.yml"
+          f="${RUN_DIR}/backtest/runner.py"; conf="${RUN_DIR}/conf/config.yml"
           if grep -Eq "Coverage-aligned gating" "$f"; then
-            echo "OK: legacy marker found (v1.0.4)"
+            echo "OK legacy (v1.0.4)"
           elif grep -Eq "^s1_min_prob" "$conf" && grep -Eq "^coverage_mode" "$conf"; then
-            echo "OK: transitional markers found (1.0.4b)"
+            echo "OK transitional (1.0.4b)"
           elif grep -Eq "^regime_policy:" "$conf" && grep -Eq "^s1_floor:" "$conf"; then
-            echo "OK: v1.0.5 markers found"
+            echo "OK v1.0.5"
           else
-            echo "✖ missing markers (legacy/transitional/v1.0.5)"
-            echo "---- runner.py head ----"; sed -n '1,140p' "$f" || true
-            echo "---- config.yml head ----"; sed -n '1,140p' "$conf" || true
-            exit 1
+            echo "✖ unknown fingerprint"; sed -n '1,140p' "$conf" || true; exit 1
           fi
 
-      # --- CSV 프리플라이트 (경로 자동 탐지)
-      - name: Preflight CSV
+      # --- Detect CSV robustly (하위폴더/다른 파일명까지) ---
+      - name: Detect CSV
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${CSV_PATH}" ]; then
-            echo "CSV_PATH not found -> re-detecting…"
-            cand=$(find "${DATA_DIR}" -type f \
-                     \( -iname "*ETHUSDT*1min*2020*2025*.csv" -o \
-                        -iname "*ETHUSDT*1m*2020*2025*.csv"  -o \
-                        -iname "*.csv" \) | head -n1 || true)
-            [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
-            echo "Detected: $cand"
-            echo "CSV_PATH=$cand" >> "$GITHUB_ENV"
-          else
-            echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
+          # 1) 사용자 입력 글롭 우선
+          cand=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" | head -n1 || true)
+          # 2) 흔한 대체 패턴
+          if [ -z "$cand" ]; then
+            cand=$(find "${DATA_DIR}" -type f \( -iname "*ETHUSDT*1m*2020*2025*.csv" -o -iname "*ETHUSDT*1min*.csv" -o -iname "*.csv" \) | head -n1 || true)
           fi
+          [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR} by ${CSV_GLOB}"; exit 1; }
+          echo "CSV_PATH=$cand" >> "$GITHUB_ENV"
+          echo "Detected CSV: $cand"
 
-      # --- 백테스트 실행
+      # --- Run backtest (경로 없으면 즉시 재탐색 후 사용) ---
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          CSV="${CSV_PATH}"; [ -f "$CSV" ] || CSV="${{ env.CSV_PATH }}"
+          CSV="${CSV_PATH}"
+          if [ ! -f "$CSV" ]; then
+            echo "CSV not found (${CSV}); fallback search…"
+            CSV=$(find "${GITHUB_WORKSPACE}/${DATA_DIR}" -type f -name "*.csv" | head -n1 || true)
+            [ -n "$CSV" ] && [ -f "$CSV" ] || { echo "❌ CSV still not found"; exit 1; }
+          fi
           echo "Using CSV_PATH=${CSV}"
           python3 run_4u.py --data_path "${CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}" --config "conf/config.yml"
           echo "---- gating debug ----"
           cat "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
           ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      # --- 결과 업로드 (pinned SHA)
+      # --- Upload artifacts (pinned SHA) ---
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
