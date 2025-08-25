@@ -1,4 +1,4 @@
-name: trade4v run (v3.3 + diagnostics)
+name: trade4v run (v3.3 + diagnostics, robust)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       H:           { description: "예측지평(분)", required: true, default: "15" }
       fee_bps:     { description: "수수료(bp)", required: true, default: "1.0" }
       slip_bps:    { description: "슬리피지(bp)", required: true, default: "0.5" }
-      ev_margin_bps: { description: "EV 마진(bp) (현재 v3.3에선 내부 미사용/예비)", required: true, default: "1.0" }
+      ev_margin_bps: { description: "EV 마진(bp) (예비)", required: true, default: "1.0" }
       K_day:       { description: "일별 Top-K 맵 (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
 
 jobs:
@@ -31,12 +31,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps (requirements.txt 없어도 동작)
+      # 3) Minimal deps (requirements.txt 없이 동작)
       - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
-          python -V
           python - <<'PY'
           import sys, subprocess
           subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade","pip","setuptools","wheel"])
@@ -44,22 +43,41 @@ jobs:
           subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
           PY
 
-      # 4) Unzip project (trade4v.zip -> ./trade4v)
-      - name: Unzip project
+      # 4) Unzip project (중첩 폴더 자동 평탄화)
+      - name: Unzip project (robust)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p __extracted
           if [ -f trade4v.zip ]; then
             unzip -o -q trade4v.zip -d __extracted
-            if [ -d __extracted/trade4v ]; then
-              rm -rf trade4v || true
-              mv __extracted/trade4v ./trade4v
+          fi
+          ROOT=""
+          for d in __extracted/trade4v __extracted ./trade4v . ; do
+            if [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
+            if [ -f "$d/run_4u.py" ]; then ROOT="$d"; break; fi
+            if [ -d "$d/trade4v" ] && [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
+          done
+          rm -rf trade4v || true
+          if [ -n "${ROOT}" ]; then
+            if [ -d "${ROOT}/trade4v" ]; then
+              mkdir -p trade4v
+              shopt -s dotglob
+              mv "${ROOT}/trade4v"/* trade4v/ || true
+            else
+              cp -r "${ROOT}" ./trade4v
             fi
           fi
-          test -d trade4v
+          if [ -d trade4v/trade4v ]; then
+            shopt -s dotglob
+            mv trade4v/trade4v/* trade4v/
+            rmdir trade4v/trade4v
+          fi
+          test -f trade4v/run_4u.py || { echo "run_4u.py not found after flatten"; ls -R; exit 2; }
+          echo "[OK] trade4v layout fixed:"
+          ls -al trade4v | head -n 80
 
-      # 5) Prepare data (CSV/ZIP 자동탐색 + 헤더 정규화)
+      # 5) 데이터 준비 (CSV/ZIP 자동탐색 + 헤더 정규화)
       - name: Prepare ETH 1m data
         shell: bash
         run: |
@@ -98,7 +116,7 @@ jobs:
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 6) Run backtest (v3.3, S1/S2/게이팅 포함)
+      # 6) 백테스트 실행 (경로 폴백 포함)
       - name: Run backtest (v3.3)
         shell: bash
         env:
@@ -113,17 +131,20 @@ jobs:
           SLIP:    ${{ inputs.slip_bps }}
           KDAY:    ${{ inputs.K_day }}
           OUT:     _out_4u
-          # 게이팅/QA 기본 설정(필요시 내부 수정)
           QTP: "0.90"
           QSL: "0.60"
-          OVERLAP_MODE: "cap"       # cap|pyramid|none
+          OVERLAP_MODE: "cap"     # cap|pyramid|none
           MAX_CONC: "2"
           MIN_GAP: "5"
-          STRICT_QA: "0"            # 0=경고만, 1=하드 실패
+          STRICT_QA: "0"          # 0=경고만, 1=하드 실패
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
-          python "trade4v/run_4u.py" \
+          PY=trade4v/run_4u.py
+          [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
+          [ -f "$PY" ] || { echo "run_4u.py not found"; ls -R; exit 2; }
+          echo "Using script: $PY"
+          python "$PY" \
             --data "$CSV" \
             --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
             --test_start "$TEST_S"   --test_end "$TEST_E" \
@@ -137,7 +158,7 @@ jobs:
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      # 6.5) Diagnostics (S1/S2/게이팅 리포트 자동 생성)
+      # 6.5) 진단 (S1/S2/게이팅 리포트 자동 생성)
       - name: Run diagnostics
         if: always()
         shell: bash
@@ -153,13 +174,13 @@ jobs:
               --metrics _out_4u/run/metrics_oos.json \
               --k_day "$KDAY" \
               --H "$H" || true
-            echo "diag_report.json:"
-            test -f "_out_4u/run/diag_report.json" && tail -n +1 "_out_4u/run/diag_report.json" | head -n 100 || true
+            echo "diag_report.json (head):"
+            test -f "_out_4u/run/diag_report.json" && head -n 100 "_out_4u/run/diag_report.json" || true
           else
             echo "WARN: preds_test.csv 미존재 → 진단 생략"
           fi
 
-      # 7) Upload outputs (pinned SHA)
+      # 7) 산출물 업로드 (pinned SHA)
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
