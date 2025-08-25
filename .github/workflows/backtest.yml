@@ -5,7 +5,7 @@ on:
       trade_zip:
         description: "Code ZIP filename at repo root"
         required: false
-        default: "trade_v1.0.5.zip"
+        default: "trade_v1.0.5_full.zip"
       data_zip:
         description: "Data ZIP filename at repo root"
         required: false
@@ -23,7 +23,7 @@ env:
   REPO_DIR: repo
   RUN_DIR:  tmp/trade
   DATA_DIR: tmp/data
-  TRADE_ZIP: trade_v1.0.5.zip
+  TRADE_ZIP: trade_v1.0.5_full.zip
   DATA_ZIP:  ETHUSDT_1min_2020_2025.zip
   CSV_GLOB:  "*ETHUSDT*1min*2020*2025*.csv"
 
@@ -46,9 +46,9 @@ jobs:
         run: |
           set -euo pipefail
           TZ="${{ github.event.inputs.trade_zip }}";   [ -n "$TZ" ] || TZ="${TRADE_ZIP}"
-          DZ="${{ github.event.inputs.data_zip }}";    [ -n "$DZ" ]  || DZ="${DATA_ZIP}"
-          CG="${{ github.event.inputs.csv_glob }}";    [ -n "$CG" ]  || CG="${CSV_GLOB}"
-          OD="${{ github.event.inputs.out_dir }}";     [ -n "$OD" ]  || OD="_out_4u/run"
+          DZ="${{ github.event.inputs.data_zip }}";    [ -n "$DZ" ] || DZ="${DATA_ZIP}"
+          CG="${{ github.event.inputs.csv_glob }}";    [ -n "$CG" ] || CG="${CSV_GLOB}"
+          OD="${{ github.event.inputs.out_dir }}";     [ -n "$OD" ] || OD="_out_4u/run"
           echo "TRADE_ZIP=$TZ"  >> "$GITHUB_ENV"
           echo "DATA_ZIP=$DZ"   >> "$GITHUB_ENV"
           echo "CSV_GLOB=$CG"   >> "$GITHUB_ENV"
@@ -68,19 +68,16 @@ jobs:
           echo "[config.yml head]"; sed -n '1,80p' "${RUN_DIR}/conf/config.yml" || true
           echo "[data dir]"; find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" | head -n 10
 
-      # ▶▶ Hotfix: 'gate' 컬럼을 디버깅 전에 생성하도록 1줄 삽입 (영구수정 전 임시패치)
-      - name: Hotfix runner (ensure df['gate'] exists before debug)
+      # ✅ Hotfix: 따옴표 문제 없는 sed로 'gate/score' 라인 주입
+      - name: Hotfix runner (ensure df['gate'] before debug)
         shell: bash
         run: |
           set -euo pipefail
           f="${RUN_DIR}/backtest/runner.py"
-          # '# Save debug' 라인 직후에 gate/score 컬럼 생성 라인 삽입
-          awk '{
-             print $0;
-             if ($0 ~ /# Save debug/ && !p) { print "    df["'"'"'score'"'"']=score_series; df["'"'"'gate'"'"']=gate"; p=1 }
-          }' "$f" > "${f}.patched"
-          mv "${f}.patched" "$f"
-          grep -n "df\\['gate'\\]" -n "$f" | head -n 2
+          # '# Save debug' 다음 줄에 삽입 (따옴표는 모두 큰따옴표 사용)
+          sed -i '/# Save debug/a\    df["score"]=score_series; df["gate"]=gate' "$f"
+          # 주입 확인
+          grep -n 'df\["gate"\]=gate' "$f" | head -n 1
 
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
