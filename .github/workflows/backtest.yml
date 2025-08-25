@@ -42,7 +42,6 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      # --- pinned SHAs (org 보안정책 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
@@ -70,7 +69,7 @@ jobs:
           echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
           echo "Using CSV: ${CAND[0]}"
 
-      - name: Setup Python (pinned, cache points to tmp/trade)
+      - name: Setup Python (pinned, cache to tmp/trade)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
@@ -91,6 +90,8 @@ jobs:
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
+          # ✅ ensure PyYAML for engine.py
+          python -c 'import yaml' 2>/dev/null || python -m pip install pyyaml
 
       - name: Fingerprint check (warn-only)
         shell: bash
