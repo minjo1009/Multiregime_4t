@@ -1,4 +1,4 @@
-name: trade4v run (v3.3 + diagnostics, robust + hotfix)
+name: trade4v run (v3.3 • robust + diagnostics + full hotfix)
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps (requirements.txt 없이 동작)
+      # 3) Minimal deps
       - name: Install deps (minimal)
         shell: bash
         run: |
@@ -116,7 +116,7 @@ jobs:
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 5.5) Hotfix: pandas.cut 중복 라벨 허용(ordered=False)
+      # 5.5) Hotfix 1: pandas.cut 중복 라벨 허용(ordered=False)
       - name: Hotfix pandas cut labels (ordered=False)
         shell: bash
         run: |
@@ -127,10 +127,85 @@ jobs:
           if ! grep -q "ordered=False" "$F"; then
             sed -i 's/include_lowest=True)/include_lowest=True, ordered=False)/' "$F"
           fi
-          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed to apply"; sed -n '1,140p' "$F"; exit 2; }
-          echo "[OK] hotfix applied"
+          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed to apply"; sed -n '1,180p' "$F"; exit 2; }
+          echo "[OK] utils.py hotfix applied"
 
-      # 6) 백테스트 실행 (경로 폴백 포함)
+      # 5.6) Hotfix 2: range_model 인덱스-안전 + no-bfill + run_4u NaN-safe
+      - name: Hotfix (index-safe range + no-bfill labels + NaN-safe trading)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # (A) range_model: index-safe apply_quantile_tables + no-bfill(min_periods=H)
+          F1="trade4v/trend4p/range_model.py"
+          test -f "$F1" || { echo "[ERR] $F1 not found"; ls -R; exit 2; }
+          python - "$F1" <<'PY'
+          import sys, re, pathlib
+          p = pathlib.Path(sys.argv[1])
+          s = p.read_text(encoding='utf-8')
+
+          # 1) make_range_targets: rolling(H, min_periods=H).sum().shift(-H)  (채우기 없음)
+          s = re.sub(
+              r"def\\s+make_range_targets\\s*\\(.*?\\)\\s*:\\n(?:.*?\\n)*?return\\s+r\\..*",
+              "def make_range_targets(df, H):\n    import pandas as pd\n    r = pd.Series(df['ret1']).abs().rolling(H, min_periods=H).sum().shift(-H)\n    return r.values",
+              s, flags=re.S
+          )
+
+          # 2) apply_quantile_tables: 인덱스 정렬형 할당(라벨-안전)
+          pat = r"def\\s+apply_quantile_tables\\s*\\(.*?\\)\\s*:\\n(?:.*?\\n)*?(?=^def\\s|^class\\s|\\Z)"
+          repl = '''
+def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regime_id'), eps=1e-6):
+    import numpy as np, pandas as pd
+    tp = pd.Series(eps, index=df.index, dtype=float)
+    sl = pd.Series(eps, index=df.index, dtype=float)
+    g = df.groupby(list(key_cols), dropna=False)
+    for key, gd in g:
+        tab = tables.get(key, None)
+        if tab is None:
+            v = gd['vol'].clip(lower=eps).values
+            tp.loc[gd.index] = v
+            sl.loc[gd.index] = v
+        else:
+            med = float(np.nanmedian(gd['vol'].values)) if len(gd)>0 else eps
+            tp_val = max(float(tab.get(q_tp, med)), eps)
+            sl_val = max(float(tab.get(q_sl, med)), eps)
+            tp.loc[gd.index] = tp_val
+            sl.loc[gd.index] = sl_val
+    return tp.values, sl.values
+'''.lstrip("\n")
+          s, n = re.subn(pat, repl, s, flags=re.M|re.S)
+          if n == 0:
+              print("[ERR] apply_quantile_tables pattern not found"); sys.exit(2)
+
+          p.write_text(s, encoding='utf-8')
+          print("[OK] range_model patched (index-safe + no-bfill).")
+          PY
+
+          # (B) run_4u: train은 NaN 레이블 드랍, test는 cand=valid
+          F2="trade4v/run_4u.py"
+          test -f "$F2" || { echo "[ERR] $F2 not found"; ls -R; exit 2; }
+          python - "$F2" <<'PY'
+          import pathlib
+          p = pathlib.Path("trade4v/run_4u.py")
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+              "tr = df[(df['time']>=pd.Timestamp(args.train_start, tz='UTC')) & (df['time']<=pd.Timestamp(args.train_end, tz='UTC'))].copy()",
+              "tr = df[(df['time']>=pd.Timestamp(args.train_start, tz='UTC')) & (df['time']<=pd.Timestamp(args.train_end, tz='UTC'))].copy()\n    tr = tr[tr['fret'].notna()].copy()"
+          )
+          s = s.replace(
+              "te['cand'] = 1; te['H_row'] = args.H",
+              "te['cand'] = te['fret'].notna().astype(int); te['H_row'] = args.H"
+          )
+          s = s.replace(
+              "te['realized_gross'] = te['fret'] * te['entry_flag']",
+              "te['realized_gross'] = te['fret'].fillna(0.0) * te['entry_flag']"
+          )
+
+          p.write_text(s, encoding='utf-8')
+          print("[OK] run_4u patched (drop NaN in train, cand=valid in test).")
+          PY
+
+      # 6) 백테스트 실행
       - name: Run backtest (v3.3)
         shell: bash
         env:
@@ -173,7 +248,7 @@ jobs:
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      # 6.5) 진단 (S1/S2/게이팅 리포트 자동 생성)
+      # 6.5) Diagnostics
       - name: Run diagnostics
         if: always()
         shell: bash
@@ -195,7 +270,7 @@ jobs:
             echo "WARN: preds_test.csv 미존재 → 진단 생략"
           fi
 
-      # 7) 산출물 업로드 (pinned SHA)
+      # 7) 산출물 업로드
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
