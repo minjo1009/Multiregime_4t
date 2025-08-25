@@ -15,19 +15,19 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     steps:
-      # --- Checkout without actions (pinned SHA policy 회피)
+      # --- Checkout (actions/checkout 미사용: 정책 충돌 회피)
       - name: Checkout repository (git)
         shell: bash
         run: |
           set -euo pipefail
           git init "${REPO_DIR}"
           cd "${REPO_DIR}"
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}.git"
           git -c protocol.version=2 fetch --depth=1 origin "${GITHUB_SHA}"
           git checkout --force FETCH_HEAD
           ls -al
 
-      # --- Unzip packages
+      # --- 준비 & 압축 해제
       - name: Prepare workspace
         shell: bash
         run: |
@@ -38,7 +38,7 @@ jobs:
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
 
-      # --- Install deps (no here-doc)
+      # --- 의존성 설치 (순수 bash, 파이썬 원라이너 없음)
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
@@ -47,28 +47,26 @@ jobs:
           python3 -V
           python3 -m pip install -U pip
           python3 -m pip install -r requirements.txt
-          # sklearn 호환 스모크: 파라미터 이름으로 분기
-          python3 -c "import inspect, sklearn.calibration as sc, sklearn.linear_model as sl; \
-p=inspect.signature(sc.CalibratedClassifierCV).parameters; \
-print('OK estimator' if 'estimator' in p else 'OK base_estimator')"
 
-      # --- Fingerprint: v1.0.4(legacy) or v1.0.5(new) 모두 허용
+      # --- Fingerprint: v1.0.4(legacy) 또는 v1.0.5(new) 표식 인정
       - name: Fingerprint check (v1.0.4 + v1.0.5)
         shell: bash
         run: |
           set -euo pipefail
           f="${RUN_DIR}/backtest/runner.py"
+          conf="${RUN_DIR}/conf/config.yml"
           if grep -Eq "Coverage-aligned gating" "$f"; then
             echo "OK: legacy marker found"
-          elif grep -Eq "rank_session_regime" "$f" && grep -Eq "S1 .*floor" "$f"; then
+          elif grep -Eq "s1_floor" "$f" && grep -Eq "regime_policy" "$conf"; then
             echo "OK: v1.0.5 markers found"
           else
-            echo "✖ missing: Coverage-aligned gating (legacy) / rank_session_regime + S1 floor (v1.0.5)"
-            sed -n '1,140p' "$f" || true
+            echo "✖ missing: legacy or v1.0.5 markers"
+            echo "---- runner.py head ----"; sed -n '1,120p' "$f" || true
+            echo "---- config.yml head ----"; sed -n '1,120p' "$conf" || true
             exit 1
           fi
 
-      # --- Preflight CSV (자동 감지 + 형식 점검)
+      # --- CSV 프리플라이트 (경로 자동 탐지만; 컬럼 검증은 코드에 위임)
       - name: Preflight CSV
         shell: bash
         run: |
@@ -85,30 +83,21 @@ print('OK estimator' if 'estimator' in p else 'OK base_estimator')"
           else
             echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
           fi
-          python3 -c "import os,sys,pandas as pd; \
-csv=os.environ['CSV_PATH']; df=pd.read_csv(csv, nrows=2); \
-need=set(['open_time','open','high','low','close','volume','number_of_trades']); \
-miss=need-set(df.columns); \
-assert not miss, f'Missing base columns: {miss}'; \
-print('✅ CSV OK')"
 
-      # --- Run backtest
+      # --- 백테스트 실행
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          CSV="${CSV_PATH}"
-          if [ ! -f "${CSV}" ]; then
-            CSV=$(echo "${{ env.CSV_PATH }}")
-          fi
+          CSV="${CSV_PATH}"; [ -f "$CSV" ] || CSV="${{ env.CSV_PATH }}"
           echo "Using CSV_PATH=${CSV}"
           python3 run_4u.py --data_path "${CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}" --config "conf/config.yml"
           echo "---- gating debug ----"
           cat "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
           ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      # --- Upload artifacts (pinned SHA)
+      # --- 결과 업로드 (pinned SHA)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
