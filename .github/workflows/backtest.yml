@@ -27,14 +27,12 @@ on:
         description: fail if fingerprint missing (true/false)
         required: true
         default: "false"
-  # 이 파일을 수정해서 push될 때는 "스킵"으로 넘김(그래프 없다고 Failure 찍히는 것 방지)
   push:
     paths:
       - ".github/workflows/backtest.yml"
 
 jobs:
   run-backtest:
-    # 수동 실행에서만 잡이 돌게 한다. (push로는 스킵)
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
 
@@ -49,7 +47,6 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      # --- pinned SHAs (org 보안정책 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
 
@@ -58,12 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP} (put it at repo root)"; exit 1; }
-          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP} (put it at repo root)"; exit 1; }
+          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP}"; exit 1; }
+          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "== data sample =="
-          find "${DATA_DIR}" -type f -name "*.csv" | head -n 8 || true
+          echo "== data sample =="; find "${DATA_DIR}" -type f -name "*.csv" | head -n 8 || true
 
       - name: Detect CSV (robust)
         shell: bash
@@ -82,7 +78,7 @@ jobs:
           echo "Using CSV: ${CSV_PATH}"
           ls -al "$(dirname "$CSV_PATH")" || true
 
-      - name: Setup Python (pinned; cache points to tmp/trade)
+      - name: Setup Python (pinned; cache to tmp/trade)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: ${{ env.PYVER }}
@@ -105,6 +101,20 @@ jobs:
           fi
           # ensure PyYAML (engine.py uses `import yaml`)
           python -c "import yaml" 2>/dev/null || python -m pip install pyyaml
+
+      # ✅ NEW: np 가드 – np.를 쓰는데 import가 없으면 자동 주입
+      - name: Guard numpy import (auto-inject if missing)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          # np.를 사용하는 모든 파이썬 파일에 import numpy as np 보장
+          mapfile -t FILES < <(grep -RIl --include="*.py" "np\." . || true)
+          for f in "${FILES[@]}"; do
+            grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$f" || sed -i '1i import numpy as np' "$f"
+          done
+          # (옵션) 로컬 재할당 경고 출력만
+          grep -RIn --include="*.py" '^[[:space:]]*np[[:space:]]*=' . || true
 
       - name: Fingerprint check (warn-only)
         shell: bash
