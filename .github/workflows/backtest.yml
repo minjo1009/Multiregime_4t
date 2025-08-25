@@ -4,7 +4,7 @@ on:
 
 env:
   REPO_DIR: repo
-  TRADE_ZIP: trade_v1.0.5_full.zip        # 레포 루트의 코드 zip (이름 꼭 확인)
+  TRADE_ZIP: trade_v1.0.5.zip        # 레포 루트의 코드 zip (이름 꼭 확인)
   DATA_ZIP:  ETHUSDT_1min_2020_2025.zip   # 레포 루트의 데이터 zip
   RUN_DIR:   tmp/trade
   DATA_DIR:  tmp/data
