@@ -42,7 +42,6 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      # ---- pinned SHAs (org 보안 정책 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
@@ -55,18 +54,15 @@ jobs:
           test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "== data sample =="
-          find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
+          echo "== data sample =="; find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
 
       - name: Detect code root (find backtest/engine.py)
         shell: bash
         run: |
           set -euo pipefail
-          # backtest/engine.py 가 들어있는 경로를 탐색
           found=$(find "${RUN_DIR}" -type f -path "*/backtest/engine.py" | head -n1 || true)
           if [ -z "$found" ]; then
             echo "❌ not found: backtest/engine.py under ${RUN_DIR}"
-            echo "== list RUN_DIR =="
             find "${RUN_DIR}" -maxdepth 3 -type d -print
             exit 1
           fi
@@ -88,7 +84,7 @@ jobs:
           echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
           echo "Using CSV: ${CAND[0]}"
 
-      - name: Setup Python (pinned, cache points to CODE_DIR)
+      - name: Setup Python (pinned, cache to CODE_DIR)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
@@ -109,6 +105,7 @@ jobs:
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
+          python -m pip install "pyyaml>=6.0.1"
 
       - name: Fingerprint check (warn-only)
         shell: bash
