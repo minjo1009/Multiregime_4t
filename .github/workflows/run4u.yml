@@ -1,154 +1,118 @@
-name: trade4v run (v3.3.5-robust)
+name: trade4v run (v3.3.5-robust • dispatch-only)
 
 on:
   workflow_dispatch:
     inputs:
-      data_csv:
-        description: 'CSV 경로 (예: data/ETHUSDT_1min_2020_2025.csv)'
-        required: false
-        default: 'data/*.csv'
-      train_start:
-        description: '학습 시작 (YYYY-MM-DD HH:MM:SS)'
-        required: false
-        default: '2025-01-01 00:00:00'
-      train_end:
-        description: '학습 끝'
-        required: false
-        default: '2025-04-30 23:59:00'
-      test_start:
-        description: '테스트 시작'
-        required: false
-        default: '2025-05-01 00:00:00'
-      test_end:
-        description: '테스트 끝'
-        required: false
-        default: '2025-06-30 23:59:00'
-      H:
-        description: 'H (분)'
-        required: false
-        default: '15'
-      fee_bps:
-        description: '수수료(bps)'
-        required: false
-        default: '1.0'
-      slip_bps:
-        description: '슬리피지(bps)'
-        required: false
-        default: '0.5'
-      k_day:
-        description: 'Top-K(일단위): 예 0:10,1:15,2:30'
-        required: false
-        default: '0:10,1:15,2:30'
-      strict_qa:
-        description: '품질검사 강제(0=완화, 1=강제)'
-        required: false
-        default: '0'
-  push:
-    branches: [ main ]
-    paths:
-      - 'trade4v/**'
-      - '.github/workflows/run4u.yml'
-      - 'data/**'
+      data_csv:   { default: 'data/*.csv' }
+      train_start:{ default: '2025-01-01 00:00:00' }
+      train_end:  { default: '2025-04-30 23:59:00' }
+      test_start: { default: '2025-05-01 00:00:00' }
+      test_end:   { default: '2025-06-30 23:59:00' }
+      H:          { default: '15' }
+      fee_bps:    { default: '1.0' }
+      slip_bps:   { default: '0.5' }
+      k_day:      { default: '0:10,1:15,2:30' }
+      strict_qa:  { default: '0' }
 
 permissions:
   contents: read
 
 jobs:
   backtest:
-    name: Run trade4v (v3.3.5)
     runs-on: ubuntu-latest
-
     steps:
-      # 1) Checkout (SHA 고정)
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab0f6f9c3f8b7497d1e5d00bbc
 
-      # 2) Python 셋업 (SHA 고정)
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: '3.11'
+        with: { python-version: '3.11' }
 
-      # 3) 안전 셸 + 작업 폴더 준비
-      - name: Preflight
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p _out_4u/run __extracted
-          echo "GITHUB_SHA=$GITHUB_SHA"
-          echo "Workspace:"
-          ls -al
-
-      # 4) zip(있으면) 강제 풀기 + 경로 자동탐색
-      - name: Unzip project (if zip exists)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # 동일 파일 여러 번 있을 수 있어도 -o 로 무조건 덮어쓰기, 프롬프트 금지
-          if ls *.zip 1>/dev/null 2>&1; then
-            unzip -o -q "*.zip" -d __extracted || true
-          fi
-          # run_4u.py 탐색
-          RUNPY=$(find __extracted -path "*/trade4v/run_4u.py" -print -quit || true)
-          if [ -n "${RUNPY:-}" ]; then
-            echo "Found run_4u.py at: $RUNPY"
-            rsync -a --ignore-existing __extracted/ ./ || true
-          fi
-          # trade4v 폴더가 없으면 실패 처리 (즉시 실패 > 0초 실패 방지)
-          test -f trade4v/run_4u.py || { echo "FATAL: trade4v/run_4u.py not found"; exit 2; }
-
-      # 5) 의존성(있으면 설치, 없으면 건너뛰기) — 파일 부재로 즉시 실패 방지
       - name: Install deps (soft)
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-          else
-            echo "requirements.txt 없음 → 표준 라이브러리/판다스 기본 설치"
-            python -m pip install --upgrade pip
-            pip install pandas pyarrow numpy scipy
-          fi
+          python -m pip install -q --upgrade pip
+          pip install -q pandas pyarrow numpy scipy scikit-learn statsmodels
 
-      # 6) 데이터 준비: CSV 자동 탐색 + 헤더 표준화
+      - name: Unzip project (robust)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p __extracted
+          if ls *.zip 1>/dev/null 2>&1; then unzip -o -q "*.zip" -d __extracted || true; fi
+          ROOT=""
+          for d in __extracted/trade4v __extracted ./trade4v . ; do
+            if [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
+            if [ -f "$d/run_4u.py" ]; then ROOT="$d"; break; fi
+          done
+          rm -rf trade4v || true
+          if [ -n "${ROOT}" ]; then
+            [ -d "${ROOT}/trade4v" ] && { mkdir -p trade4v; shopt -s dotglob; mv "${ROOT}/trade4v"/* trade4v/; } || cp -r "${ROOT}" trade4v
+          fi
+          [ -d trade4v/trade4v ] && { shopt -s dotglob; mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v; } || true
+          test -f trade4v/run_4u.py || { echo "FATAL: trade4v/run_4u.py not found"; exit 2; }
+          ls -al trade4v | head -n 60
+
       - name: Prepare ETH 1m data
         id: prep
         shell: bash
         run: |
           set -euo pipefail
-          CSV_IN="${{ github.event.inputs.data_csv }}"
-          # 패턴이면 첫 번째만
-          if [[ "$CSV_IN" == *"*"* ]]; then
-            CSV=$(ls -1 $CSV_IN | head -n1 || true)
-          else
-            CSV="$CSV_IN"
-          fi
-          if [ -z "${CSV:-}" ] || [ ! -f "$CSV" ]; then
-            echo "FATAL: CSV not found (got: ${CSV:-})"
-            exit 3
-          fi
+          CSV_IN='${{ inputs.data_csv }}'
+          if [[ "$CSV_IN" == *"*"* ]]; then CSV=$(ls -1 $CSV_IN 2>/dev/null | head -n1 || true); else CSV="$CSV_IN"; fi
+          if [ -z "${CSV:-}" ] || [ ! -f "$CSV" ]; then echo "FATAL: CSV not found"; exit 3; fi
           echo "Using CSV: $CSV"
-          # open_time -> time 표준화 (존재 시만)
-          python - <<'PY'
-import pandas as pd
-import sys
-import pyarrow as pa, pyarrow.parquet as pq
-import os
-csv = os.environ.get("CSV")
-df  = pd.read_csv(csv)
-if 'open_time' in df.columns and 'time' not in df.columns:
-    df = df.rename(columns={'open_time':'time'})
-# 최소 컬럼 존재 체크
-need = {'time','open','high','low','close'}
-if not need.issubset(set(map(str.lower, df.columns))):
-    pass
-df.to_csv('normalized.csv', index=False)
+          python - "$CSV" <<'PY'
+import pandas as pd, os, sys
+p=sys.argv[1]; df=pd.read_csv(p)
+rn={}
+for k in list(df.columns):
+    kl=k.strip().lower()
+    if kl in ("open time","opentime","time","timestamp"): rn[k]="open_time"
+    elif kl in ("close","close price","price"): rn[k]="close"
+    elif kl in ("volume","vol"): rn[k]="volume"
+    elif kl in ("open","high","low"): rn[k]=kl
+if rn: df=df.rename(columns=rn)
+assert "open_time" in df.columns, "open_time missing"
+df.to_csv("normalized.csv", index=False)
 print("normalized.csv written", len(df))
 PY
           echo "csv=normalized.csv" >> $GITHUB_OUTPUT
 
-      # 7) 백테스트 실행 (커버리지 경고 완화 옵션 포함)
+      - name: Hotfix: pandas.cut labels & index-safe range
+        shell: bash
+        run: |
+          set -euo pipefail
+          F="trade4v/trend4p/utils.py"
+          [ -f "$F" ] && sed -i 's/labels=\[0,1,2,2\], include_lowest=True)/labels=[0,1,2,2], include_lowest=True, ordered=False)/' "$F" || true
+          F1="trade4v/trend4p/range_model.py"
+          if [ -f "$F1" ]; then
+            python - "$F1" <<'PY'
+import sys, re, pathlib
+p=pathlib.Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+s=re.sub(r"def\s+make_range_targets\s*\(.*?\)\s*:\n(?:.*?\n)*?return\s+r\..*",
+         "def make_range_targets(df,H):\n import pandas as pd\n r=pd.Series(df['ret1']).abs().rolling(H,min_periods=H).sum().shift(-H)\n return r.values", s, flags=re.S)
+pat=r"def\s+apply_quantile_tables\s*\(.*?\)\s*:\n(?:.*?\n)*?(?=^def\s|^class\s|\Z)"
+repl='''def apply_quantile_tables(df,tables,q_tp=0.9,q_sl=0.6,key_cols=('sess','regime_id'),eps=1e-6):
+ import numpy as np, pandas as pd
+ tp=pd.Series(eps,index=df.index,dtype=float); sl=pd.Series(eps,index=df.index,dtype=float)
+ for key,gd in df.groupby(list(key_cols),dropna=False):
+  tab=tables.get(key)
+  if tab is None:
+   v=gd['vol'].clip(lower=eps).values; tp.loc[gd.index]=v; sl.loc[gd.index]=v
+  else:
+   med=float(np.nanmedian(gd['vol'].values)) if len(gd)>0 else eps
+   tp.loc[gd.index]=max(float(tab.get(0.9,med)),eps)
+   sl.loc[gd.index]=max(float(tab.get(0.6,med)),eps)
+ return tp.values, sl.values
+'''
+s, n = re.subn(pat, repl, s, flags=re.M|re.S); 
+p.write_text(s, encoding='utf-8')
+print("[OK] patched range_model")
+PY
+          fi
+
       - name: Run backtest
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
@@ -157,27 +121,21 @@ PY
           OVERLAP_MODE: "cap"
           MAX_CONC: "2"
           MIN_GAP: "5"
-          STRICT_QA: ${{ github.event.inputs.strict_qa }}
+          STRICT_QA: ${{ inputs.strict_qa }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "Using script: trade4v/run_4u.py"
-          python --version
           python "trade4v/run_4u.py" \
             --data "${{ steps.prep.outputs.csv }}" \
-            --train_start "${{ github.event.inputs.train_start }}" \
-            --train_end   "${{ github.event.inputs.train_end }}" \
-            --test_start  "${{ github.event.inputs.test_start }}" \
-            --test_end    "${{ github.event.inputs.test_end }}" \
-            --H "${{ github.event.inputs.H }}" \
-            --fee_bps "${{ github.event.inputs.fee_bps }}" \
-            --slip_bps "${{ github.event.inputs.slip_bps }}" \
-            --k_day "${{ github.event.inputs.k_day }}" \
+            --train_start "${{ inputs.train_start }}" --train_end "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}"  --test_end  "${{ inputs.test_end }}" \
+            --H "${{ inputs.H }}" \
+            --fee_bps "${{ inputs.fee_bps }}" --slip_bps "${{ inputs.slip_bps }}" \
+            --k_day "${{ inputs.k_day }}" \
             --out_dir "_out_4u" || true
-          # 실패해도 진단은 계속
+          ls -al _out_4u || true; ls -al _out_4u/run || true
 
-      # 8) 진단 번들 생성(가능할 때만)
-      - name: Run diagnostics
+      - name: Diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -185,14 +143,12 @@ PY
             python -m trade4v.diag.run_diag \
               --preds "_out_4u/preds_test.csv" \
               --metrics "_out_4u/metrics_oos.json" \
-              --k_day "${{ github.event.inputs.k_day }}" \
-              --H "${{ github.event.inputs.H }}" || true
-            test -f "_out_4u/run/diag_report.json" && tail -n +1 "_out_4u/run/diag_report.json" | head -n 200 || true
+              --k_day "${{ inputs.k_day }}" \
+              --H "${{ inputs.H }}" || true
           else
-            echo "WARN: preds_test.csv 미생성 → 진단 생략"
+            echo "WARN: preds_test.csv 없음 → 진단 생략"
           fi
 
-      # 9) 산출물 업로드 (SHA 고정)
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
