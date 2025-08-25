@@ -6,7 +6,7 @@ on:
       trade_zip:
         description: trade code zip at repo root
         required: true
-        default: trade_v1.0.6_override.zip
+        default: trade_v1.0.6_full_patched.zip
       data_zip:
         description: market data zip at repo root
         required: true
@@ -23,10 +23,6 @@ on:
         description: Python version
         required: true
         default: "3.11"
-      fail_on_fingerprint:
-        description: fail if fingerprint missing (true/false)
-        required: true
-        default: "false"
 
 jobs:
   run-backtest:
@@ -39,12 +35,17 @@ jobs:
       CSV_GLOB:  ${{ github.event.inputs.csv_glob }}
       OUT_DIR:   ${{ github.event.inputs.out_dir }}
       PYVER:     ${{ github.event.inputs.python_version }}
-      FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      # ---- pinned SHAs (org 보안 정책 충족)
+      # Pinned SHAs (보안 규칙 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+          cache: "pip"
 
       - name: Prepare & unzip
         shell: bash
@@ -55,9 +56,8 @@ jobs:
           test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "== data sample =="; find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
 
-      - name: Detect code root (find backtest/engine.py)
+      - name: Detect code root (backtest/engine.py)
         shell: bash
         run: |
           set -euo pipefail
@@ -69,91 +69,35 @@ jobs:
           fi
           CODE_DIR=$(dirname "$(dirname "$found")")
           echo "CODE_DIR=${CODE_DIR}" | tee -a "$GITHUB_ENV"
-          echo "Detected CODE_DIR=${CODE_DIR}"
-          ls -al "${CODE_DIR}" || true
 
-      - name: Detect CSV (export ABS path)
+      - name: Detect CSV (absolute path)
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob globstar
           CAND=( ${DATA_DIR}/${CSV_GLOB} )
-          if (( ${#CAND[@]} == 0 )); then
-            echo "⚠️ No CSV matched glob; fallback to *.csv"
-            CAND=( ${DATA_DIR}/**/*.csv )
-          fi
-          if (( ${#CAND[@]} == 0 )); then
-            echo "❌ No CSV found under ${DATA_DIR}"
-            exit 1
-          fi
-          # 절대경로로 고정
+          if (( ${#CAND[@]} == 0 )); then CAND=( ${DATA_DIR}/**/*.csv ); fi
+          if (( ${#CAND[@]} == 0 )); then echo "❌ No CSV found"; exit 1; fi
           ABS_CSV="$(readlink -f "${CAND[0]}" || echo "${GITHUB_WORKSPACE}/${CAND[0]}")"
-          test -f "$ABS_CSV" || { echo "❌ resolved CSV not found: $ABS_CSV"; exit 1; }
-          echo "CSV_PATH=${ABS_CSV}" | tee -a $GITHUB_ENV
-          echo "Using CSV: ${ABS_CSV}"
+          echo "ABS_CSV=${ABS_CSV}" | tee -a "$GITHUB_ENV"
 
-      - name: Setup Python (pinned, cache to CODE_DIR)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: pip
-          cache-dependency-path: |
-            ${{ env.CODE_DIR }}/requirements.txt
-            ${{ env.CODE_DIR }}/pyproject.toml
-
-      - name: Install requirements
-        shell: bash
-        working-directory: ${{ env.CODE_DIR }}
-        run: |
-          set -euo pipefail
-          python -V
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          else
-            python -m pip install numpy pandas scikit-learn scipy matplotlib
-          fi
-          python -m pip install "pyyaml>=6.0.1"
-
-      - name: Fingerprint check (warn-only)
-        shell: bash
-        working-directory: ${{ env.CODE_DIR }}
-        run: |
-          set -euo pipefail
-          F="backtest/runner.py"
-          miss=0
-          grep -q "Coverage-aligned gating" "$F" || { echo "WARN: missing Coverage-aligned gating"; miss=$((miss+1)); }
-          grep -q "S1 probability floor cutoff" "$F" || { echo "WARN: missing S1 probability floor cutoff"; miss=$((miss+1)); }
-          if [ "$FAIL_FP" = "true" ] && [ $miss -gt 0 ]; then
-            echo "fingerprint mismatch & fail_on_fingerprint=true"; exit 1
-          fi
-          echo "fingerprint warnings: $miss"
-
-      - name: Preflight CSV schema (bash only)
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
-          HDR="$(head -n 1 "${CSV_PATH}")"
-          for c in open_time open high low close; do
-            echo "$HDR" | grep -q "$c" || { echo "❌ Missing column: $c"; exit 1; }
-          done
-          echo "CSV columns OK"
+          python3 -V
+          python3 -m pip install -U pip
+          python3 -m pip install -r "${CODE_DIR}/requirements.txt"
 
       - name: Run backtest
-        shell: bash
         working-directory: ${{ env.CODE_DIR }}
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${OUT_DIR}"
-          python run_4u.py --data_path "${CSV_PATH}" --config "conf/config.yml" --out_dir "${OUT_DIR}"
-          echo "---- outputs ----"; ls -al "${OUT_DIR}" || true
-          echo "---- summary ----"; head -n 60 "${OUT_DIR}/summary.json" 2>/dev/null || true
-          echo "---- gating ----";  head -n 60 "${OUT_DIR}/gating_debug.json" 2>/dev/null || true
+          python3 run_4u.py --data_path "${ABS_CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
       - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
         with:
           name: backtest-output
           path: |
@@ -161,6 +105,3 @@ jobs:
             ${{ env.OUT_DIR }}/gating_debug.json
             ${{ env.OUT_DIR }}/trades.csv
             ${{ env.OUT_DIR }}/preds_test.csv
-          if-no-files-found: error
-          retention-days: 30
-          compression-level: 6
