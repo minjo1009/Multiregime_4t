@@ -1,154 +1,98 @@
 name: backtest
 
 on:
-  workflow_dispatch: {}
-  push:
-    paths:
-      - ".github/workflows/scalper_backtest.yml"
-      - "eth_scalp_trader_pack_v0_1.zip"
-      - "ETHUSDT_1min_2020_2025.zip"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  run:
+  backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout (pinned)
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
-        with:
-          fetch-depth: 1
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Setup Python 3.11 (pinned)
+      - name: Setup Python 3.11 (pinned) + pip cache
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
-          cache: "pip"
-          cache-dependency-path: |
-            eth_scalp_trader_pack_v0_1/requirements.txt
+          cache: pip
+          cache-dependency-path: eth_scalp_trader_pack_v0_1/requirements.txt
 
-      - name: Show repo root
+      - name: Prepare code & data
+        shell: bash
         run: |
-          ls -lah
-          echo "---------------"
+          set -euxo pipefail
+          # unzip availability (usually present on ubuntu-latest)
+          if ! command -v unzip >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y unzip
+          fi
 
-      # ====== 언집 & 폴더 정리 ======
-      - name: Unzip code pack
-        run: |
-          set -euo pipefail
-          mkdir -p unzipped
-          # 코드팩 unzip
-          unzip -o "eth_scalp_trader_pack_v0_1.zip" -d unzipped
-          # 최상단에 폴더가 하나 있는/없는 경우 모두 대응
-          CODE_DIR=$(python - <<'PY'
+          mkdir -p unzipped eth_scalp_trader_pack_v0_1/data
+
+          # 1) Unzip code pack if the folder isn't already in repo
+          if [ -f "eth_scalp_trader_pack_v0_1.zip" ]; then
+            unzip -q -o eth_scalp_trader_pack_v0_1.zip -d unzipped
+          fi
+          # find inner folder named exactly eth_scalp_trader_pack_v0_1 (nested zip-safe)
+          if [ ! -d "eth_scalp_trader_pack_v0_1/core" ]; then
+            packdir="$(find unzipped -maxdepth 2 -type d -name 'eth_scalp_trader_pack_v0_1' | head -n1 || true)"
+            test -n "${packdir}" || { echo "❌ code pack not found under unzipped/"; ls -R unzipped || true; exit 2; }
+            mkdir -p eth_scalp_trader_pack_v0_1
+            cp -R "${packdir}/." "eth_scalp_trader_pack_v0_1/"
+          fi
+
+          # 2) Unzip ETH 1m data and normalize to expected filename
+          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
+            unzip -q -o ETHUSDT_1min_2020_2025.zip -d unzipped
+          fi
+          csv="$(find unzipped -type f \( -iname 'ETHUSDT*1m*.csv' -o -iname 'ETH*1min*.csv' \) | head -n1 || true)"
+          if [ -z "${csv}" ] && [ -f "ETHUSDT_1min_2020_2025.csv" ]; then
+            csv="ETHUSDT_1min_2020_2025.csv"
+          fi
+          test -n "${csv}" || { echo "❌ ETH 1m CSV not found"; ls -R unzipped || true; exit 2; }
+          cp -f "${csv}" "eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv"
+
+          # Sanity checks
+          python - <<'PY'
 import os, sys
-root="unzipped"
-candidates=[]
-for d in os.listdir(root):
-    p=os.path.join(root,d)
-    if os.path.isdir(p) and "eth_scalp_trader_pack_v0_1" in d:
-        candidates.append(p)
-# 폴더명이 정확히 맞지 않아도 eth_scalp_trader_pack_v0_1를 포함하면 채택
-candidates = sorted(candidates, key=len)
-print(candidates[0] if candidates else "")
+assert os.path.exists('eth_scalp_trader_pack_v0_1/config.yml'), "config.yml missing"
+assert os.path.exists('eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv'), "CSV missing"
+print("✅ inputs ready")
 PY
-)
-          if [ -z "$CODE_DIR" ]; then
-            # 폴더명이 예상과 다를 때: 최상단에 파이썬 소스가 있는 폴더를 찾음
-            CODE_DIR=$(find unzipped -maxdepth 2 -type d -name "core" -printf "%h\n" | head -n1)
-          fi
-          test -n "$CODE_DIR"
-          echo "CODE_DIR=$CODE_DIR"
-          # 워크 트리로 이동
-          rm -rf eth_scalp_trader_pack_v0_1
-          cp -R "$CODE_DIR" eth_scalp_trader_pack_v0_1
-          # 가끔 zip 안에 동일명 상위폴더가 또 들어있는 이중구조 방지
-          if [ -d eth_scalp_trader_pack_v0_1/eth_scalp_trader_pack_v0_1 ]; then
-            rsync -a eth_scalp_trader_pack_v0_1/eth_scalp_trader_pack_v0_1/ eth_scalp_trader_pack_v0_1_clean/
-            rm -rf eth_scalp_trader_pack_v0_1
-            mv eth_scalp_trader_pack_v0_1_clean eth_scalp_trader_pack_v0_1
-          fi
-          echo "== code tree =="
-          find eth_scalp_trader_pack_v0_1 -maxdepth 2 -type f -printf "%P\n" | sort
-
-      - name: Unzip ETH 1m data & normalize path
-        run: |
-          set -euo pipefail
-          unzip -o "ETHUSDT_1min_2020_2025.zip" -d unzipped_data
-          # CSV 하나 또는 여러 파일(연도별) 모두 대응 -> 가장 큰 CSV를 채택
-          mkdir -p eth_scalp_trader_pack_v0_1/data
-          CSV=$(find unzipped_data -type f -iname "*.csv" -printf "%s %p\n" | sort -nr | head -n1 | awk '{print $2}')
-          if [ -z "${CSV:-}" ]; then
-            echo "No CSV found in ETHUSDT_1min_2020_2025.zip"; exit 2
-          fi
-          cp "$CSV" eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv
-          echo "Using CSV: $CSV"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r eth_scalp_trader_pack_v0_1/requirements.txt
-
-      # ====== config.yml 생성 (코드가 상대경로를 기대) ======
-      - name: Generate config.yml for backtest
-        run: |
-          cat > eth_scalp_trader_pack_v0_1/config.yml <<'YAML'
-          strategy: scalper
-          symbol: "ETH/USDT"
-          timeframe: "1m"
-          source: "csv"
-          csv_path: "data/ETHUSDT-1m.csv"
-          since_days: 99999
-          fees_bps: 2.0
-          slippage_bps: 1.0
-          risk:
-            max_r_pct: 0.5
-            kelly_frac: 0.2
-          filters:
-            session_use: false
-            use_pivots: true
-            use_vwap: true
-            use_bos: true
-          exits:
-            partial_tp: true
-            tp1_r_multiple: 0.6
-            trail_atr_mult: 1.2
-          report:
-            save_equity_csv: true
-            save_metrics_json: true
-          YAML
-          echo "== generated config.yml =="
-          sed -n '1,80p' eth_scalp_trader_pack_v0_1/config.yml
-
-      - name: Run backtest (from package root so relative paths work)
         working-directory: eth_scalp_trader_pack_v0_1
-        env:
-          PYTHONPATH: ${{ github.workspace }}/eth_scalp_trader_pack_v0_1
+        shell: bash
         run: |
-          set -euo pipefail
-          python -V
-          python run_backtest.py --config config.yml || { echo "Backtest failed"; exit 1; }
-          echo "== list outputs =="
-          mkdir -p results_fallback
-          # 가능 경로들을 긁어 모아 업로드용 폴더에 복사
-          for p in outputs results logs .; do
-            [ -d "$p" ] && find "$p" -type f -maxdepth 2 -print -exec cp -n {} results_fallback/ \; || true
-          done
-          # 패턴별로 결과 파일도 집계
-          find . -maxdepth 2 -type f -name "equity*.csv" -exec cp -n {} results_fallback/ \; || true
-          find . -maxdepth 2 -type f -name "metrics*.json" -exec cp -n {} results_fallback/ \; || true
-          ls -lah results_fallback || true
+          set -euxo pipefail
+          python -m pip install -U pip
+          pip install -r requirements.txt
 
-      - name: Upload artifacts (results, logs, configs) - pinned
+      - name: Run backtest
+        working-directory: eth_scalp_trader_pack_v0_1
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p outputs logs results
+          # run and tee to log; run_backtest.py loads ./config.yml by default
+          python run_backtest.py 2>&1 | tee logs/run.log
+          echo "== Dump outputs =="
+          find outputs -type f || true
+          find results -type f || true
+
+      - name: Upload artifacts (pinned)
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: eth-scalper-backtest-${{ github.run_id }}
+          name: backtest-eth-scalper
           path: |
-            eth_scalp_trader_pack_v0_1/results_fallback/**
             eth_scalp_trader_pack_v0_1/outputs/**
+            eth_scalp_trader_pack_v0_1/results/**
             eth_scalp_trader_pack_v0_1/logs/**
-            eth_scalp_trader_pack_v0_1/config.yml
+            eth_scalp_trader_pack_v0_1/**/equity*.csv
+            eth_scalp_trader_pack_v0_1/**/metrics*.json
           if-no-files-found: warn
+          retention-days: 7
