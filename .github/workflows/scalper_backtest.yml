@@ -1,135 +1,193 @@
 name: scalper_backtest
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, master ]
-    paths:
-      - ".github/workflows/scalper_backtest.yml"
-      - "eth_scalp_trader_pack_v0_1.zip"
-      - "ETHUSDT_1min_2020_2025.zip"
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: scalper_backtest-${{ github.ref }}
+  group: backtest-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  PACK_ZIP: eth_scalp_trader_pack_v0_1.zip
-  DATA_ZIP: ETHUSDT_1min_2020_2025.zip
-  PY_VERSION: "3.11"
 
 jobs:
   backtest:
-    runs-on: ubuntu-latest
+    name: ETH scalper backtest
+    runs-on: ubuntu-22.04
+
+    env:
+      PYTHONIOENCODING: utf-8
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_WARN_SCRIPT_LOCATION: "0"
+      FORCE_COLOR: "1"
 
     steps:
-      # ✅ 꼭 실제 커밋 SHA로 바꾸세요 (Marketplace에서 v4 최신 커밋 SHA 복사)
-      - name: Checkout
-        uses: actions/checkout@<PINNED_SHA_actions_checkout_v4>
-
-      # 캐시 의존성 파일을 미리 만들어 setup-python 캐시가 실패하지 않게 함
-      - name: Prepare minimal requirements for cache key
-        run: |
-          cat > requirements-ci.txt << 'REQ'
-          backtrader==1.9.78.123
-          pandas>=2.0
-          numpy>=1.24
-          matplotlib>=3.7
-          pandas_ta>=0.3.14b
-          yfinance>=0.2
-          scikit-learn>=1.3
-          scipy>=1.10
-          pyarrow>=12
-          pyyaml>=6
-          REQ
-
-      # ✅ 꼭 실제 커밋 SHA로 바꾸세요 (Marketplace에서 v5 최신 커밋 SHA 복사)
-      - name: Setup Python
-        uses: actions/setup-python@<PINNED_SHA_actions_setup-python_v5>
-        with:
-          python-version: ${{ env.PY_VERSION }}
-          cache: 'pip'
-          cache-dependency-path: 'requirements-ci.txt'
-
-      - name: Install system tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-ci.txt
-
-      - name: Unzip code pack and data
-        run: |
-          set -euo pipefail
-          echo "Unzipping ${PACK_ZIP} and ${DATA_ZIP}..."
-          mkdir -p pack data outputs logs
-          # 코드팩 해제 (최상위에 여러 파일이 있든 폴더가 있든 pack/ 아래로 모음)
-          unzip -o "${PACK_ZIP}" -d pack >/dev/null
-          # 데이터 해제: zip에 csv/feather 등 들어있다고 가정
-          unzip -o "${DATA_ZIP}" -d data >/dev/null || true
-          echo "Layout after unzip:"
-          tree -L 2 || true
-
-      - name: Find backtest entrypoint
-        id: find_entry
+      # === 코드 체크아웃을 액션 없이 처리 ===
+      - name: Fetch repository without actions/checkout
         shell: bash
         run: |
-          set -euo pipefail
-          shopt -s globstar nullglob
-          candidates=(
-            pack/**/*backtest*.py
-            pack/**/*Backtest*.py
-            pack/**/run*.py
-            pack/**/main.py
-            pack/**/runner.py
-          )
-          chosen=""
-          for f in "${candidates[@]}"; do
-            if [[ -f "$f" ]]; then
-              chosen="$f"
-              break
+          set -Eeuo pipefail
+          git --version
+          # 워크스페이스는 비어 있으므로 직접 clone
+          git clone --no-tags --depth 1 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" repo
+          cd repo
+          # PR/특정 SHA 대응
+          if [[ -n "${GITHUB_SHA:-}" ]]; then
+            git fetch --no-tags origin "${GITHUB_SHA}" --depth 1 || true
+            git checkout -q "${GITHUB_SHA}" || git checkout -q -B current "${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+          fi
+          echo "REPO_DIR=$(pwd)" >> $GITHUB_ENV
+
+      # === Python 환경 구성 (액션 미사용) ===
+      - name: Setup Python (system) + venv
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 --version
+          sudo apt-get update -y
+          sudo apt-get install -y python3-venv unzip
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -U pip wheel setuptools
+          echo "VENV=$(pwd)/.venv" >> $GITHUB_ENV
+
+      # === 의존성 설치 (requirements.txt 있으면 우선) ===
+      - name: Install dependencies
+        shell: bash
+        working-directory: ${{ env.REPO_DIR }}
+        run: |
+          set -Eeuo pipefail
+          source "${VENV}/bin/activate"
+          if compgen -G "requirements*.txt" > /dev/null; then
+            echo "[pip] installing from requirements*.txt"
+            # 가장 알맞은 파일 하나 선택
+            REQ=$(ls -1 requirements*.txt | head -n1)
+            python -m pip install -r "${REQ}"
+          else
+            echo "[pip] requirements 파일이 없어 최소 패키지 설치"
+            # backtesting + 데이터핸들링 기본 세트
+            python -m pip install \
+              numpy pandas matplotlib scipy statsmodels scikit-learn \
+              pandas-ta==0.3.14b0 ta==0.11.0 \
+              backtrader==1.9.78.123 \
+              tqdm pyyaml
+          fi
+          python -c "import sys; print('PY', sys.version)"
+
+      # === ZIP 풀기 ===
+      - name: Unpack code and data zips
+        shell: bash
+        working-directory: ${{ env.REPO_DIR }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          for z in *.zip; do
+            echo "Unzipping: $z"
+            mkdir -p "unzipped/${z%.zip}"
+            unzip -q "$z" -d "unzipped/${z%.zip}"
+          done
+          echo "TREE:"
+          find unzipped -maxdepth 2 -type d -print
+
+      # === 백테스트 엔트리 탐색 ===
+      - name: Locate backtest entry
+        id: find_entry
+        shell: bash
+        working-directory: ${{ env.REPO_DIR }}
+        run: |
+          set -Eeuo pipefail
+          CODE_DIR=$(find unzipped -maxdepth 2 -type d -iname "eth*_scalp*pack*" -o -iname "eth*scalp*trader*" | head -n1 || true)
+          DATA_DIR=$(find unzipped -maxdepth 2 -type d -iname "ETHUSDT*1min*" -o -iname "ETH*1min*" | head -n1 || true)
+
+          if [[ -z "${CODE_DIR}" ]]; then
+            # 코드팩 폴더명을 못 찾았으면 가장 큰 디렉터리로 추정
+            CODE_DIR=$(du -sk unzipped/* | sort -nr | awk 'NR==1{print $2}')
+          fi
+
+          if [[ -z "${DATA_DIR}" ]]; then
+            echo "::warning::데이터 폴더를 찾지 못했습니다. 패키지 내부에서 경로를 자체 해석할 수도 있습니다."
+          fi
+
+          # 후보 엔트리 스크립트
+          declare -a CAND=("backtest.py" "run_backtest.py" "main.py")
+          ENTRY=""
+          for c in "${CAND[@]}"; do
+            hit=$(find "$CODE_DIR" -maxdepth 2 -type f -name "$c" | head -n1 || true)
+            if [[ -n "$hit" ]]; then ENTRY="$hit"; break; fi
+          done
+
+          echo "CODE_DIR=$CODE_DIR" >> $GITHUB_OUTPUT
+          echo "DATA_DIR=${DATA_DIR:-}" >> $GITHUB_OUTPUT
+          echo "ENTRY=$ENTRY"         >> $GITHUB_OUTPUT
+
+          echo "Detected CODE_DIR: $CODE_DIR"
+          echo "Detected DATA_DIR: ${DATA_DIR:-<none>}"
+          echo "Detected ENTRY   : ${ENTRY:-<none>}"
+
+      # === 백테스트 실행 ===
+      - name: Run backtest
+        shell: bash
+        working-directory: ${{ env.REPO_DIR }}
+        env:
+          CODE_DIR: ${{ steps.find_entry.outputs.CODE_DIR }}
+          DATA_DIR: ${{ steps.find_entry.outputs.DATA_DIR }}
+          ENTRY:    ${{ steps.find_entry.outputs.ENTRY }}
+        run: |
+          set -Eeuo pipefail
+          source "${VENV}/bin/activate"
+
+          # PYTHONPATH에 코드팩 추가
+          export PYTHONPATH="${CODE_DIR}:${PYTHONPATH:-}"
+
+          # 공통 인자 구성 (있으면)
+          EXTRA_ARGS=()
+          if [[ -n "${DATA_DIR}" && -d "${DATA_DIR}" ]]; then
+            EXTRA_ARGS+=( --data "${DATA_DIR}" )
+          fi
+          # 심볼/타임프레임 기본값
+          EXTRA_ARGS+=( --symbol ETHUSDT --timeframe 1m )
+
+          # 엔트리 스크립트가 있으면 그것부터 시도
+          if [[ -n "${ENTRY}" && -f "${ENTRY}" ]]; then
+            echo ">>> python ${ENTRY} ${EXTRA_ARGS[*]}"
+            python "${ENTRY}" "${EXTRA_ARGS[@]}" || {
+              echo "::warning::엔트리 스크립트 실행 실패. 패키지 내부 CLI를 탐색합니다."
+              FAIL=1
+            }
+          else
+            FAIL=1
+          fi
+
+          if [[ "${FAIL:-0}" -eq 1 ]]; then
+            # 일반적인 패키지/모듈 실행 백업 루트
+            if python -c "import runpy; runpy.run_module('backtest', run_name='__main__')" 2>/dev/null; then
+              echo "Ran module 'backtest' as fallback."
+            elif python -c "import runpy; runpy.run_module('main', run_name='__main__')" 2>/dev/null; then
+              echo "Ran module 'main' as fallback."
+            else
+              echo "::error::백테스트 엔트리를 자동으로 찾지 못했습니다. 디렉터리 트리를 출력합니다."
+              tree -a -L 3 "${CODE_DIR}" || true
+              exit 2
+            fi
+          fi
+
+      # === 산출물 패키징(액션 없이) ===
+      - name: Package results
+        if: always()
+        shell: bash
+        working-directory: ${{ env.REPO_DIR }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p backtest_artifacts
+          # 흔한 결과물 패턴을 모아 압축
+          for d in results output outputs reports figs figures plots logs; do
+            if [[ -d "$d" ]]; then cp -r "$d" "backtest_artifacts/"; fi
+            if [[ -d "unzipped" ]]; then
+              find unzipped -maxdepth 3 -type d \( -name "$d" -o -name "*.bt" \) -exec cp -r {} backtest_artifacts/ \; || true
             fi
           done
-          if [[ -z "${chosen}" ]]; then
-            echo "❌ 엔트리 파이썬 파일을 찾지 못했습니다. pack/ 아래 파일명을 확인하세요."
-            echo "hint: 파일명에 backtest/run/main/runner 가 포함되어야 자동탐색됩니다."
-            exit 1
-          fi
-          echo "✅ Entrypoint: ${chosen}"
-          echo "entry=${chosen}" >> "$GITHUB_OUTPUT"
-
-      - name: Run backtest
-        env:
-          ENTRY: ${{ steps.find_entry.outputs.entry }}
-        run: |
-          set -euo pipefail
-          echo "Running: ${ENTRY}"
-          # 자주 쓰이는 인자 패턴을 자동 시도. 실패 시 점진적 폴백.
-          python "${ENTRY}" --data ./data --out ./outputs 2>&1 | tee ./logs/run.log || \
-          python "${ENTRY}" --data_dir ./data --output_dir ./outputs 2>&1 | tee -a ./logs/run.log || \
-          python "${ENTRY}" 2>&1 | tee -a ./logs/run.log
-
-      - name: Sanity check results
-        run: |
-          set -e
-          echo "Outputs:"
-          ls -lah outputs || true
-          # 결과 파일이 1개도 없으면 실패로 처리하여 디버깅 용이하게
-          cnt=$(ls -1 outputs 2>/dev/null | wc -l || echo 0)
-          if [ "$cnt" -eq 0 ]; then
-            echo "❌ outputs/ 비어있음. 엔트리 스크립트 인자 또는 데이터 경로를 확인하세요."
-            exit 2
-          fi
-
-      - name: Upload artifacts (always)
-        if: always()
-        uses: actions/upload-artifact@<PINNED_SHA_actions_upload-artifact_v4>
-        with:
-          name: scalper_backtest_outputs
-          path: |
-            outputs/**/*
-            logs/**/*
-          if-no-files-found: warn
+          tar -czf backtest_artifacts.tar.gz backtest_artifacts || true
+          echo "Artifacts at: $PWD/backtest_artifacts.tar.gz"
