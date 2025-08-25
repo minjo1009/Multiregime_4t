@@ -22,6 +22,7 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -V
           python -m pip install --upgrade pip
           pip install "pandas==2.2.2" "numpy==1.26.4"
@@ -48,11 +49,13 @@ jobs:
           echo "PKGDIR=$PKGDIR"
           echo "PKGROOT=$PKGROOT"
 
-          # env에 고정
-          echo "RUNPY=$RUNPY"     >> $GITHUB_ENV
-          echo "PKGDIR=$PKGDIR"   >> $GITHUB_ENV
-          echo "PKGROOT=$PKGROOT" >> $GITHUB_ENV
-          echo "PYTHONPATH=$PKGROOT:$PKGDIR:$PYTHONPATH" >> $GITHUB_ENV
+          # env에 고정  (PYTHONPATH가 비어있을 수 있으므로 디폴트 확장 사용)
+          {
+            echo "RUNPY=$RUNPY"
+            echo "PKGDIR=$PKGDIR"
+            echo "PKGROOT=$PKGROOT"
+            echo "PYTHONPATH=$PKGROOT:$PKGDIR:${PYTHONPATH:-}"
+          } >> "$GITHUB_ENV"
 
       # 4) 데이터 준비 (첫 csv 사용, 없으면 루트 zip 풀기) + 헤더 정규화
       - name: Prepare data
