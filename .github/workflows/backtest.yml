@@ -5,7 +5,7 @@ on:
       trade_zip:
         description: "Code ZIP filename at repo root"
         required: false
-        default: "trade_v1.0.5_full.zip"
+        default: "trade_v1.0.5.zip"
       data_zip:
         description: "Data ZIP filename at repo root"
         required: false
