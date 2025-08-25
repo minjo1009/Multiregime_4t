@@ -1,4 +1,4 @@
-name: trade4v run (v3.3 • robust + diagnostics + full hotfix)
+name: trade4v run (v3.3 • robust + diagnostics + full hotfix • dispatch-only)
 
 on:
   workflow_dispatch:
@@ -10,14 +10,7 @@ on:
       H:             { description: "예측지평(분)",     required: true,  default: "15" }
       fee_bps:       { description: "수수료(bp)",       required: true,  default: "1.0" }
       slip_bps:      { description: "슬리피지(bp)",     required: true,  default: "0.5" }
-      ev_margin_bps: { description: "EV 마진(bp)(예비)", required: true, default: "1.0" }
       K_day:         { description: "일별 Top-K (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
-  pull_request:
-    paths:
-      - "trade4v.zip"
-      - "data/**"
-      - "trade4v/**"
-      - ".github/workflows/run4u.yml"
 
 jobs:
   run:
@@ -26,20 +19,10 @@ jobs:
       contents: read
       actions: read
 
-    # PR로 트리거될 때도 돌아가도록 입력값 기본치 주입
     env:
-      TRAIN_S: ${{ github.event_name == 'workflow_dispatch' && inputs.train_start   || '2025-01-01 00:00:00' }}
-      TRAIN_E: ${{ github.event_name == 'workflow_dispatch' && inputs.train_end     || '2025-04-30 23:59:00' }}
-      TEST_S:  ${{ github.event_name == 'workflow_dispatch' && inputs.test_start    || '2025-05-01 00:00:00' }}
-      TEST_E:  ${{ github.event_name == 'workflow_dispatch' && inputs.test_end      || '2025-06-30 23:59:00' }}
-      H:       ${{ github.event_name == 'workflow_dispatch' && inputs.H             || '15' }}
-      FEE:     ${{ github.event_name == 'workflow_dispatch' && inputs.fee_bps       || '1.0' }}
-      SLIP:    ${{ github.event_name == 'workflow_dispatch' && inputs.slip_bps      || '0.5' }}
-      EV_M:    ${{ github.event_name == 'workflow_dispatch' && inputs.ev_margin_bps || '1.0' }}
-      KDAY:    ${{ github.event_name == 'workflow_dispatch' && inputs.K_day         || '0:10,1:15,2:30' }}
-      OUT:     _out_4u
-      QTP:     "0.90"
-      QSL:     "0.60"
+      OUT: _out_4u
+      QTP: "0.90"
+      QSL: "0.60"
       OVERLAP_MODE: "cap"   # cap|pyramid|none
       MAX_CONC: "2"
       MIN_GAP:  "5"
@@ -70,9 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p __extracted
-          if [ -f trade4v.zip ]; then
-            unzip -o -q trade4v.zip -d __extracted
-          fi
+          if [ -f trade4v.zip ]; then unzip -o -q trade4v.zip -d __extracted; fi
           ROOT=""
           for d in __extracted/trade4v __extracted ./trade4v . ; do
             if [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
@@ -82,17 +63,12 @@ jobs:
           rm -rf trade4v || true
           if [ -n "${ROOT}" ]; then
             if [ -d "${ROOT}/trade4v" ]; then
-              mkdir -p trade4v
-              shopt -s dotglob
-              mv "${ROOT}/trade4v"/* trade4v/ || true
+              mkdir -p trade4v; shopt -s dotglob; mv "${ROOT}/trade4v"/* trade4v/ || true
             else
               cp -r "${ROOT}" ./trade4v
             fi
           fi
-          if [ -d trade4v/trade4v ]; then
-            shopt -s dotglob
-            mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v
-          fi
+          if [ -d trade4v/trade4v ]; then shopt -s dotglob; mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v; fi
           test -f trade4v/run_4u.py || { echo "run_4u.py not found after flatten"; ls -R; exit 2; }
           ls -al trade4v | head -n 80
 
@@ -103,20 +79,16 @@ jobs:
           mkdir -p data
           CSV=$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)
           if [ -z "${CSV}" ] && ls -1 *.zip 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
-            ZIP=$(ls -1 ETHUSDT_1min_*.zip | head -n1)
-            unzip -o -q "$ZIP" -d data
-            CSV=$(ls -1 data/*.csv | head -n1)
+            ZIP=$(ls -1 ETHUSDT_1min_*.zip | head -n1); unzip -o -q "$ZIP" -d data; CSV=$(ls -1 data/*.csv | head -n1)
           fi
           if [ -z "${CSV}" ] && ls -1 *.csv 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
-            CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1)
-            mv "$CSV" data/; CSV="data/$(basename "$CSV")"
+            CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1); mv "$CSV" data/; CSV="data/$(basename "$CSV")"
           fi
           if [ -z "${CSV}" ]; then echo "ERROR: CSV 필요"; exit 2; fi
           echo "Using CSV: ${CSV}"
           python - "$CSV" <<'PY'
           import sys, pandas as pd
-          p=sys.argv[1]
-          df=pd.read_csv(p)
+          p=sys.argv[1]; df=pd.read_csv(p)
           rn={}
           for k in list(df.columns):
             kl=k.strip().lower()
@@ -139,7 +111,7 @@ jobs:
           F="trade4v/trend4p/utils.py"; test -f "$F" || { echo "[ERR] $F not found"; ls -R; exit 2; }
           sed -i 's/labels=\[0,1,2,2\], include_lowest=True)/labels=[0,1,2,2], include_lowest=True, ordered=False)/' "$F" || true
           grep -q "ordered=False" "$F" || sed -i 's/include_lowest=True)/include_lowest=True, ordered=False)/' "$F"
-          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed"; sed -n '1,180p' "$F"; exit 2; }
+          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed"; sed -n '1,200p' "$F"; exit 2; }
           echo "[OK] utils.py hotfix applied"
 
       # Hotfix 2: range_model index-safe + no-bfill, run_4u NaN-safe
@@ -151,11 +123,13 @@ jobs:
           python - "$F1" <<'PY'
           import sys, re, pathlib
           p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding='utf-8')
+          # make_range_targets: no backfill + min_periods=H
           s = re.sub(
               r"def\s+make_range_targets\s*\(.*?\)\s*:\n(?:.*?\n)*?return\s+r\..*",
               "def make_range_targets(df, H):\n    import pandas as pd\n    r = pd.Series(df['ret1']).abs().rolling(H, min_periods=H).sum().shift(-H)\n    return r.values",
               s, flags=re.S
           )
+          # apply_quantile_tables: index-safe
           pat = r"def\s+apply_quantile_tables\s*\(.*?\)\s*:\n(?:.*?\n)*?(?=^def\s|^class\s|\Z)"
           repl = '''
 def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regime_id'), eps=1e-6):
@@ -177,8 +151,7 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
             sl.loc[gd.index] = sl_val
     return tp.values, sl.values
 '''.lstrip("\n")
-          s, n = re.subn(pat, repl, s, flags=re.M|re.S)
-          assert n>0, "apply_quantile_tables not patched"
+          s, n = re.subn(pat, repl, s, flags=re.M|re.S); assert n>0, "apply_quantile_tables not patched"
           p.write_text(s, encoding='utf-8'); print("[OK] range_model patched")
           PY
 
@@ -201,7 +174,7 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
           p.write_text(s, encoding='utf-8'); print("[OK] run_4u patched")
           PY
 
-      - name: Run backtest (v3.3)
+      - name: Run backtest
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
@@ -213,17 +186,16 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
           echo "Using script: $PY"
           python "$PY" \
             --data "normalized.csv" \
-            --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
-            --test_start  "$TEST_S"  --test_end   "$TEST_E" \
-            --H "$H" \
-            --fee_bps "$FEE" --slip_bps "$SLIP" \
-            --K_day "$KDAY" \
+            --train_start "${{ inputs.train_start }}" --train_end "${{ inputs.train_end }}" \
+            --test_start  "${{ inputs.test_start }}"  --test_end  "${{ inputs.test_end }}" \
+            --H "${{ inputs.H }}" \
+            --fee_bps "${{ inputs.fee_bps }}" --slip_bps "${{ inputs.slip_bps }}" \
+            --K_day "${{ inputs.K_day }}" \
             --q_tp "$QTP" --q_sl "$QSL" \
             --overlap_mode "$OVERLAP_MODE" --max_concurrent "$MAX_CONC" --min_gap_bars "$MIN_GAP" \
             --strict_qa "$STRICT_QA" \
             --out_dir "$OUT"
-          ls -al "$OUT" || true
-          ls -al "$OUT/run" || true
+          ls -al "$OUT" || true; ls -al "$OUT/run" || true
 
       - name: Run diagnostics
         if: always()
@@ -236,8 +208,8 @@ def apply_quantile_tables(df, tables, q_tp=0.9, q_sl=0.6, key_cols=('sess','regi
             python -m trade4v.diag.run_diag \
               --preds   _out_4u/run/preds_test.csv \
               --metrics _out_4u/run/metrics_oos.json \
-              --k_day   "$KDAY" \
-              --H       "$H" || true
+              --k_day   "${{ inputs.K_day }}" \
+              --H       "${{ inputs.H }}" || true
             echo "diag_report.json (head):"
             test -f "_out_4u/run/diag_report.json" && head -n 100 "_out_4u/run/diag_report.json" || true
           else
