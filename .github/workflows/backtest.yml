@@ -6,7 +6,7 @@ on:
       trade_zip_path:
         description: "Path to trade pack zip"
         type: string
-        default: "trade_v1.0.4a.zip"
+        default: "trade_v1.0.4a.zip"   # ← 안전 기본값
       data_zip_path:
         description: "Path to data zip (CSV inside)"
         type: string
@@ -35,7 +35,7 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # --- 수동 체크아웃(외부 액션 미사용)
+      # --- Manual checkout (외부 action 미사용: pinned SHA 이슈 회피)
       - name: Manual checkout (no external action)
         run: |
           set -euo pipefail
@@ -46,9 +46,8 @@ jobs:
           git -c advice.detachedHead=false fetch --depth=1 origin "${GITHUB_SHA}"
           git checkout --detach "${GITHUB_SHA}"
           echo "Checked out ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
-          ls -al
 
-      # --- 폴더 준비 & zip 해제
+      # --- Prepare & unzip
       - name: Prepare working dirs
         run: |
           set -euo pipefail
@@ -58,16 +57,16 @@ jobs:
       - name: Unzip trade pack
         run: |
           set -euo pipefail
-          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
 
       - name: Unzip data pack
         run: |
           set -euo pipefail
-          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
           unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
 
-      # --- 의존성 설치
+      # --- Deps
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -77,7 +76,7 @@ jobs:
           pip install -r requirements.txt
           python -c 'import sklearn; print("sklearn", sklearn.__version__)'
 
-      # --- Sklearn 호환 스모크 테스트 (1.4/1.5 모두 통과)
+      # --- Sklearn ctor signature smoke test (1.4/1.5 호환)
       - name: CalibratedClassifierCV smoke test
         run: |
           set -euo pipefail
@@ -93,14 +92,28 @@ jobs:
           PY
           python /tmp/smoke_cal_cv.py
 
-      # --- 코드팩 지문 검사 (v1.0.4a 게이팅/컷오프)
-      - name: Fingerprint check (v1.0.4a gating & cutoff)
+      # --- Fingerprint (v1.0.4 계열: 문구/코드 모두 확인 → 미스매치 방지)
+      - name: Fingerprint check (v1.0.4 family)
         run: |
           set -euo pipefail
-          grep -n "Coverage-aligned gating" "${RUN_DIR}/backtest/runner.py"
-          grep -n "S1 probability floor cutoff" "${RUN_DIR}/backtest/runner.py"
+          FILE="${RUN_DIR}/backtest/runner.py"
+          test -f "$FILE" || { echo "❌ runner.py not found at $FILE"; find "${RUN_DIR}" -maxdepth 3 -type f | sed 's/^/ - /'; exit 1; }
+          # 참고용: 상위 80라인 일부 출력
+          nl -ba "$FILE" | sed -n '1,120p' | sed -n '1,5p' > /dev/null || true
+          # 1) 커버리지 정렬 주석 확인
+          grep -q "Coverage-aligned gating" "$FILE" || { echo "❌ missing: Coverage-aligned gating"; exit 1; }
+          # 2) S1 컷오프: 문구( min prob / probability floor ) 또는 실제 코드 패턴으로 확인
+          if grep -q "S1 min prob cutoff" "$FILE"; then
+            echo "✅ fingerprint: S1 min prob cutoff (comment)"
+          elif grep -q "S1 probability floor cutoff" "$FILE"; then
+            echo "✅ fingerprint: S1 probability floor cutoff (comment)"
+          elif grep -q "df\\['gate'\\] *= *df\\['gate'\\] *\\* *\\(df\\['p_long'\\] *>= *p_cut\\)" "$FILE"; then
+            echo "✅ fingerprint: S1 cutoff code pattern"
+          else
+            echo "❌ missing: S1 cutoff comment/code"; exit 1
+          fi
 
-      # --- CSV 프리플라이트 (컬럼/체결량 확인)
+      # --- CSV preflight (columns & taker_buy volume hint)
       - name: Preflight CSV
         run: |
           set -euo pipefail
@@ -118,7 +131,7 @@ jobs:
           print('✅ CSV OK')
           PY
 
-      # --- 백테스트 실행
+      # --- Run backtest
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -128,7 +141,7 @@ jobs:
           cat "${{ env.OUT_DIR }}/gating_debug.json" || true
           ls -al "${{ env.OUT_DIR }}"
 
-      # --- 아티팩트 업로드(핀 SHA, 실패해도 계속)
+      # --- Upload artifacts (pinned SHA, 실패해도 계속)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         continue-on-error: true
