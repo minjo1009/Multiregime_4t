@@ -1,4 +1,4 @@
-name: trade4v run (v3.3 + diagnostics; robust unzip)
+name: trade4v run (v3.3.1 + diagnostics; robust unzip)
 
 on:
   workflow_dispatch:
@@ -21,14 +21,17 @@ jobs:
       actions: read
 
     steps:
-      - name: Checkout (pinned)
+      # 1) Checkout (pinned SHA)
+      - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
 
-      - name: Setup Python 3.11 (pinned)
+      # 2) Python (pinned SHA)
+      - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.11"
 
+      # 3) Minimal deps
       - name: Install deps (minimal)
         shell: bash
         run: |
@@ -41,6 +44,7 @@ jobs:
           subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
           PY
 
+      # 4) Unzip & flatten (handles nested trade4v/trade4v)
       - name: Unzip project (robust flatten)
         shell: bash
         run: |
@@ -74,6 +78,32 @@ jobs:
           echo "[OK] trade4v layout fixed:"
           ls -al trade4v | head -n 50
 
+      # 4.5) Hotfix: pandas.cut duplicate labels -> unique labels
+      - name: Hotfix v3.3.1 (unique session labels)
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_one () {
+            local P="$1"
+            if [ -f "$P" ]; then
+              python - "$P" <<'PY'
+import sys, re, pathlib
+p = pathlib.Path(sys.argv[1])
+s = p.read_text(encoding="utf-8")
+s = re.sub(
+    r"sess\s*=\s*pd\.cut\(\s*hr\s*,\s*bins=\[[^\]]+\]\s*,\s*labels=\[[^\]]+\]\s*,\s*include_lowest=True\)\.astype\(int\)",
+    "sess = pd.cut(hr, bins=[-1,7,13,24], labels=[0,1,2], include_lowest=True).astype(int)",
+    s, flags=re.S
+)
+p.write_text(s, encoding="utf-8")
+print(f"[patched] {p}")
+PY
+            fi
+          }
+          patch_one trade4v/trend4p/utils.py
+          patch_one trade4v/trade4v/trend4p/utils.py
+
+      # 5) Prepare data (auto-detect & normalize)
       - name: Prepare ETH 1m data (normalize headers)
         shell: bash
         run: |
@@ -112,7 +142,8 @@ jobs:
           df.to_csv("normalized.csv", index=False)
           PY
 
-      - name: Run backtest (v3.3)
+      # 6) Run backtest
+      - name: Run backtest (v3.3.1)
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
@@ -153,7 +184,8 @@ jobs:
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      - name: Run diagnostics (S1/S2/gating)
+      # 7) Diagnostics (S1/S2/gating) — 자동 리포트 생성
+      - name: Run diagnostics
         if: always()
         shell: bash
         env:
@@ -166,15 +198,15 @@ jobs:
             python -m trade4v.diag.run_diag \
               --preds _out_4u/run/preds_test.csv \
               --metrics _out_4u/run/metrics_oos.json \
-              --k_day "$KDAY" \
-              --H "$H" || true
+              --k_day "$KDAY" --H "$H" || true
             echo "diag_report.json (head):"
             test -f "_out_4u/run/diag_report.json" && head -n 100 "_out_4u/run/diag_report.json" || true
           else
             echo "WARN: preds_test.csv 미존재 → 진단 생략"
           fi
 
-      - name: Upload outputs (pinned)
+      # 8) Upload outputs (pinned SHA)
+      - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
