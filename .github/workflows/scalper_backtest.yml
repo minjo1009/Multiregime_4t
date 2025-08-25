@@ -2,97 +2,113 @@ name: backtest
 
 on:
   workflow_dispatch:
+    inputs:
+      config_path:
+        description: "경로: 기본값 eth_scalp_trader_pack_v0_1/config.yml"
+        required: false
+        default: "eth_scalp_trader_pack_v0_1/config.yml"
+      eth_zip:
+        description: "ETH 1분봉 ZIP 파일명 (루트). 기본값 ETHUSDT_1min_2020_2025.zip"
+        required: false
+        default: "ETHUSDT_1min_2020_2025.zip"
 
 permissions:
   contents: read
 
 jobs:
-  backtest:
+  run-backtest:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (pinned)
+      - name: Checkout (pinned SHA)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
 
-      - name: Setup Python 3.11 (pinned) + pip cache
+      - name: Setup Python (pinned SHA)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: eth_scalp_trader_pack_v0_1/requirements.txt
+          cache: "pip"
+          cache-dependency-path: |
+            eth_scalp_trader_pack_v0_1/requirements.txt
 
-      - name: Prepare code & data
-        shell: bash
+      - name: Install deps
         run: |
-          set -euxo pipefail
-          # unzip availability (usually present on ubuntu-latest)
-          if ! command -v unzip >/dev/null; then
-            sudo apt-get update && sudo apt-get install -y unzip
-          fi
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip wheel
+          pip install -r eth_scalp_trader_pack_v0_1/requirements.txt
 
-          mkdir -p unzipped eth_scalp_trader_pack_v0_1/data
+      - name: Prepare data (unzip + merge -> standard name)
+        run: |
+          set -euo pipefail
+          ZIP="${{ github.event.inputs.eth_zip || 'ETHUSDT_1min_2020_2025.zip' }}"
+          echo "Using data zip: ${ZIP}"
+          test -f "${ZIP}" || (echo "❌ data zip not found at repo root: ${ZIP}" && exit 1)
 
-          # 1) Unzip code pack if the folder isn't already in repo
-          if [ -f "eth_scalp_trader_pack_v0_1.zip" ]; then
-            unzip -q -o eth_scalp_trader_pack_v0_1.zip -d unzipped
-          fi
-          # find inner folder named exactly eth_scalp_trader_pack_v0_1 (nested zip-safe)
-          if [ ! -d "eth_scalp_trader_pack_v0_1/core" ]; then
-            packdir="$(find unzipped -maxdepth 2 -type d -name 'eth_scalp_trader_pack_v0_1' | head -n1 || true)"
-            test -n "${packdir}" || { echo "❌ code pack not found under unzipped/"; ls -R unzipped || true; exit 2; }
-            mkdir -p eth_scalp_trader_pack_v0_1
-            cp -R "${packdir}/." "eth_scalp_trader_pack_v0_1/"
-          fi
+          mkdir -p unzipped data_tmp eth_scalp_trader_pack_v0_1/data
+          unzip -q "${ZIP}" -d unzipped
 
-          # 2) Unzip ETH 1m data and normalize to expected filename
-          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
-            unzip -q -o ETHUSDT_1min_2020_2025.zip -d unzipped
+          # 가능한 CSV 모두 찾아 시간순 결합(첫 파일만 헤더 유지)
+          mapfile -t CSV_LIST < <(find unzipped -type f -iname "*.csv" | sort)
+          if [ "${#CSV_LIST[@]}" -eq 0 ]; then
+            echo "❌ No CSV inside ${ZIP}"
+            exit 1
           fi
-          csv="$(find unzipped -type f \( -iname 'ETHUSDT*1m*.csv' -o -iname 'ETH*1min*.csv' \) | head -n1 || true)"
-          if [ -z "${csv}" ] && [ -f "ETHUSDT_1min_2020_2025.csv" ]; then
-            csv="ETHUSDT_1min_2020_2025.csv"
+          OUT="eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv"
+          : > "${OUT}"
+          FIRST=1
+          for f in "${CSV_LIST[@]}"; do
+            if [ ${FIRST} -eq 1 ]; then
+              cat "$f" >> "${OUT}"
+              FIRST=0
+            else
+              # 헤더 스킵 후 추가
+              tail -n +2 "$f" >> "${OUT}"
+            fi
+          done
+
+          # 간단 유효성 검사: 최소 100행 & 쉼표 포함
+          ROWS=$(wc -l < "${OUT}" | tr -d ' ')
+          if [ "${ROWS}" -lt 100 ]; then
+            echo "❌ merged CSV too short: ${ROWS} lines"
+            exit 1
           fi
-          test -n "${csv}" || { echo "❌ ETH 1m CSV not found"; ls -R unzipped || true; exit 2; }
-          cp -f "${csv}" "eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv"
+          head -n 1 "${OUT}" | grep -Eqi '(time|date),.*(open|high|low|close)' || echo "⚠️ header check: please confirm column names match loader"
 
-          # Sanity checks
-          python - <<'PY'
-import os, sys
-assert os.path.exists('eth_scalp_trader_pack_v0_1/config.yml'), "config.yml missing"
-assert os.path.exists('eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv'), "CSV missing"
-print("✅ inputs ready")
-PY
+          echo "✅ CSV ready at ${OUT} (${ROWS} rows)"
 
-      - name: Install dependencies
+      - name: Sanity check inputs
+        run: |
+          set -euo pipefail
+          test -f eth_scalp_trader_pack_v0_1/config.yml || (echo "❌ config.yml missing" && exit 1)
+          test -f eth_scalp_trader_pack_v0_1/data/ETHUSDT-1m.csv || (echo "❌ CSV missing" && exit 1)
+          echo "✅ inputs ready"
+
+      - name: Run backtest (cwd = package)
         working-directory: eth_scalp_trader_pack_v0_1
-        shell: bash
         run: |
-          set -euxo pipefail
-          python -m pip install -U pip
-          pip install -r requirements.txt
+          set -euo pipefail
+          python run_backtest.py --config "${{ github.workspace }}/${{ github.event.inputs.config_path || 'eth_scalp_trader_pack_v0_1/config.yml' }}"
+        env:
+          PYTHONUNBUFFERED: "1"
 
-      - name: Run backtest
+      - name: Collect outputs summary
         working-directory: eth_scalp_trader_pack_v0_1
-        shell: bash
         run: |
-          set -euxo pipefail
-          mkdir -p outputs logs results
-          # run and tee to log; run_backtest.py loads ./config.yml by default
-          python run_backtest.py 2>&1 | tee logs/run.log
-          echo "== Dump outputs =="
-          find outputs -type f || true
-          find results -type f || true
+          set -euo pipefail
+          echo "== Files produced =="
+          ls -R || true
 
-      - name: Upload artifacts (pinned)
-        if: always()
+      - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: backtest-eth-scalper
+          name: backtest-results
+          if-no-files-found: ignore
           path: |
-            eth_scalp_trader_pack_v0_1/outputs/**
-            eth_scalp_trader_pack_v0_1/results/**
-            eth_scalp_trader_pack_v0_1/logs/**
+            eth_scalp_trader_pack_v0_1/**/results/**
+            eth_scalp_trader_pack_v0_1/**/outputs/**
             eth_scalp_trader_pack_v0_1/**/equity*.csv
             eth_scalp_trader_pack_v0_1/**/metrics*.json
-          if-no-files-found: warn
-          retention-days: 7
+            eth_scalp_trader_pack_v0_1/logs/**
