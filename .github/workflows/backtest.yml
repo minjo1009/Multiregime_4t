@@ -22,6 +22,7 @@ jobs:
       run:
         shell: bash
     env:
+      REPO_DIR: repo
       TRADE_ZIP: ${{ inputs.trade_zip_path }}
       DATA_ZIP:  ${{ inputs.data_zip_path }}
       RUN_DIR:   tmp/trade
@@ -34,17 +35,20 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # --- Pinned SHAs (org policy)
-      - name: Checkout (pinned SHA)
-        uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
+      # --- 수동 체크아웃(외부 액션 미사용)
+      - name: Manual checkout (no external action)
+        run: |
+          set -euo pipefail
+          rm -rf "${REPO_DIR}"
+          git init "${REPO_DIR}"
+          cd "${REPO_DIR}"
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c advice.detachedHead=false fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach "${GITHUB_SHA}"
+          echo "Checked out ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+          ls -al
 
-      - name: Setup Python 3.11 (pinned SHA)
-        uses: actions/setup-python@39cd8d4002104aeda3945c78209b8e84c9700a4e
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      # --- Prepare folders & unzip
+      # --- 폴더 준비 & zip 해제
       - name: Prepare working dirs
         run: |
           set -euo pipefail
@@ -54,16 +58,16 @@ jobs:
       - name: Unzip trade pack
         run: |
           set -euo pipefail
-          test -f "${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
-          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
+          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
+          unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
 
       - name: Unzip data pack
         run: |
           set -euo pipefail
-          test -f "${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; exit 1; }
-          unzip -q "${DATA_ZIP}" -d "${DATA_DIR}"
+          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; exit 1; }
+          unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
 
-      # --- Deps
+      # --- 의존성 설치
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -73,7 +77,7 @@ jobs:
           pip install -r requirements.txt
           python -c 'import sklearn; print("sklearn", sklearn.__version__)'
 
-      # --- Sklearn ctor signature smoke test (1.4/1.5 호환)
+      # --- Sklearn 호환 스모크 테스트 (1.4/1.5 모두 통과)
       - name: CalibratedClassifierCV smoke test
         run: |
           set -euo pipefail
@@ -89,14 +93,14 @@ jobs:
           PY
           python /tmp/smoke_cal_cv.py
 
-      # --- Fingerprint (v1.0.4a gating & cutoff)
+      # --- 코드팩 지문 검사 (v1.0.4a 게이팅/컷오프)
       - name: Fingerprint check (v1.0.4a gating & cutoff)
         run: |
           set -euo pipefail
           grep -n "Coverage-aligned gating" "${RUN_DIR}/backtest/runner.py"
           grep -n "S1 probability floor cutoff" "${RUN_DIR}/backtest/runner.py"
 
-      # --- CSV preflight (columns & taker_buy volume hint)
+      # --- CSV 프리플라이트 (컬럼/체결량 확인)
       - name: Preflight CSV
         run: |
           set -euo pipefail
@@ -114,7 +118,7 @@ jobs:
           print('✅ CSV OK')
           PY
 
-      # --- Run backtest
+      # --- 백테스트 실행
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -122,10 +126,12 @@ jobs:
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ env.OUT_DIR }}"
           echo "---- gating debug ----"
           cat "${{ env.OUT_DIR }}/gating_debug.json" || true
+          ls -al "${{ env.OUT_DIR }}"
 
-      # --- Upload artifacts (pinned SHA)
+      # --- 아티팩트 업로드(핀 SHA, 실패해도 계속)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        continue-on-error: true
         with:
           name: backtest-output
           path: |
