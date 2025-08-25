@@ -6,7 +6,7 @@ on:
       trade_zip_path:
         description: "Path to trade pack zip"
         type: string
-        default: "trade_v1.0.4b.zip"   # ← 최신 수정본
+        default: "trade_v1.0.4.zip"   # ← 최신 수정본
       data_zip_path:
         description: "Path to data zip (CSV inside)"
         type: string
