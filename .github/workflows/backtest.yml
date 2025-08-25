@@ -1,0 +1,131 @@
+name: backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      trade_zip_path:
+        description: "Path to trade code zip in repo"
+        required: true
+        default: "trade_v1.0.zip"
+      data_zip_path:
+        description: "Path to ETH 1m data zip in repo"
+        required: true
+        default: "ETHUSDT_1min_2020_2025.zip"
+      out_dir:
+        description: "Output directory"
+        required: false
+        default: "_out_4u/run"
+  push:
+    branches: [ main ]
+    paths:
+      - "**/*.zip"
+      - ".github/workflows/backtest.yml"
+
+concurrency:
+  group: backtest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      TRADE_ZIP: ${{ github.event.inputs.trade_zip_path || 'trade_v1.0.zip' }}
+      DATA_ZIP:  ${{ github.event.inputs.data_zip_path  || 'ETHUSDT_1min_2020_2025.zip' }}
+      OUT_DIR:   ${{ github.event.inputs.out_dir        || '_out_4u/run' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure unzip
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y unzip
+
+      - name: Show files
+        run: ls -alh
+
+      # ---- Unzip trade code pack (robust to nested directory) ----
+      - name: Unzip trade code
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$TRADE_ZIP" || { echo "Trade zip not found: $TRADE_ZIP"; exit 1; }
+          mkdir -p tmp/trade
+          unzip -q -o "$TRADE_ZIP" -d tmp/trade
+
+          # Find run_4u.py anywhere inside the unzipped tree
+          RUN_FILE="$(find tmp/trade -type f -name 'run_4u.py' | head -n1 || true)"
+          if [ -z "$RUN_FILE" ]; then
+            echo "run_4u.py not found inside $TRADE_ZIP"; exit 1
+          fi
+          RUN_DIR="$(dirname "$RUN_FILE")"
+          echo "RUN_DIR=$RUN_DIR" >> $GITHUB_ENV
+
+          # If requirements.txt exists near run_4u.py, record it
+          REQS_FILE="$(find "$RUN_DIR" -maxdepth 1 -type f -name 'requirements.txt' | head -n1 || true)"
+          if [ -n "$REQS_FILE" ]; then
+            echo "REQS_FILE=$REQS_FILE" >> $GITHUB_ENV
+          fi
+
+      # ---- Unzip data pack and locate a CSV ----
+      - name: Unzip data zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$DATA_ZIP" || { echo "Data zip not found: $DATA_ZIP"; exit 1; }
+          mkdir -p tmp/data
+          unzip -q -o "$DATA_ZIP" -d tmp/data
+
+          # Prefer Ethereum 1m CSVs; otherwise first CSV we find
+          CSV_PATH="$(find tmp/data -type f \( -iname '*ETH*1min*.csv' -o -iname '*.csv' \) | head -n1 || true)"
+          if [ -z "$CSV_PATH" ]; then
+            echo "No CSV found in $DATA_ZIP"; exit 1
+          fi
+          echo "CSV_PATH=$CSV_PATH" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -n "${REQS_FILE:-}" ] && [ -f "$REQS_FILE" ]; then
+            pip install -r "$REQS_FILE"
+          else
+            # Fallback to ensure required libs
+            pip install numpy pandas scikit-learn matplotlib pyyaml
+          fi
+
+      # ---- Run backtest using the discovered paths ----
+      - name: Run backtest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          echo "Running: python $RUN_DIR/run_4u.py --data_path \"$CSV_PATH\" --out_dir \"$OUT_DIR\""
+          python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "$OUT_DIR"
+
+      - name: Show summary
+        if: always()
+        run: |
+          echo "==== SUMMARY ===="
+          test -f "$OUT_DIR/summary.json" && cat "$OUT_DIR/summary.json" || echo "summary.json not found"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-output
+          path: |
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/metrics_table.csv
+            ${{ env.OUT_DIR }}/charts/*.png
+          if-no-files-found: warn
