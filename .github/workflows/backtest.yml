@@ -18,6 +18,9 @@ permissions:
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     env:
       TRADE_ZIP: ${{ inputs.trade_zip_path }}
       DATA_ZIP:  ${{ inputs.data_zip_path }}
@@ -31,7 +34,7 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # --- Pinned SHAs
+      # --- Pinned SHAs (org policy)
       - name: Checkout (pinned SHA)
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
@@ -41,7 +44,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # --- Prepare dirs & unzip
+      # --- Prepare folders & unzip
       - name: Prepare working dirs
         run: |
           set -euo pipefail
@@ -73,7 +76,18 @@ jobs:
       # --- Sklearn ctor signature smoke test (1.4/1.5 호환)
       - name: CalibratedClassifierCV smoke test
         run: |
-          python -c 'from sklearn.calibration import CalibratedClassifierCV as C; from sklearn.linear_model import LogisticRegression as L; import inspect; s=str(inspect.signature(C.__init__)); print("CalibratedClassifierCV.__init__", s); (("estimator" in s) and C(estimator=L())) or (("base_estimator" in s) and C(base_estimator=L())); print("OK: ctor signature supported")'
+          set -euo pipefail
+          cat > /tmp/smoke_cal_cv.py <<'PY'
+          from sklearn.calibration import CalibratedClassifierCV as C
+          from sklearn.linear_model import LogisticRegression as L
+          try:
+              C(estimator=L())
+              print("OK: estimator= (>=1.5)")
+          except TypeError:
+              C(base_estimator=L())
+              print("OK: base_estimator= (<=1.4)")
+          PY
+          python /tmp/smoke_cal_cv.py
 
       # --- Fingerprint (v1.0.4a gating & cutoff)
       - name: Fingerprint check (v1.0.4a gating & cutoff)
@@ -85,11 +99,20 @@ jobs:
       # --- CSV preflight (columns & taker_buy volume hint)
       - name: Preflight CSV
         run: |
-          python -c 'import os,sys,pandas as pd; csv=os.environ["CSV_PATH"]; df=pd.read_csv(csv,nrows=2); need={"open_time","open","high","low","close","volume","number_of_trades"}; miss=need-set(df.columns); 
-import sys
-; 
-( len(miss)==0 ) or (_ for _ in ()).throw(SystemExit("❌ Missing base columns: "+str(miss))); hints={"taker_buy_base_asset_volume","taker_buy_quote_asset_volume"}; 
-( len(hints & set(df.columns))>0 ) or (_ for _ in ()).throw(SystemExit("❌ Need taker_buy_* volume columns")); print("✅ CSV OK")'
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, pandas as pd
+          csv = os.environ['CSV_PATH']
+          df  = pd.read_csv(csv, nrows=2)
+          need = {'open_time','open','high','low','close','volume','number_of_trades'}
+          miss = need - set(df.columns)
+          if miss:
+              print('❌ Missing base columns:', miss); sys.exit(1)
+          hints = {'taker_buy_base_asset_volume','taker_buy_quote_asset_volume'}
+          if not (hints & set(df.columns)):
+              print('❌ Need taker_buy_* volume columns'); sys.exit(1)
+          print('✅ CSV OK')
+          PY
 
       # --- Run backtest
       - name: Run backtest
