@@ -12,7 +12,7 @@ on:
         required: true
         default: "ETHUSDT_1min_2020_2025.zip"
       out_dir:
-        description: "Output dir"
+        description: "Output dir (relative to repo root)"
         required: false
         default: "_out_4u/run"
   push:
@@ -51,7 +51,7 @@ jobs:
       - name: Show repo listing
         run: ls -alh
 
-      # --- unzip trade code & locate run_4u.py ---
+      # --- Unzip trade code & locate run_4u.py ---
       - name: Unzip trade pack
         shell: bash
         run: |
@@ -69,7 +69,7 @@ jobs:
           [ -n "$REQS_FILE" ] && echo "REQS_FILE=$REQS_FILE" >> "$GITHUB_ENV" || true
           echo "ℹ️ RUN_DIR=$RUN_DIR"
 
-      # --- unzip data & locate CSV (ETH 1m 우선) ---
+      # --- Unzip data & locate CSV (ETH 1m 우선) ---
       - name: Unzip data pack
         shell: bash
         run: |
@@ -91,7 +91,7 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-          cache: "pip"
+        # cache: pip  # 조직 정책상 필요 시 해제
 
       - name: Install dependencies
         shell: bash
@@ -104,31 +104,36 @@ jobs:
             pip install numpy pandas scikit-learn matplotlib pyyaml
           fi
 
-      # Preflight는 코드팩 v1.0.1에서 처리(quote→base 자동 변환)
-      # heredoc 사용 없음 → YAML 파싱 에러 원천 차단
-
-      - name: Run backtest
+      # --- 절대경로로 변환 (CWD 불일치 방지) ---
+      - name: Make absolute paths
         shell: bash
         run: |
+          echo "ABS_CSV=$GITHUB_WORKSPACE/$CSV_PATH" >> $GITHUB_ENV
+          echo "ABS_OUT_DIR=$GITHUB_WORKSPACE/$OUT_DIR" >> $GITHUB_ENV
+
+      # --- run_4u.py 실행: CWD=RUN_DIR (config 상대경로 문제 해결) ---
+      - name: Run backtest
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
           set -euo pipefail
-          mkdir -p "$OUT_DIR"
-          echo "▶ python $RUN_DIR/run_4u.py --data_path \"$CSV_PATH\" --out_dir \"$OUT_DIR\""
-          python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "$OUT_DIR"
+          mkdir -p "$ABS_OUT_DIR"
+          echo "▶ python run_4u.py --data_path \"$ABS_CSV\" --out_dir \"$ABS_OUT_DIR\""
+          python run_4u.py --data_path "$ABS_CSV" --out_dir "$ABS_OUT_DIR"
 
       - name: Verify outputs
         shell: bash
         run: |
-          test -f "$OUT_DIR/summary.json" || { echo "❌ summary.json not found in $OUT_DIR"; exit 1; }
+          test -f "$ABS_OUT_DIR/summary.json" || { echo "❌ summary.json not found in $ABS_OUT_DIR"; exit 1; }
           echo "==== SUMMARY (first 2000 chars) ===="
-          head -c 2000 "$OUT_DIR/summary.json" || true
-          echo ""
+          head -c 2000 "$ABS_OUT_DIR/summary.json" || true
 
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/charts/
+            ${{ env.ABS_OUT_DIR }}/summary.json
+            ${{ env.ABS_OUT_DIR }}/charts/
           if-no-files-found: warn
           retention-days: 30
