@@ -1,5 +1,4 @@
 name: Backtest
-
 on:
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     steps:
-      # ---- Checkout (no action; 보안정책 회피) ----
+      # --- Checkout without actions (pinned SHA policy 회피)
       - name: Checkout repository (git)
         shell: bash
         run: |
@@ -28,7 +27,7 @@ jobs:
           git checkout --force FETCH_HEAD
           ls -al
 
-      # ---- Prepare & unzip ----
+      # --- Unzip packages
       - name: Prepare workspace
         shell: bash
         run: |
@@ -39,7 +38,7 @@ jobs:
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
 
-      # ---- Python deps (시스템 Python 사용; 액션 미사용) ----
+      # --- Install deps (no here-doc)
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
@@ -48,17 +47,12 @@ jobs:
           python3 -V
           python3 -m pip install -U pip
           python3 -m pip install -r requirements.txt
-          # sklearn 호환 스모크
-          python3 - <<'PY'
-from sklearn.calibration import CalibratedClassifierCV as C
-from sklearn.linear_model import LogisticRegression as L
-try:
-    C(estimator=L()); print("OK: estimator (>=1.5 계열)")
-except TypeError:
-    C(base_estimator=L()); print("OK: base_estimator (<=1.4 계열)")
-PY
+          # sklearn 호환 스모크: 파라미터 이름으로 분기
+          python3 -c "import inspect, sklearn.calibration as sc, sklearn.linear_model as sl; \
+p=inspect.signature(sc.CalibratedClassifierCV).parameters; \
+print('OK estimator' if 'estimator' in p else 'OK base_estimator')"
 
-      # ---- Fingerprint: v1.0.4(레거시) + v1.0.5(신규) 겸용 ----
+      # --- Fingerprint: v1.0.4(legacy) or v1.0.5(new) 모두 허용
       - name: Fingerprint check (v1.0.4 + v1.0.5)
         shell: bash
         run: |
@@ -74,7 +68,7 @@ PY
             exit 1
           fi
 
-      # ---- Preflight CSV ----
+      # --- Preflight CSV (자동 감지 + 형식 점검)
       - name: Preflight CSV
         shell: bash
         run: |
@@ -91,25 +85,14 @@ PY
           else
             echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
           fi
-          python3 - <<'PY'
-import os, sys, pandas as pd
-csv = os.environ['CSV_PATH']
-need = {'open_time','open','high','low','close','volume','number_of_trades'}
-df = pd.read_csv(csv, nrows=2)
-cols = set(df.columns)
-miss = need - cols
-if miss:
-    print("✖ Missing base columns:", miss); sys.exit(1)
-if 'taker_buy_base_asset_volume' in cols:
-    print("✅ taker_buy_base_asset_volume present")
-elif 'taker_buy_quote_asset_volume' in cols:
-    print("ℹ️ Only quote volume present -> loader will synthesize base volume")
-else:
-    print("ℹ️ No taker_buy_* columns -> loader will synthesize if possible")
-print("✅ CSV OK")
-PY
+          python3 -c "import os,sys,pandas as pd; \
+csv=os.environ['CSV_PATH']; df=pd.read_csv(csv, nrows=2); \
+need=set(['open_time','open','high','low','close','volume','number_of_trades']); \
+miss=need-set(df.columns); \
+assert not miss, f'Missing base columns: {miss}'; \
+print('✅ CSV OK')"
 
-      # ---- Run backtest ----
+      # --- Run backtest
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
@@ -125,7 +108,7 @@ PY
           cat "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
           ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      # ---- Upload artifacts (pinned SHA) ----
+      # --- Upload artifacts (pinned SHA)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
