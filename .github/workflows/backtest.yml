@@ -113,7 +113,7 @@ jobs:
             grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$f" || sed -i '1i import numpy as np' "$f"
           done
 
-      # 🔧 NEW: calibration.predict() 함수 안에 import numpy as np를 안전 삽입
+      # calibration.predict() 함수 안에도 import numpy as np 삽입
       - name: Patch calibration np import (function-level)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -121,12 +121,9 @@ jobs:
           set -euo pipefail
           F="trend4p/calibration.py"
           if [ -f "$F" ]; then
-            # 모듈 상단에도 없으면 보강
             grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$F" || sed -i '1i import numpy as np' "$F"
-            # predict 정의 직후에 함수 내 import 삽입(중복 삽입돼도 무해)
             sed -i '/^[[:space:]]*def[[:space:]]\+predict[[:space:]]*(/a\        import numpy as np' "$F" || true
             echo "[patched] $F"
-            grep -n "def predict" -n "$F" | head -n 1 || true
           else
             echo "WARN: $F not found (skip)"
           fi
@@ -160,6 +157,49 @@ jobs:
             echo "Re-detected CSV: ${CSV_PATH}"
           fi
           echo "Final CSV_PATH=${CSV_PATH}"
+
+      # ✅ OF shift 브로드캐스팅 핫픽스: of_shift를 (N,) 시계열로 강제
+      - name: Patch engine OF shift (timewise mean)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          F="backtest/engine.py"
+          [ -f "$F" ] || { echo "❌ not found: $F"; exit 1; }
+
+          # compute_of_shift(df)가 없으면 삽입 (idempotent)
+          grep -q "def compute_of_shift(df):" "$F" || awk '
+            {print $0}
+            END{
+              print ""
+              print "def compute_of_shift(df):"
+              print "    import numpy as np, pandas as pd"
+              print "    def z(a):"
+              print "        a=np.asarray(a,dtype=float)"
+              print "        m=np.nanmedian(a); sd=np.nanstd(a)"
+              print "        sd = 1e-12 if (sd==0 or not np.isfinite(sd)) else sd"
+              print "        return (a-m)/sd"
+              print "    v=z(df.get(\"VPIN\", 0)).ravel()"
+              print "    a=z(df.get(\"ATS\", 0)).ravel()"
+              print "    l=z(df.get(\"lambda_kyle\", 0)).ravel()"
+              print "    zstack=np.vstack([v,a,l])      # (3, N)"
+              print "    s=np.nanmean(zstack, axis=0)   # ✅ (N,), time-wise mean"
+              print "    return pd.Series(s, index=df.index).fillna(0.0)"
+            }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+
+          # 기존 of_shift 할당을 compute_of_shift(df)로 치환(첫 1회)
+          if grep -qE "of_shift[[:space:]]*=" "$F"; then
+            sed -i '0,/of_shift[[:space:]]*=/{s//of_shift = compute_of_shift(df)/}' "$F"
+          else
+            # of_shift 라인이 없으면 logit_core 위에 삽입
+            LN=$(grep -n "logit_core" "$F" | head -n1 | cut -d: -f1 || true)
+            if [ -n "${LN:-}" ]; then
+              sed -i "${LN}i of_shift = compute_of_shift(df)" "$F"
+            else
+              echo "of_shift = compute_of_shift(df)" >> "$F"
+            fi
+          fi
+          grep -n "compute_of_shift" "$F" | head -n 2 || true
 
       - name: Run backtest
         shell: bash
