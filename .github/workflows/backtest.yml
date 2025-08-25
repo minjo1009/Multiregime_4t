@@ -26,13 +26,14 @@ jobs:
       RUN_DIR:   tmp/trade
       DATA_DIR:  tmp/data
       OUT_DIR:   _out_4u/run
-      CSV_PATH:  tmp/data/ETHUSDT_1min_2020_2025.csv
+      CSV_PATH:  tmp/data/ETHUSDT_1min_2020_2025.csv  # placeholder; 실제는 탐지로 덮어씀
       OMP_NUM_THREADS: "2"
       OPENBLAS_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
+      # --- 현재 커밋 수동 체크아웃(외부 액션 불필요)
       - name: Manual checkout (no external action)
         run: |
           set -euo pipefail
@@ -57,18 +58,20 @@ jobs:
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
 
+      # 1차: CSV 자동 탐지 → GITHUB_ENV에 주입
       - name: Detect CSV path
         run: |
           set -euo pipefail
           echo "--- data dir tree ---"
-          find "${DATA_DIR}" -maxdepth 4 -type f -iname "*.csv" -printf " - %p\n" || true
+          find "${DATA_DIR}" -maxdepth 4 -type f -name "*.csv" -print | sed 's/^/ - /' || true
           cand=""
+          # 우선순위: 1min → 1m → 아무 CSV
           for pat in "*ETHUSDT*1min*2020*2025*.csv" "*ETHUSDT*1m*2020*2025*.csv" "*.csv"; do
             hit=$(find "${DATA_DIR}" -type f -iname "$pat" | sort | head -n1 || true)
             if [ -n "$hit" ]; then cand="$hit"; break; fi
           done
           [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
-          echo "CSV_PATH=${cand}" >> "$GITHUB_ENV"
+          echo "CSV_PATH=${cand}" | tee -a "$GITHUB_ENV"
           echo "Resolved CSV_PATH=${cand}"
 
       - name: Install requirements
@@ -119,11 +122,18 @@ jobs:
           print('✅ CSV OK')
           PY
 
+      # 2차: 실행 직전 재확인(없으면 다시 탐지) 후 호출
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          echo "CSV_PATH=${CSV_PATH}"
+          if [ ! -f "${CSV_PATH}" ]; then
+            echo "CSV_PATH not found -> re-detecting…"
+            cand=$(find "${DATA_DIR}" -type f -iname "*ETHUSDT*1min*2020*2025*.csv" -o -iname "*ETHUSDT*1m*2020*2025*.csv" -o -iname "*.csv" | head -n1)
+            [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
+            CSV_PATH="$cand"
+          fi
+          echo "Using CSV_PATH=${CSV_PATH}"
           python run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
           echo "---- gating debug ----"
           cat "${OUT_DIR}/gating_debug.json" || true
