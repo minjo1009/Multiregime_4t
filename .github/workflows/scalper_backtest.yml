@@ -1,140 +1,135 @@
-name: ETH 1m Backtest
+name: scalper_backtest
 
 on:
   workflow_dispatch:
-    inputs:
-      python_version:
-        description: "Python version"
-        required: true
-        default: "3.11"
-      data_zip_glob:
-        description: "Data zip glob in repo root (comma-separated)"
-        required: false
-        default: "ETHUSDT_1min_2020_2025.zip"
-      strat_zip_glob:
-        description: "Strategy zip glob in repo root (comma-separated)"
-        required: false
-        default: "*.zip"
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
+    paths:
+      - ".github/workflows/scalper_backtest.yml"
+      - "eth_scalp_trader_pack_v0_1.zip"
+      - "ETHUSDT_1min_2020_2025.zip"
 
-permissions:
-  contents: read
+concurrency:
+  group: scalper_backtest-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  TZ: Asia/Seoul
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PYTHONDONTWRITEBYTECODE: "1"
-  PYTHONUNBUFFERED: "1"
+  PACK_ZIP: eth_scalp_trader_pack_v0_1.zip
+  DATA_ZIP: ETHUSDT_1min_2020_2025.zip
+  PY_VERSION: "3.11"
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+
     steps:
+      # ✅ 꼭 실제 커밋 SHA로 바꾸세요 (Marketplace에서 v4 최신 커밋 SHA 복사)
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        # ref: https://github.com/actions/checkout/commit/08c6903... :contentReference[oaicite:5]{index=5}
+        uses: actions/checkout@<PINNED_SHA_actions_checkout_v4>
 
-      - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: ${{ github.event.inputs.python_version || '3.11' }}
-          cache: 'pip'
-        # ref: https://github.com/actions/setup-python/commit/a26af69... :contentReference[oaicite:6]{index=6}
-
-      - name: Install system deps
+      # 캐시 의존성 파일을 미리 만들어 setup-python 캐시가 실패하지 않게 함
+      - name: Prepare minimal requirements for cache key
         run: |
-          sudo apt-get update -y
+          cat > requirements-ci.txt << 'REQ'
+          backtrader==1.9.78.123
+          pandas>=2.0
+          numpy>=1.24
+          matplotlib>=3.7
+          pandas_ta>=0.3.14b
+          yfinance>=0.2
+          scikit-learn>=1.3
+          scipy>=1.10
+          pyarrow>=12
+          pyyaml>=6
+          REQ
+
+      # ✅ 꼭 실제 커밋 SHA로 바꾸세요 (Marketplace에서 v5 최신 커밋 SHA 복사)
+      - name: Setup Python
+        uses: actions/setup-python@<PINNED_SHA_actions_setup-python_v5>
+        with:
+          python-version: ${{ env.PY_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: 'requirements-ci.txt'
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
           sudo apt-get install -y unzip
 
       - name: Install Python deps
         run: |
-          python -m pip install -U pip wheel
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            # 최소 런타임(수정 가능)
-            pip install pandas numpy matplotlib backtrader ta
-          fi
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
 
-      - name: Prepare workspace folders
+      - name: Unzip code pack and data
         run: |
-          mkdir -p data strategies results logs
+          set -euo pipefail
+          echo "Unzipping ${PACK_ZIP} and ${DATA_ZIP}..."
+          mkdir -p pack data outputs logs
+          # 코드팩 해제 (최상위에 여러 파일이 있든 폴더가 있든 pack/ 아래로 모음)
+          unzip -o "${PACK_ZIP}" -d pack >/dev/null
+          # 데이터 해제: zip에 csv/feather 등 들어있다고 가정
+          unzip -o "${DATA_ZIP}" -d data >/dev/null || true
+          echo "Layout after unzip:"
+          tree -L 2 || true
 
-      - name: Unzip data & strategy archives from repo root
+      - name: Find backtest entrypoint
+        id: find_entry
         shell: bash
         run: |
-          IFS=',' read -ra DATA_GLOBS <<< "${{ github.event.inputs.data_zip_glob || 'ETHUSDT_1min_2020_2025.zip' }}"
-          IFS=',' read -ra STRAT_GLOBS <<< "${{ github.event.inputs.strat_zip_glob || '*.zip' }}"
-
-          # 데이터 ZIP 해제 -> data/
-          for g in "${DATA_GLOBS[@]}"; do
-            for z in $g; do
-              [[ -f "$z" ]] || continue
-              echo "Unzipping data: $z"
-              unzip -o "$z" -d data/
-            done
+          set -euo pipefail
+          shopt -s globstar nullglob
+          candidates=(
+            pack/**/*backtest*.py
+            pack/**/*Backtest*.py
+            pack/**/run*.py
+            pack/**/main.py
+            pack/**/runner.py
+          )
+          chosen=""
+          for f in "${candidates[@]}"; do
+            if [[ -f "$f" ]]; then
+              chosen="$f"
+              break
+            fi
           done
-
-          # 전략 ZIP 해제 -> strategies/
-          for g in "${STRAT_GLOBS[@]}"; do
-            for z in $g; do
-              [[ -f "$z" ]] || continue
-              # 데이터 zip과 중복 unzip 방지: 데이터 파일명 heuristic
-              if echo "$z" | grep -qiE '(ETHUSDT|BTCUSDT|_1m|minute|data)'; then
-                echo "Skip strategy unzip for data-like file: $z"
-                continue
-              fi
-              echo "Unzipping strategy: $z"
-              unzip -o "$z" -d strategies/
-            done
-          done
-
-      - name: Build backtest command
-        id: cmd
-        run: |
-          # 아래 스크립트/엔트리포인트는 레포 구조에 맞게 변경 가능
-          # 우선 순위: repo 루트의 scripts/backtest.py > strategies/backtest.py
-          ENTRY=""
-          if [ -f scripts/backtest.py ]; then
-            ENTRY="scripts/backtest.py"
-          elif [ -f strategies/backtest.py ]; then
-            ENTRY="strategies/backtest.py"
-          else
-            # 예시 백테스트 러너(없으면 실패 대신 메시지)
-            echo "❌ backtest.py가 없습니다. strategies/ 내부에 backtest.py를 두거나 scripts/backtest.py를 추가하세요."
-            echo "예: python strategies/backtest.py --data-dir data --results-dir results --logs-dir logs --symbol ETHUSDT --timeframe 1m"
+          if [[ -z "${chosen}" ]]; then
+            echo "❌ 엔트리 파이썬 파일을 찾지 못했습니다. pack/ 아래 파일명을 확인하세요."
+            echo "hint: 파일명에 backtest/run/main/runner 가 포함되어야 자동탐색됩니다."
             exit 1
           fi
-
-          echo "entry=$ENTRY" >> "$GITHUB_OUTPUT"
+          echo "✅ Entrypoint: ${chosen}"
+          echo "entry=${chosen}" >> "$GITHUB_OUTPUT"
 
       - name: Run backtest
+        env:
+          ENTRY: ${{ steps.find_entry.outputs.entry }}
+        run: |
+          set -euo pipefail
+          echo "Running: ${ENTRY}"
+          # 자주 쓰이는 인자 패턴을 자동 시도. 실패 시 점진적 폴백.
+          python "${ENTRY}" --data ./data --out ./outputs 2>&1 | tee ./logs/run.log || \
+          python "${ENTRY}" --data_dir ./data --output_dir ./outputs 2>&1 | tee -a ./logs/run.log || \
+          python "${ENTRY}" 2>&1 | tee -a ./logs/run.log
+
+      - name: Sanity check results
         run: |
           set -e
-          python "${{ steps.cmd.outputs.entry }}" \
-            --data-dir data \
-            --results-dir results \
-            --logs-dir logs \
-            --symbol ETHUSDT \
-            --timeframe 1m
+          echo "Outputs:"
+          ls -lah outputs || true
+          # 결과 파일이 1개도 없으면 실패로 처리하여 디버깅 용이하게
+          cnt=$(ls -1 outputs 2>/dev/null | wc -l || echo 0)
+          if [ "$cnt" -eq 0 ]; then
+            echo "❌ outputs/ 비어있음. 엔트리 스크립트 인자 또는 데이터 경로를 확인하세요."
+            exit 2
+          fi
 
-      - name: Cache raw data (optional)
-        id: cache-data
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      - name: Upload artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@<PINNED_SHA_actions_upload-artifact_v4>
         with:
+          name: scalper_backtest_outputs
           path: |
-            data
-          key: ${{ runner.os }}-ethusdt-1m-${{ hashFiles('data/**') }}
-        # ref: https://github.com/actions/cache/commit/0400d5f... :contentReference[oaicite:7]{index=7}
-
-      - name: Upload results artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: backtest-results-${{ github.run_id }}
-          path: |
-            results/**
-            logs/**
+            outputs/**/*
+            logs/**/*
           if-no-files-found: warn
-        # ref: https://github.com/actions/upload-artifact/commit/ea165f8... :contentReference[oaicite:8]{index=8}
