@@ -37,16 +37,11 @@ jobs:
       PYVER:     ${{ github.event.inputs.python_version }}
 
     steps:
-      # Pinned SHAs (보안 규칙 충족)
+      # 1) Checkout (보안 규칙 충족: SHA 고정)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: "pip"
-
+      # 2) Zip 풀기 (Python 세팅보다 먼저!)
       - name: Prepare & unzip
         shell: bash
         run: |
@@ -57,7 +52,8 @@ jobs:
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
 
-      - name: Detect code root (backtest/engine.py)
+      # 3) 코드 루트 탐지 (zip 내부 어디에 풀렸든 backtest/engine.py 기준으로)
+      - name: Detect code root
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +66,7 @@ jobs:
           CODE_DIR=$(dirname "$(dirname "$found")")
           echo "CODE_DIR=${CODE_DIR}" | tee -a "$GITHUB_ENV"
 
+      # 4) CSV 절대경로 결정 (상대경로 때문에 터지는 문제 방지)
       - name: Detect CSV (absolute path)
         shell: bash
         run: |
@@ -77,25 +74,36 @@ jobs:
           shopt -s nullglob globstar
           CAND=( ${DATA_DIR}/${CSV_GLOB} )
           if (( ${#CAND[@]} == 0 )); then CAND=( ${DATA_DIR}/**/*.csv ); fi
-          if (( ${#CAND[@]} == 0 )); then echo "❌ No CSV found"; exit 1; fi
+          if (( ${#CAND[@]} == 0 )); then echo "❌ No CSV found under ${DATA_DIR}"; exit 1; fi
           ABS_CSV="$(readlink -f "${CAND[0]}" || echo "${GITHUB_WORKSPACE}/${CAND[0]}")"
           echo "ABS_CSV=${ABS_CSV}" | tee -a "$GITHUB_ENV"
 
+      # 5) Python 세팅 (이제 zip 내부 req를 캐시 키로 사용)
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+          cache: pip
+          cache-dependency-path: ${{ env.CODE_DIR }}/requirements.txt
+
+      # 6) 의존성 설치 (pyyaml 포함)
       - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
-          python3 -V
-          python3 -m pip install -U pip
-          python3 -m pip install -r "${CODE_DIR}/requirements.txt"
+          python -V
+          python -m pip install -U pip
+          python -m pip install -r "${CODE_DIR}/requirements.txt"
 
+      # 7) 백테스트 실행
       - name: Run backtest
         working-directory: ${{ env.CODE_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          python3 run_4u.py --data_path "${ABS_CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          python run_4u.py --data_path "${ABS_CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
+      # 8) 결과 업로드 (SHA 고정)
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
         with:
