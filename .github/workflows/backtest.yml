@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       trade_zip:
-        description: trade code zip (at repo root)
+        description: trade code zip at repo root
         required: true
         default: trade_v1.0.6_override.zip
       data_zip:
-        description: market data zip (at repo root)
+        description: market data zip at repo root
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       csv_glob:
-        description: CSV filename glob inside data zip
+        description: CSV filename glob (inside data zip)
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
       out_dir:
@@ -27,15 +27,10 @@ on:
         description: fail if fingerprint missing (true/false)
         required: true
         default: "false"
-  push:
-    paths:
-      - ".github/workflows/backtest.yml"
 
 jobs:
   run-backtest:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
@@ -47,10 +42,11 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
+      # ---- pinned SHAs (org 보안 정책 충족)
       - name: Checkout (pinned)
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
-      - name: Prepare workspace & unzip
+      - name: Prepare & unzip
         shell: bash
         run: |
           set -euo pipefail
@@ -59,85 +55,64 @@ jobs:
           test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "== data sample =="; find "${DATA_DIR}" -type f -name "*.csv" | head -n 8 || true
+          echo "== data sample =="
+          find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
 
-      # ✅ 새로추가: 캐시 의존파일 없을 때 dummy 생성 (setup-python 에러 방지)
-      - name: Ensure cache dependency files (dummy if missing)
+      - name: Detect code root (find backtest/engine.py)
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${RUN_DIR}/requirements.txt" ] && [ ! -f "${RUN_DIR}/pyproject.toml" ]; then
-            echo "No requirements/pyproject under ${RUN_DIR} — creating dummy requirements.txt for cache key"
-            echo "# dummy (CI installs base libs in next step)" > "${RUN_DIR}/requirements.txt"
+          # backtest/engine.py 가 들어있는 경로를 탐색
+          found=$(find "${RUN_DIR}" -type f -path "*/backtest/engine.py" | head -n1 || true)
+          if [ -z "$found" ]; then
+            echo "❌ not found: backtest/engine.py under ${RUN_DIR}"
+            echo "== list RUN_DIR =="
+            find "${RUN_DIR}" -maxdepth 3 -type d -print
+            exit 1
           fi
-          ls -al "${RUN_DIR}" | sed -n '1,100p'
+          CODE_DIR=$(dirname "$(dirname "$found")")
+          echo "CODE_DIR=${CODE_DIR}" | tee -a "$GITHUB_ENV"
+          echo "Detected CODE_DIR=${CODE_DIR}"
+          ls -al "${CODE_DIR}" || true
 
-      - name: Detect CSV (robust)
+      - name: Detect CSV (bash only)
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob globstar
-          FIRST=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" -print -quit || true)
-          if [ -z "${FIRST:-}" ]; then
-            FIRST=$(find "${DATA_DIR}" -type f -iname "*.csv" -print -quit || true)
+          CAND=( ${DATA_DIR}/${CSV_GLOB} )
+          if (( ${#CAND[@]} == 0 )); then
+            echo "❌ No CSV matched: ${CSV_GLOB} in ${DATA_DIR}"
+            exit 1
           fi
-          if [ -z "${FIRST:-}" ]; then
-            echo "❌ No CSV found in ${DATA_DIR} (glob=${CSV_GLOB})"; exit 1
-          fi
-          CSV_PATH=$(readlink -f "$FIRST" || echo "$FIRST")
-          echo "CSV_PATH=${CSV_PATH}" >> $GITHUB_ENV
-          echo "Using CSV: ${CSV_PATH}"
-          ls -al "$(dirname "$CSV_PATH")" || true
+          echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
+          echo "Using CSV: ${CAND[0]}"
 
-      - name: Setup Python (pinned; cache to tmp/trade)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      - name: Setup Python (pinned, cache points to CODE_DIR)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
           cache: pip
           cache-dependency-path: |
-            ${{ env.RUN_DIR }}/requirements.txt
-            ${{ env.RUN_DIR }}/pyproject.toml
-            **/requirements.txt
-            **/pyproject.toml
+            ${{ env.CODE_DIR }}/requirements.txt
+            ${{ env.CODE_DIR }}/pyproject.toml
 
-      - name: Install requirements (+PyYAML)
+      - name: Install requirements
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
+        working-directory: ${{ env.CODE_DIR }}
         run: |
           set -euo pipefail
           python -V
           python -m pip install -U pip
-          if [ -s requirements.txt ]; then
+          if [ -f requirements.txt ]; then
             python -m pip install -r requirements.txt
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
-          python -c "import yaml" 2>/dev/null || python -m pip install pyyaml
-
-      - name: Guard numpy import (auto-inject if missing)
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          mapfile -t FILES < <(grep -RIl --include="*.py" "np\." . || true)
-          for f in "${FILES[@]}"; do
-            grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$f" || sed -i '1i import numpy as np' "$f"
-          done
-
-      - name: Patch calibration np import (function-level)
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          F="trend4p/calibration.py"
-          if [ -f "$F" ]; then
-            grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$F" || sed -i '1i import numpy as np' "$F"
-            sed -i '/^[[:space:]]*def[[:space:]]\+predict[[:space:]]*(/a\        import numpy as np' "$F" || true
-          fi
 
       - name: Fingerprint check (warn-only)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
+        working-directory: ${{ env.CODE_DIR }}
         run: |
           set -euo pipefail
           F="backtest/runner.py"
@@ -149,98 +124,31 @@ jobs:
           fi
           echo "fingerprint warnings: $miss"
 
-      - name: Sanity check CSV path (2nd pass)
+      - name: Preflight CSV schema (bash only)
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${CSV_PATH}" ]; then
-            echo "⚠️ CSV_PATH missing → re-detecting..."
-            shopt -s nullglob globstar
-            NEW=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" -print -quit || true)
-            [ -n "${NEW:-}" ] || NEW=$(find "${DATA_DIR}" -type f -iname "*.csv" -print -quit || true)
-            [ -n "${NEW:-}" ] || { echo "❌ CSV not found after re-detect"; exit 1; }
-            CSV_PATH=$(readlink -f "$NEW" || echo "$NEW")
-            echo "CSV_PATH=${CSV_PATH}" >> $GITHUB_ENV
-            echo "Re-detected CSV: ${CSV_PATH}"
-          fi
-          echo "Final CSV_PATH=${CSV_PATH}"
-
-      # OF 결합/엔진 라인 교정(브로드캐스팅/길이 불일치 방지) + import 보강
-      - name: Fix oflow combine_of + force engine to combine_of(X)
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          F1="trend4p/utils/oflow.py"
-          [ -f "$F1" ] || { echo "❌ not found $F1"; exit 1; }
-          awk 'BEGIN{infunc=0}
-               /^def[[:space:]]+combine_of\(.*\):/ {
-                 print "def combine_of(df_or_X):"
-                 print "    import numpy as np"
-                 print "    if hasattr(df_or_X, '\''columns'\''):"
-                 print "        cols=[c for c in ['\''VPIN'\'','\''ATS'\'','\''lambda_kyle'\''] if c in df_or_X.columns]"
-                 print "        n=len(df_or_X)"
-                 print "        if not cols: return np.zeros(n)"
-                 print "        arrs=[]"
-                 print "        for c in cols:"
-                 print "            a=np.asarray(df_or_X[c], dtype=float)"
-                 print "            m=np.nanmedian(a); sd=np.nanstd(a)"
-                 print "            sd = 1e-12 if (sd==0 or not np.isfinite(sd)) else sd"
-                 print "            arrs.append((a-m)/sd)"
-                 print "        Z=np.column_stack(arrs)   # (N, k)"
-                 print "        return np.nanmean(Z, axis=1)  # (N,)"
-                 print "    else:"
-                 print "        arr=np.asarray(df_or_X, dtype=float)"
-                 print "        if arr.ndim==2 and arr.shape[0]==3: return np.nanmean(arr, axis=0)"
-                 print "        if arr.ndim==2 and arr.shape[1]==3: return np.nanmean(arr, axis=1)"
-                 print "        if arr.ndim==1: return np.nan_to_num(arr, copy=False)"
-                 print "        return np.zeros(arr.shape[0] if arr.ndim>0 else 0, dtype=float)"
-                 infunc=1; next
-               }
-               { if(infunc){ if($0 ~ /^def[[:space:]]+/){infunc=0; print $0} else {next} } else {print $0} }' "$F1" > "$F1.tmp" && mv "$F1.tmp" "$F1"
-
-          F2="backtest/engine.py"
-          [ -f "$F2" ] || { echo "❌ not found $F2"; exit 1; }
-          awk 'BEGIN{done=0}
-               {
-                 if(!done && $0 ~ /^[[:space:]]*of_shift[[:space:]]*=/){
-                   print "        of_shift = combine_of(X)"; done=1
-                 } else print $0
-               }' "$F2" > "$F2.tmp" && mv "$F2.tmp" "$F2"
-          grep -q "from trend4p.utils.oflow import combine_of" "$F2" || \
-            sed -i '1i from trend4p.utils.oflow import combine_of' "$F2"
+          HDR="$(head -n 1 "${CSV_PATH}")"
+          for c in open_time open high low close; do
+            echo "$HDR" | grep -q "$c" || { echo "❌ Missing column: $c"; exit 1; }
+          done
+          echo "CSV columns OK"
 
       - name: Run backtest
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
+        working-directory: ${{ env.CODE_DIR }}
         env:
           OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
-          ABS_OUT="${GITHUB_WORKSPACE}/${OUT_DIR}"
-          mkdir -p "${ABS_OUT}"
-
-          echo "Running with CSV_PATH=${CSV_PATH}"
-          test -f "${CSV_PATH}" || { echo "❌ CSV missing: ${CSV_PATH}"; exit 1; }
-          python run_4u.py --data_path "${CSV_PATH}" --config "conf/config.yml" --out_dir "${ABS_OUT}"
-
-          # 혹시 tmp/trade 쪽 상대경로로 썼으면 이관
-          if [ -d "_out_4u/run" ] && [ "$(ls -A _out_4u/run || true)" ]; then
-            echo "⚠️ Found outputs under tmp/trade/_out_4u/run → moving to ${ABS_OUT}"
-            rsync -a _out_4u/run/ "${ABS_OUT}/"
-          fi
-
-          echo "---- outputs (workspace) ----"
-          ls -al "${ABS_OUT}" || true
-
-          for f in summary.json gating_debug.json trades.csv preds_test.csv; do
-            test -f "${ABS_OUT}/${f}" || { echo "❌ missing ${ABS_OUT}/${f}"; exit 1; }
-          done
-          echo "---- summary ----"; head -n 60 "${ABS_OUT}/summary.json" || true
-          echo "---- gating ----";  head -n 60 "${ABS_OUT}/gating_debug.json" || true
+          mkdir -p "${OUT_DIR}"
+          python run_4u.py --data_path "${CSV_PATH}" --config "conf/config.yml" --out_dir "${OUT_DIR}"
+          echo "---- outputs ----"; ls -al "${OUT_DIR}" || true
+          echo "---- summary ----"; head -n 60 "${OUT_DIR}/summary.json" 2>/dev/null || true
+          echo "---- gating ----";  head -n 60 "${OUT_DIR}/gating_debug.json" 2>/dev/null || true
 
       - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
