@@ -1,139 +1,139 @@
-name: backtest
+name: Backtest
 
 on:
   workflow_dispatch:
     inputs:
       trade_zip_path:
-        description: "Path to trade code zip (in repo)"
-        required: true
-        default: "trade_v1.0.1.zip"
+        description: "Path to trade pack zip"
+        type: string
+        default: "trade_v1.0.4a.zip"
       data_zip_path:
-        description: "Path to 1m data zip (in repo)"
-        required: true
+        description: "Path to data zip (CSV inside)"
+        type: string
         default: "ETHUSDT_1min_2020_2025.zip"
-      out_dir:
-        description: "Output dir (relative to repo root)"
-        required: false
-        default: "_out_4u/run"
-  push:
-    branches: [ main ]
-    paths:
-      - "**/*.zip"
-      - ".github/workflows/backtest.yml"
 
 permissions:
   contents: read
 
-concurrency:
-  group: backtest-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
     env:
-      TRADE_ZIP: ${{ github.event.inputs.trade_zip_path || 'trade_v1.0.1.zip' }}
-      DATA_ZIP:  ${{ github.event.inputs.data_zip_path  || 'ETHUSDT_1min_2020_2025.zip' }}
-      OUT_DIR:   ${{ github.event.inputs.out_dir        || '_out_4u/run' }}
+      TRADE_ZIP: ${{ inputs.trade_zip_path }}
+      DATA_ZIP:  ${{ inputs.data_zip_path }}
+      RUN_DIR:   tmp/trade
+      DATA_DIR:  tmp/data
+      OUT_DIR:   _out_4u/run
+      CSV_PATH:  tmp/data/ETHUSDT_1min_2020_2025.csv
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # 모든 액션은 commit SHA로 고정 (조직 정책 충족)
+      # -- Pinned SHAs (정책 준수)
       - name: Checkout (pinned SHA)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
-      - name: Ensure unzip
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y unzip
-
-      - name: Show repo listing
-        run: ls -alh
-
-      # --- Unzip trade code & locate run_4u.py ---
-      - name: Unzip trade pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "$TRADE_ZIP" || { echo "❌ Trade zip not found: $TRADE_ZIP"; exit 1; }
-          mkdir -p tmp/trade
-          unzip -q -o "$TRADE_ZIP" -d tmp/trade
-
-          RUN_FILE="$(find tmp/trade -type f -name 'run_4u.py' -print -quit || true)"
-          [ -n "$RUN_FILE" ] || { echo "❌ run_4u.py not found inside $TRADE_ZIP"; exit 1; }
-          RUN_DIR="$(dirname "$RUN_FILE")"
-          echo "RUN_DIR=$RUN_DIR" >> "$GITHUB_ENV"
-
-          REQS_FILE="$(find "$RUN_DIR" -maxdepth 1 -type f -name 'requirements.txt' -print -quit || true)"
-          [ -n "$REQS_FILE" ] && echo "REQS_FILE=$REQS_FILE" >> "$GITHUB_ENV" || true
-          echo "ℹ️ RUN_DIR=$RUN_DIR"
-
-      # --- Unzip data & locate CSV (ETH 1m 우선) ---
-      - name: Unzip data pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "$DATA_ZIP" || { echo "❌ Data zip not found: $DATA_ZIP"; exit 1; }
-          mkdir -p tmp/data
-          unzip -q -o "$DATA_ZIP" -d tmp/data
-
-          CSV_PATH="$(find tmp/data -type f -iname '*ETH*1min*.csv' -print -quit)"
-          if [ -z "$CSV_PATH" ]; then
-            CSV_PATH="$(find tmp/data -type f -iname '*.csv' -print -quit)"
-          fi
-          [ -n "$CSV_PATH" ] || { echo "❌ No CSV found in $DATA_ZIP"; exit 1; }
-          echo "CSV_PATH=$CSV_PATH" >> "$GITHUB_ENV"
-          echo "ℹ️ CSV_PATH=$CSV_PATH"
-          head -n 3 "$CSV_PATH" || true
-
-      - name: Set up Python (pinned SHA)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Setup Python 3.11 (pinned SHA)
+        uses: actions/setup-python@39cd8d4002104aeda3945c78209b8e84c9700a4e
         with:
           python-version: "3.11"
-        # cache: pip  # 조직 정책상 필요 시 해제
+          cache: "pip"
 
-      - name: Install dependencies
-        shell: bash
+      - name: Show Python & pip & sklearn versions
+        run: |
+          python -c "import sys; print('Python', sys.version)"
+          python -m pip install --upgrade pip
+          pip --version
+
+      # ------- Unpack zips
+      - name: Prepare working dirs
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          if [ -n "${REQS_FILE:-}" ] && [ -f "$REQS_FILE" ]; then
-            pip install -r "$REQS_FILE"
-          else
-            pip install numpy pandas scikit-learn matplotlib pyyaml
-          fi
+          rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-      # --- 절대경로로 변환 (CWD 불일치 방지) ---
-      - name: Make absolute paths
-        shell: bash
+      - name: Unzip trade pack
         run: |
-          echo "ABS_CSV=$GITHUB_WORKSPACE/$CSV_PATH" >> $GITHUB_ENV
-          echo "ABS_OUT_DIR=$GITHUB_WORKSPACE/$OUT_DIR" >> $GITHUB_ENV
+          set -euo pipefail
+          test -f "${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
+          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
 
-      # --- run_4u.py 실행: CWD=RUN_DIR (config 상대경로 문제 해결) ---
-      - name: Run backtest
-        shell: bash
+      - name: Unzip data pack
+        run: |
+          set -euo pipefail
+          test -f "${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; exit 1; }
+          unzip -q "${DATA_ZIP}" -d "${DATA_DIR}"
+          # data zip 내부 CSV 파일명을 고정한다면 위 CSV_PATH와 맞추세요.
+
+      # ------- Install deps
+      - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          mkdir -p "$ABS_OUT_DIR"
-          echo "▶ python run_4u.py --data_path \"$ABS_CSV\" --out_dir \"$ABS_OUT_DIR\""
-          python run_4u.py --data_path "$ABS_CSV" --out_dir "$ABS_OUT_DIR"
+          pip install -r requirements.txt
+          python - <<'PY'
+import sklearn, sys
+print("sklearn", sklearn.__version__)
+PY
 
-      - name: Verify outputs
-        shell: bash
+      # ------- Sklearn 호환 스모크 테스트 (1.4/1.5 모두 통과해야 계속)
+      - name: CalibratedClassifierCV smoke test
         run: |
-          test -f "$ABS_OUT_DIR/summary.json" || { echo "❌ summary.json not found in $ABS_OUT_DIR"; exit 1; }
-          echo "==== SUMMARY (first 2000 chars) ===="
-          head -c 2000 "$ABS_OUT_DIR/summary.json" || true
+          python - <<'PY'
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+try:
+    CalibratedClassifierCV(estimator=LogisticRegression())
+    print("OK: estimator= (>=1.5)")
+except TypeError:
+    CalibratedClassifierCV(base_estimator=LogisticRegression())
+    print("OK: base_estimator= (<=1.4)")
+PY
 
+      # ------- 지문 검사: v1.0.4 계열인지 확인 (실수 방지)
+      - name: Fingerprint check (v1.0.4a gating & cutoff)
+        run: |
+          set -euo pipefail
+          grep -n "Coverage-aligned gating" "${RUN_DIR}/backtest/runner.py"
+          grep -n "S1 probability floor cutoff" "${RUN_DIR}/backtest/runner.py" || { echo "❌ S1 cutoff missing"; exit 1; }
+
+      # ------- Preflight: CSV 포맷 및 필수 컬럼
+      - name: Preflight CSV
+        run: |
+          python - <<'PY'
+import pandas as pd, sys, os
+csv = os.environ['CSV_PATH']
+df = pd.read_csv(csv, nrows=2)
+need = {'open_time','open','high','low','close','volume','number_of_trades'}
+missing = need - set(df.columns)
+if missing:
+    print("❌ Missing base columns:", missing); sys.exit(1)
+hints = {'taker_buy_base_asset_volume','taker_buy_quote_asset_volume'}
+if not (hints & set(df.columns)):
+    print("❌ Need taker_buy_* volume columns"); sys.exit(1)
+print("✅ CSV OK")
+PY
+
+      # ------- Run backtest
+      - name: Run backtest
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ env.OUT_DIR }}"
+          echo "---- gating debug ----"
+          cat "${{ env.OUT_DIR }}/gating_debug.json" || true
+          echo "----------------------"
+
+      # ------- Upload artifacts (pinned SHA)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
-            ${{ env.ABS_OUT_DIR }}/summary.json
-            ${{ env.ABS_OUT_DIR }}/charts/
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/charts/
           if-no-files-found: warn
           retention-days: 30
+          compression-level: 6
