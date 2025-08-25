@@ -1,118 +1,140 @@
-name: Scapler_Backtest (ETHUSDT 1m)
+name: ETH 1m Backtest
 
 on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Python version"
+        required: true
+        default: "3.11"
+      data_zip_glob:
+        description: "Data zip glob in repo root (comma-separated)"
+        required: false
+        default: "ETHUSDT_1min_2020_2025.zip"
+      strat_zip_glob:
+        description: "Strategy zip glob in repo root (comma-separated)"
+        required: false
+        default: "*.zip"
   push:
-    paths:
-      - '**.zip'
-      - '**.py'
-      - 'requirements.txt'
-      - '.github/workflows/backtest.yml'
-  workflow_dispatch: {}
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Seoul
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        symbol: [ETHUSDT]
-        timeframe: ['1m']
-        slippage: [0.0005]     # 필요시 조정
-        fee: [0.0004]          # 거래소 taker/maker 수수료에 맞게 조정
+    timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        # ref: https://github.com/actions/checkout/commit/08c6903... :contentReference[oaicite:5]{index=5}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: '3.10'
+          python-version: ${{ github.event.inputs.python_version || '3.11' }}
+          cache: 'pip'
+        # ref: https://github.com/actions/setup-python/commit/a26af69... :contentReference[oaicite:6]{index=6}
 
       - name: Install system deps
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y unzip
-
-      - name: Unzip all .zip in repo root
-        run: |
-          shopt -s nullglob
-          mkdir -p unzipped
-          for z in *.zip; do
-            echo "Unzipping $z"
-            mkdir -p "unzipped/${z%.zip}"
-            unzip -oq "$z" -d "unzipped/${z%.zip}"
-          done
-
-          # 전략 zip 안에 *.py 있으면 루트로 복사(이미 있으면 유지)
-          for d in unzipped/*; do
-            if compgen -G "$d/*.py" > /dev/null; then
-              cp -rn "$d"/* .
-            fi
-          done
-
-      - name: Locate ETH 1m data file
-        id: data
-        run: |
-          # 가장 그럴듯한 파일 자동 탐지 (csv 우선, 없으면 parquet)
-          DATA_FILE=$( { find unzipped -type f -iregex '.*ETH.*1.*m.*\.csv$' -o -iregex '.*ETHUSDT.*1.*m.*\.csv$'; } | head -n1 || true)
-          if [ -z "$DATA_FILE" ]; then
-            DATA_FILE=$( { find unzipped -type f -iregex '.*ETH.*1.*m.*\.parquet$' -o -iregex '.*ETHUSDT.*1.*m.*\.parquet$'; } | head -n1 || true)
-          fi
-          if [ -z "$DATA_FILE" ]; then
-            echo "❌ ETH 1분봉 데이터(csv/parquet) 자동탐지 실패. 파일명을 ETH/ETHUSDT & 1m/1min 포함하게 해줘."
-            exit 1
-          fi
-          echo "data_file=$DATA_FILE" >> $GITHUB_OUTPUT
-          echo "✅ DATA_FILE=$DATA_FILE"
 
       - name: Install Python deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip wheel
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # 기본 백테스트 스택(필요 패키지 미정일 때 안전망)
-            pip install backtrader pandas numpy ta matplotlib
+            # 최소 런타임(수정 가능)
+            pip install pandas numpy matplotlib backtrader ta
           fi
 
-      - name: Decide RUN_CMD (auto-detect entry)
-        id: run
-        env:
-          SYMBOL: ${{ matrix.symbol }}
-          TIMEFRAME: ${{ matrix.timeframe }}
-          DATA_FILE: ${{ steps.data.outputs.data_file }}
-          SLIPPAGE: ${{ matrix.slippage }}
-          FEE: ${{ matrix.fee }}
+      - name: Prepare workspace folders
         run: |
-          set -e
-          # 1) 루트의 backtest.py
-          if [ -f "./backtest.py" ]; then
-            CMD="python backtest.py --symbol ${SYMBOL} --timeframe ${TIMEFRAME} --data \"${DATA_FILE}\" --slippage ${SLIPPAGE} --fee ${FEE} --outdir output/${SYMBOL}_${TIMEFRAME}"
-          # 2) 어떤 디렉토리든 backtest*.py 중 하나
-          elif ls **/backtest*.py 1> /dev/null 2>&1; then
-            FILE=$(ls **/backtest*.py | head -n1)
-            CMD="python \"$FILE\" --symbol ${SYMBOL} --timeframe ${TIMEFRAME} --data \"${DATA_FILE}\" --slippage ${SLIPPAGE} --fee ${FEE} --outdir output/${SYMBOL}_${TIMEFRAME}"
-          # 3) Makefile target
-          elif [ -f "Makefile" ] && grep -qE '(^backtest:)|(^run-backtest:)' Makefile; then
-            CMD="make backtest SYMBOL=${SYMBOL} TIMEFRAME=${TIMEFRAME} DATA='${DATA_FILE}' SLIPPAGE=${SLIPPAGE} FEE=${FEE}"
+          mkdir -p data strategies results logs
+
+      - name: Unzip data & strategy archives from repo root
+        shell: bash
+        run: |
+          IFS=',' read -ra DATA_GLOBS <<< "${{ github.event.inputs.data_zip_glob || 'ETHUSDT_1min_2020_2025.zip' }}"
+          IFS=',' read -ra STRAT_GLOBS <<< "${{ github.event.inputs.strat_zip_glob || '*.zip' }}"
+
+          # 데이터 ZIP 해제 -> data/
+          for g in "${DATA_GLOBS[@]}"; do
+            for z in $g; do
+              [[ -f "$z" ]] || continue
+              echo "Unzipping data: $z"
+              unzip -o "$z" -d data/
+            done
+          done
+
+          # 전략 ZIP 해제 -> strategies/
+          for g in "${STRAT_GLOBS[@]}"; do
+            for z in $g; do
+              [[ -f "$z" ]] || continue
+              # 데이터 zip과 중복 unzip 방지: 데이터 파일명 heuristic
+              if echo "$z" | grep -qiE '(ETHUSDT|BTCUSDT|_1m|minute|data)'; then
+                echo "Skip strategy unzip for data-like file: $z"
+                continue
+              fi
+              echo "Unzipping strategy: $z"
+              unzip -o "$z" -d strategies/
+            done
+          done
+
+      - name: Build backtest command
+        id: cmd
+        run: |
+          # 아래 스크립트/엔트리포인트는 레포 구조에 맞게 변경 가능
+          # 우선 순위: repo 루트의 scripts/backtest.py > strategies/backtest.py
+          ENTRY=""
+          if [ -f scripts/backtest.py ]; then
+            ENTRY="scripts/backtest.py"
+          elif [ -f strategies/backtest.py ]; then
+            ENTRY="strategies/backtest.py"
           else
-            echo "❌ 백테스트 엔트리포인트(backtest.py, **/backtest*.py, 또는 Makefile target)가 없음."
-            echo "👉 레포 루트에 backtest.py 두거나, Makefile에 backtest 타겟을 만들어줘."
+            # 예시 백테스트 러너(없으면 실패 대신 메시지)
+            echo "❌ backtest.py가 없습니다. strategies/ 내부에 backtest.py를 두거나 scripts/backtest.py를 추가하세요."
+            echo "예: python strategies/backtest.py --data-dir data --results-dir results --logs-dir logs --symbol ETHUSDT --timeframe 1m"
             exit 1
           fi
-          echo "cmd=$CMD" >> $GITHUB_OUTPUT
-          echo "▶ $CMD"
+
+          echo "entry=$ENTRY" >> "$GITHUB_OUTPUT"
 
       - name: Run backtest
-        run: ${{ steps.run.outputs.cmd }}
+        run: |
+          set -e
+          python "${{ steps.cmd.outputs.entry }}" \
+            --data-dir data \
+            --results-dir results \
+            --logs-dir logs \
+            --symbol ETHUSDT \
+            --timeframe 1m
 
-      - name: Upload artifacts (results/reports/output)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Cache raw data (optional)
+        id: cache-data
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
-          name: backtest-${{ matrix.symbol }}-${{ matrix.timeframe }}
           path: |
-            output/**
+            data
+          key: ${{ runner.os }}-ethusdt-1m-${{ hashFiles('data/**') }}
+        # ref: https://github.com/actions/cache/commit/0400d5f... :contentReference[oaicite:7]{index=7}
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backtest-results-${{ github.run_id }}
+          path: |
             results/**
-            reports/**
-          if-no-files-found: ignore
+            logs/**
+          if-no-files-found: warn
+        # ref: https://github.com/actions/upload-artifact/commit/ea165f8... :contentReference[oaicite:8]{index=8}
