@@ -6,7 +6,7 @@ on:
       trade_zip_path:
         description: "Path to trade pack zip"
         type: string
-        default: "trade_v1.0.4.zip"   # ← 최신 수정본
+        default: "trade_v1.0.4b_full.zip"
       data_zip_path:
         description: "Path to data zip (CSV inside)"
         type: string
@@ -18,9 +18,7 @@ permissions:
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    defaults: { run: { shell: bash } }
     env:
       REPO_DIR: repo
       TRADE_ZIP: ${{ inputs.trade_zip_path }}
@@ -35,7 +33,6 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # --- 외부 checkout 액션 없이 현재 커밋 체크아웃 (pinned SHA 문제 회피)
       - name: Manual checkout (no external action)
         run: |
           set -euo pipefail
@@ -45,28 +42,35 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git -c advice.detachedHead=false fetch --depth=1 origin "${GITHUB_SHA}"
           git checkout --detach "${GITHUB_SHA}"
-          echo "Checked out ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
 
-      # --- 디렉토리 준비/ZIP 해제
       - name: Prepare working dirs
         run: |
           set -euo pipefail
           rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-      - name: Unzip trade pack
+      - name: Unzip packs
         run: |
           set -euo pipefail
           test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
+          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ data zip not found: ${DATA_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
+          unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
 
-      - name: Unzip data pack
+      - name: Detect CSV path
         run: |
           set -euo pipefail
-          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
-          unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
+          echo "--- data dir tree ---"
+          find "${DATA_DIR}" -maxdepth 4 -type f -iname "*.csv" -printf " - %p\n" || true
+          cand=""
+          for pat in "*ETHUSDT*1min*2020*2025*.csv" "*ETHUSDT*1m*2020*2025*.csv" "*.csv"; do
+            hit=$(find "${DATA_DIR}" -type f -iname "$pat" | sort | head -n1 || true)
+            if [ -n "$hit" ]; then cand="$hit"; break; fi
+          done
+          [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
+          echo "CSV_PATH=${cand}" >> "$GITHUB_ENV"
+          echo "Resolved CSV_PATH=${cand}"
 
-      # --- 의존성 설치
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -76,71 +80,57 @@ jobs:
           pip install -r requirements.txt
           python -c 'import sklearn; print("sklearn", sklearn.__version__)'
 
-      # --- sklearn 1.4/1.5 ctor 시그니처 호환 스모크 테스트
       - name: CalibratedClassifierCV smoke test
         run: |
-          set -euo pipefail
-          cat > /tmp/smoke_cal_cv.py <<'PY'
+          python - <<'PY'
           from sklearn.calibration import CalibratedClassifierCV as C
           from sklearn.linear_model import LogisticRegression as L
           try:
-              C(estimator=L())
-              print("OK: estimator= (>=1.5)")
+              C(estimator=L()); print("OK: estimator (>=1.5)")
           except TypeError:
-              C(base_estimator=L())
-              print("OK: base_estimator= (<=1.4)")
+              C(base_estimator=L()); print("OK: base_estimator (<=1.4)")
           PY
-          python /tmp/smoke_cal_cv.py
 
-      # --- Fingerprint: 문구/코드 어느 쪽이든 OK (문구 미스매치로 실패하는 일 제거)
       - name: Fingerprint check (v1.0.4 family)
         run: |
           set -euo pipefail
           FILE="${RUN_DIR}/backtest/runner.py"
-          test -f "$FILE" || { echo "❌ runner.py not found at $FILE"; find "${RUN_DIR}" -maxdepth 3 -type f | sed 's/^/ - /'; exit 1; }
           grep -q "Coverage-aligned gating" "$FILE" || { echo "❌ missing: Coverage-aligned gating"; exit 1; }
           if grep -q "S1 min prob cutoff" "$FILE"; then
-            echo "✅ fingerprint: S1 min prob cutoff (comment)"
-          elif grep -q "S1 probability floor cutoff" "$FILE"; then
-            echo "✅ fingerprint: S1 probability floor cutoff (comment)"
+            echo "✅ S1 cutoff (comment)"
           elif grep -q "df\\['gate'\\] *= *df\\['gate'\\] *\\* *\\(df\\['p_long'\\] *>= *p_cut\\)" "$FILE"; then
-            echo "✅ fingerprint: S1 cutoff code pattern"
+            echo "✅ S1 cutoff (code pattern)"
           else
-            echo "❌ missing: S1 cutoff comment/code"; exit 1
+            echo "❌ missing: S1 cutoff"; exit 1
           fi
 
-      # --- CSV 프리플라이트
       - name: Preflight CSV
         run: |
-          set -euo pipefail
           python - <<'PY'
           import os, sys, pandas as pd
           csv = os.environ['CSV_PATH']
+          print("Using CSV:", csv)
           df  = pd.read_csv(csv, nrows=2)
           need = {'open_time','open','high','low','close','volume','number_of_trades'}
           miss = need - set(df.columns)
-          if miss:
-              print('❌ Missing base columns:', miss); sys.exit(1)
+          if miss: print('❌ Missing base columns:', miss); sys.exit(1)
           hints = {'taker_buy_base_asset_volume','taker_buy_quote_asset_volume'}
-          if not (hints & set(df.columns)):
-              print('❌ Need taker_buy_* volume columns'); sys.exit(1)
+          if not (hints & set(df.columns)): print('❌ Need taker_buy_* volume columns'); sys.exit(1)
           print('✅ CSV OK')
           PY
 
-      # --- 백테스트 실행
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ env.OUT_DIR }}"
+          echo "CSV_PATH=${CSV_PATH}"
+          python run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
           echo "---- gating debug ----"
-          cat "${{ env.OUT_DIR }}/gating_debug.json" || true
-          ls -al "${{ env.OUT_DIR }}"
+          cat "${OUT_DIR}/gating_debug.json" || true
+          ls -al "${OUT_DIR}"
 
-      # --- 아티팩트 업로드 (pinned SHA, 실패해도 계속)
-      - name: Upload artifacts (pinned SHA)
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        continue-on-error: true
         with:
           name: backtest-output
           path: |
