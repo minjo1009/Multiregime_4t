@@ -24,7 +24,7 @@ on:
         required: true
         default: "3.11"
       fail_on_fingerprint:
-        description: fail if gating fingerprint missing (true/false)
+        description: fail if fingerprint missing (true/false)
         required: true
         default: "false"
 
@@ -32,7 +32,6 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     env:
-      REPO_DIR: repo
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       TRADE_ZIP: ${{ github.event.inputs.trade_zip }}
@@ -43,43 +42,42 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      # --- pinned SHAs (보안정책 충족)
+      # --- pinned SHAs (org 보안정책 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: "pip"
 
-      - name: Prepare workspace
+      - name: Prepare workspace & unzip
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-
-      - name: Unzip trade & data
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "${TRADE_ZIP}" || { echo "missing ${TRADE_ZIP}"; exit 1; }
-          test -f "${DATA_ZIP}"  || { echo "missing ${DATA_ZIP}"; exit 1; }
+          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP}"; exit 1; }
+          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
           echo "[data sample]"; find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
 
       - name: Detect CSV (bash only)
-        id: detect_csv
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob globstar
           CAND=( ${DATA_DIR}/${CSV_GLOB} )
           if (( ${#CAND[@]} == 0 )); then
-            echo "No CSV matched: ${CSV_GLOB} in ${DATA_DIR}"; exit 1
+            echo "❌ No CSV matched: ${CSV_GLOB} in ${DATA_DIR}"
+            exit 1
           fi
           echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
           echo "Using CSV: ${CAND[0]}"
+
+      - name: Setup Python (pinned, cache points to tmp/trade)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+          cache: pip
+          cache-dependency-path: |
+            ${{ env.RUN_DIR }}/requirements.txt
+            ${{ env.RUN_DIR }}/pyproject.toml
 
       - name: Install requirements
         shell: bash
@@ -94,7 +92,6 @@ jobs:
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
 
-      # --- 과거 fingerprint는 경고만
       - name: Fingerprint check (warn-only)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -109,24 +106,13 @@ jobs:
           fi
           echo "fingerprint warnings: $miss"
 
-      # --- gate/score 보강 (코드팩 미패치 방지)
-      - name: Hotfix runner (inject df['score'] & df['gate'])
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          F="backtest/runner.py"
-          # '# Save debug' 라인 바로 아래에 보정 컬럼 생성 코드 주입 (앵커 없어도 sed 0 반환)
-          sed -i '/# Save debug/a\    df["score"]=score_series; df["gate"]=gate' "$F" || true
-          grep -n "df\\['gate'\\]" "$F" | head -n 1 || echo "WARN: sed injection check could not find df['gate']"
-
       - name: Preflight CSV schema (bash only)
         shell: bash
         run: |
           set -euo pipefail
           HDR="$(head -n 1 "${CSV_PATH}")"
           for c in open_time open high low close; do
-            echo "$HDR" | grep -q "$c" || { echo "Missing column: $c"; exit 1; }
+            echo "$HDR" | grep -q "$c" || { echo "❌ Missing column: $c"; exit 1; }
           done
           echo "CSV columns OK"
 
