@@ -3,132 +3,95 @@ on:
   workflow_dispatch:
     inputs:
       trade_zip:
-        description: "Code ZIP filename at repo root"
+        description: Code ZIP at repo root
         required: false
-        default: "trade_v1.0.5_full.zip"
+        default: trade_v1.0.6_override.zip
       data_zip:
-        description: "Data ZIP filename at repo root"
+        description: Data ZIP at repo root
         required: false
-        default: "ETHUSDT_1min_2020_2025.zip"
+        default: ETHUSDT_1min_2020_2025.zip
       csv_glob:
-        description: "CSV filename glob to search inside data dir"
+        description: CSV glob inside data dir
         required: false
-        default: "*ETHUSDT*1min*2020*2025*.csv"
+        default: "*ETHUSDT*1min*202*.csv"
       out_dir:
-        description: "Output directory"
+        description: Output directory
         required: false
-        default: "_out_4u/run"
-
-env:
-  REPO_DIR: repo
-  RUN_DIR:  tmp/trade
-  DATA_DIR: tmp/data
-  TRADE_ZIP: trade_v1.0.5_full.zip
-  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip
-  CSV_GLOB:  "*ETHUSDT*1min*2020*2025*.csv"
+        default: _out_4u/run
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository (git)
-        shell: bash
-        run: |
-          set -euo pipefail
-          git init "${REPO_DIR}"
-          cd "${REPO_DIR}"
-          git remote add origin "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}.git"
-          git -c protocol.version=2 fetch --depth=1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Resolve inputs
-        shell: bash
         run: |
-          set -euo pipefail
-          TZ="${{ github.event.inputs.trade_zip }}";   [ -n "$TZ" ] || TZ="${TRADE_ZIP}"
-          DZ="${{ github.event.inputs.data_zip }}";    [ -n "$DZ" ] || DZ="${DATA_ZIP}"
-          CG="${{ github.event.inputs.csv_glob }}";    [ -n "$CG" ] || CG="${CSV_GLOB}"
-          OD="${{ github.event.inputs.out_dir }}";     [ -n "$OD" ] || OD="_out_4u/run"
-          echo "TRADE_ZIP=$TZ"  >> "$GITHUB_ENV"
-          echo "DATA_ZIP=$DZ"   >> "$GITHUB_ENV"
-          echo "CSV_GLOB=$CG"   >> "$GITHUB_ENV"
-          echo "OUT_DIR=$OD"    >> "$GITHUB_ENV"
-          echo "Resolved: TRADE_ZIP=$TZ, DATA_ZIP=$DZ, CSV_GLOB=$CG, OUT_DIR=$OD"
+          echo "TRADE_ZIP=${{ inputs.trade_zip }}" >> $GITHUB_ENV
+          echo "DATA_ZIP=${{ inputs.data_zip }}" >> $GITHUB_ENV
+          echo "CSV_GLOB=${{ inputs.csv_glob }}" >> $GITHUB_ENV
+          echo "OUT_DIR=${{ inputs.out_dir }}" >> $GITHUB_ENV
 
-      - name: Prepare workspace
+      - name: Prepare (unzip)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-          test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ missing trade zip: ${TRADE_ZIP}"; exit 1; }
-          test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ missing data zip:  ${DATA_ZIP}";  exit 1; }
-          unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
-          unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "[runner.py head]"; sed -n '1,80p' "${RUN_DIR}/backtest/runner.py" || true
-          echo "[config.yml head]"; sed -n '1,80p' "${RUN_DIR}/conf/config.yml" || true
-          echo "[data dir]"; find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" | head -n 10
+          : "${TRADE_ZIP:=trade_v1.0.6_override.zip}"
+          : "${DATA_ZIP:=ETHUSDT_1min_2020_2025.zip}"
+          : "${CSV_GLOB:=*ETHUSDT*1min*202*.csv}"
+          : "${OUT_DIR:=_out_4u/run}"
 
-      # ✅ Hotfix: 따옴표 문제 없는 sed로 'gate/score' 라인 주입
-      - name: Hotfix runner (ensure df['gate'] before debug)
-        shell: bash
-        run: |
-          set -euo pipefail
-          f="${RUN_DIR}/backtest/runner.py"
-          # '# Save debug' 다음 줄에 삽입 (따옴표는 모두 큰따옴표 사용)
-          sed -i '/# Save debug/a\    df["score"]=score_series; df["gate"]=gate' "$f"
-          # 주입 확인
-          grep -n 'df\["gate"\]=gate' "$f" | head -n 1
+          mkdir -p tmp/trade tmp/data "$OUT_DIR"
+          test -f "$TRADE_ZIP" || { echo "❌ missing $TRADE_ZIP"; exit 1; }
+          test -f "$DATA_ZIP"  || { echo "❌ missing $DATA_ZIP"; exit 1; }
+
+          unzip -q "$TRADE_ZIP" -d tmp/trade
+          unzip -q "$DATA_ZIP"  -d tmp/data
+
+          echo "[data sample]"
+          find tmp/data -type f -name "*.csv" | head -n 5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install requirements
-        working-directory: ${{ env.RUN_DIR }}
-        shell: bash
+        working-directory: tmp/trade
         run: |
-          set -euo pipefail
-          python3 -V
-          python3 -m pip install -U pip
-          python3 -m pip install -r requirements.txt
-
-      - name: Fingerprint check
-        shell: bash
-        run: |
-          set -euo pipefail
-          f="${RUN_DIR}/backtest/runner.py"; conf="${RUN_DIR}/conf/config.yml"
-          if grep -Eq "Coverage-aligned gating" "$f"; then
-            echo "OK legacy (v1.0.4)"
-          elif grep -Eq "^s1_min_prob" "$conf" && grep -Eq "^coverage_mode" "$conf"; then
-            echo "OK transitional (1.0.4b)"
-          elif grep -Eq "^regime_policy:" "$conf" && grep -Eq "^s1_floor:" "$conf"; then
-            echo "OK v1.0.5"
-          else
-            echo "✖ unknown fingerprint"; sed -n '1,140p' "$conf" || true; exit 1
-          fi
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt
+          python - <<'PY'
+          import sklearn, sys
+          print("sklearn", sklearn.__version__)
+          PY
 
       - name: Detect CSV
         shell: bash
         run: |
           set -euo pipefail
-          cand=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" | head -n1 || true)
-          if [ -z "$cand" ]; then
-            cand=$(find "${DATA_DIR}" -type f \( -iname "*ETHUSDT*1m*2020*2025*.csv" -o -iname "*ETHUSDT*1min*.csv" -o -iname "*.csv" \) | head -n1 || true)
-          fi
-          [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR} by ${CSV_GLOB}"; exit 1; }
-          echo "CSV_PATH=$cand" >> "$GITHUB_ENV"
-          echo "Detected CSV: $cand"
+          cand=$(find tmp/data -type f -iname "$CSV_GLOB" | head -n1 || true)
+          [ -n "$cand" ] || cand=$(find tmp/data -type f -iname "*.csv" | head -n1 || true)
+          [ -n "$cand" ] || { echo "❌ No CSV found under tmp/data"; exit 1; }
+          echo "CSV_PATH=$cand" >> $GITHUB_ENV
+          echo "Using CSV_PATH=$cand"
 
       - name: Run backtest
-        working-directory: ${{ env.RUN_DIR }}
-        shell: bash
+        working-directory: tmp/trade
         run: |
           set -euo pipefail
-          CSV="${CSV_PATH}"; [ -f "$CSV" ] || CSV=$(find "${GITHUB_WORKSPACE}/${DATA_DIR}" -type f -name "*.csv" | head -n1 || true)
-          [ -n "$CSV" ] && [ -f "$CSV" ] || { echo "❌ CSV not found"; exit 1; }
-          echo "Using CSV_PATH=${CSV}"
-          python3 run_4u.py --data_path "${CSV}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}" --config "conf/config.yml"
-          echo "---- gating debug ----"; cat "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
-          ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          python run_4u.py --data_path "$CSV_PATH" --config "conf/config.yml" --out_dir "$GITHUB_WORKSPACE/$OUT_DIR"
+          echo "---- outputs ----"
+          ls -al "$GITHUB_WORKSPACE/$OUT_DIR"
+          echo "---- summary head ----"
+          head -n 80 "$GITHUB_WORKSPACE/$OUT_DIR/summary.json" || true
+          echo "---- gating_debug head ----"
+          head -n 80 "$GITHUB_WORKSPACE/$OUT_DIR/gating_debug.json" || true
 
-      - name: Upload artifacts (pinned SHA)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: backtest-output
           path: |
@@ -136,6 +99,5 @@ jobs:
             _out_4u/run/gating_debug.json
             _out_4u/run/trades.csv
             _out_4u/run/preds_test.csv
-            _out_4u/run/charts/
           if-no-files-found: error
           retention-days: 30
