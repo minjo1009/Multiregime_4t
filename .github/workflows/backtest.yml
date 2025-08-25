@@ -158,7 +158,7 @@ jobs:
           fi
           echo "Final CSV_PATH=${CSV_PATH}"
 
-      # ✅ OF shift 브로드캐스팅 핫픽스: of_shift를 (N,) 시계열로 강제
+            # ✅ OF shift 브로드캐스팅 핫픽스: of_shift를 (N,) 시계열로 강제 (줄 전체 치환)
       - name: Patch engine OF shift (timewise mean)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -167,7 +167,7 @@ jobs:
           F="backtest/engine.py"
           [ -f "$F" ] || { echo "❌ not found: $F"; exit 1; }
 
-          # compute_of_shift(df)가 없으면 삽입 (idempotent)
+          # 1) compute_of_shift(df)가 없으면 삽입 (idempotent)
           grep -q "def compute_of_shift(df):" "$F" || awk '
             {print $0}
             END{
@@ -187,19 +187,26 @@ jobs:
               print "    return pd.Series(s, index=df.index).fillna(0.0)"
             }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 
-          # 기존 of_shift 할당을 compute_of_shift(df)로 치환(첫 1회)
-          if grep -qE "of_shift[[:space:]]*=" "$F"; then
-            sed -i '0,/of_shift[[:space:]]*=/{s//of_shift = compute_of_shift(df)/}' "$F"
-          else
-            # of_shift 라인이 없으면 logit_core 위에 삽입
+          # 2) of_shift 할당 줄을 '전체 줄 교체' (첫 1회만) — 잔여 토큰 제거
+          awk 'BEGIN{done=0}
+               {
+                 if(!done && $0 ~ /^[[:space:]]*of_shift[[:space:]]*=/){
+                   print "        of_shift = compute_of_shift(df)"; done=1
+                 } else print $0
+               }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+
+          # 3) 그래도 없으면 logit_core 바로 위에 삽입
+          if ! grep -q "of_shift = compute_of_shift(df)" "$F"; then
             LN=$(grep -n "logit_core" "$F" | head -n1 | cut -d: -f1 || true)
             if [ -n "${LN:-}" ]; then
-              sed -i "${LN}i of_shift = compute_of_shift(df)" "$F"
+              sed -i "${LN}i \        of_shift = compute_of_shift(df)" "$F"
             else
-              echo "of_shift = compute_of_shift(df)" >> "$F"
+              echo "        of_shift = compute_of_shift(df)" >> "$F"
             fi
           fi
+
           grep -n "compute_of_shift" "$F" | head -n 2 || true
+          grep -n "of_shift = compute_of_shift(df)" "$F" | head -n 1 || true
 
       - name: Run backtest
         shell: bash
