@@ -99,22 +99,37 @@ jobs:
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
-          # ensure PyYAML (engine.py uses `import yaml`)
+          # engine.py uses `import yaml`
           python -c "import yaml" 2>/dev/null || python -m pip install pyyaml
 
-      # ✅ NEW: np 가드 – np.를 쓰는데 import가 없으면 자동 주입
+      # np.를 쓰는 파일에 import numpy as np 주입 (전역 가드)
       - name: Guard numpy import (auto-inject if missing)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          # np.를 사용하는 모든 파이썬 파일에 import numpy as np 보장
           mapfile -t FILES < <(grep -RIl --include="*.py" "np\." . || true)
           for f in "${FILES[@]}"; do
             grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$f" || sed -i '1i import numpy as np' "$f"
           done
-          # (옵션) 로컬 재할당 경고 출력만
-          grep -RIn --include="*.py" '^[[:space:]]*np[[:space:]]*=' . || true
+
+      # 🔧 NEW: calibration.predict() 함수 안에 import numpy as np를 안전 삽입
+      - name: Patch calibration np import (function-level)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          F="trend4p/calibration.py"
+          if [ -f "$F" ]; then
+            # 모듈 상단에도 없으면 보강
+            grep -qE '(^|\s)import\s+numpy\s+as\s+np' "$F" || sed -i '1i import numpy as np' "$F"
+            # predict 정의 직후에 함수 내 import 삽입(중복 삽입돼도 무해)
+            sed -i '/^[[:space:]]*def[[:space:]]\+predict[[:space:]]*(/a\        import numpy as np' "$F" || true
+            echo "[patched] $F"
+            grep -n "def predict" -n "$F" | head -n 1 || true
+          else
+            echo "WARN: $F not found (skip)"
+          fi
 
       - name: Fingerprint check (warn-only)
         shell: bash
