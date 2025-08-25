@@ -6,7 +6,7 @@ on:
       trade_zip_path:
         description: "Path to trade code zip (in repo)"
         required: true
-        default: "trade_v1.0.zip"
+        default: "trade_v1.0.1.zip"
       data_zip_path:
         description: "Path to 1m data zip (in repo)"
         required: true
@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 120
 
     env:
-      TRADE_ZIP: ${{ github.event.inputs.trade_zip_path || 'trade_v1.0.zip' }}
+      TRADE_ZIP: ${{ github.event.inputs.trade_zip_path || 'trade_v1.0.1.zip' }}
       DATA_ZIP:  ${{ github.event.inputs.data_zip_path  || 'ETHUSDT_1min_2020_2025.zip' }}
       OUT_DIR:   ${{ github.event.inputs.out_dir        || '_out_4u/run' }}
 
@@ -70,9 +70,7 @@ jobs:
           if [ -n "$REQS_FILE" ]; then
             echo "REQS_FILE=$REQS_FILE" >> "$GITHUB_ENV"
           fi
-
           echo "ℹ️ RUN_DIR=$RUN_DIR"
-          [ -n "${REQS_FILE:-}" ] && echo "ℹ️ requirements: $REQS_FILE"
 
       # --- Unzip data & locate CSV (ETH 1m 우선) ---
       - name: Unzip data pack
@@ -105,39 +103,61 @@ jobs:
           python -m pip install --upgrade pip
           if [ -n "${REQS_FILE:-}" ] && [ -f "$REQS_FILE" ]; then
             pip install -r "$REQS_FILE"
-          else
+          else:
             pip install numpy pandas scikit-learn matplotlib pyyaml
           fi
-          python -c "import sys,platform; print('Python',sys.version); print('Platform',platform.platform())"
-          pip list | sed -n '1,120p'
 
-      # --- Preflight validation: 컬럼/타임스탬프/행수 ---
-      - name: Preflight checks (CSV format & viability)
+      # --- Preflight & normalize (robust; no heredoc parsing issues) ---
+      - name: Preflight + Normalize CSV (if needed)
         shell: bash
         run: |
           set -euo pipefail
-          python - << 'PY'
-import sys, pandas as pd
-csv = r"${CSV_PATH}"
-need = {'open_time','open','high','low','close','volume','number_of_trades','taker_buy_base_asset_volume'}
-try:
-    df = pd.read_csv(csv, nrows=2)
-except Exception as e:
-    print(f"❌ CSV read failed: {e}"); sys.exit(1)
+          cat > preflight.py <<'PY'
+import os, sys, pandas as pd, numpy as np
+csv = os.environ['CSV_PATH']
+print(f"Preflight on: {csv}")
+df = pd.read_csv(csv, nrows=2)
 cols = set(df.columns)
-missing = need - cols
+need_base = {'open_time','open','high','low','close','volume','number_of_trades'}
+missing = need_base - cols
 if missing:
-    # 알려진 대체 컬럼 힌트
-    hints = {'taker_buy_quote_asset_volume','taker_buy_volume'}
-    overlap = hints & cols
-    if 'taker_buy_quote_asset_volume' in overlap:
-        print("❌ Need 'taker_buy_base_asset_volume' but found 'taker_buy_quote_asset_volume'. "
-              "무료 바이낸스 1분봉 표준 컬럼을 맞추거나, 코드에서 맵핑 필요.")
-    else:
-        print(f"❌ Missing required columns: {missing}")
+    print(f"❌ Missing base columns: {missing}")
     sys.exit(1)
-print("✅ Columns OK:", sorted(list(cols)))
+
+has_base = 'taker_buy_base_asset_volume' in cols
+has_quote = 'taker_buy_quote_asset_volume' in cols
+
+if not has_base and not has_quote:
+    print("❌ Need either taker_buy_base_asset_volume or taker_buy_quote_asset_volume")
+    sys.exit(1)
+
+# If only quote exists, create a normalized CSV with base estimated by typical price
+if (not has_base) and has_quote:
+    print("ℹ️ Only quote volume found → creating normalized CSV with base volume via typical price ((H+L+C)/3).")
+    out_csv = csv.replace(".csv", "_normalized.csv")
+    it = pd.read_csv(csv, chunksize=500000)
+    with open(out_csv, "w", encoding="utf-8") as f_out:
+        first = True
+        for chunk in it:
+            for j in ['Unnamed: 0','index']:
+                if j in chunk.columns: chunk = chunk.drop(columns=[j])
+            tp = (chunk['high'] + chunk['low'] + chunk['close']) / 3.0
+            tp = tp.replace(0, np.nan)
+            chunk['taker_buy_base_asset_volume'] = (pd.to_numeric(chunk['taker_buy_quote_asset_volume'], errors='coerce') / tp).fillna(0.0)
+            if first:
+                chunk.to_csv(f_out, index=False)
+                first = False
+            else:
+                chunk.to_csv(f_out, index=False, header=False)
+    print(f"✅ Normalized CSV written: {out_csv}")
+    print(f"CSV_PATH={out_csv}")
+    # emit to GITHUB_ENV
+    with open(os.environ['GITHUB_ENV'], 'a') as env:
+        env.write(f"CSV_PATH={out_csv}\\n")
+else:
+    print("✅ Columns OK. No normalization required.")
 PY
+          python preflight.py
 
       - name: Run backtest
         shell: bash
