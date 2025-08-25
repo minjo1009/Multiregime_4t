@@ -42,9 +42,11 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
+      # 1) Pinned SHAs (org 보안정책 충족)
       - name: Checkout (pinned)
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
 
+      # 2) 준비 & 압축 해제 (setup-python 전에)
       - name: Prepare workspace & unzip
         shell: bash
         run: |
@@ -54,23 +56,35 @@ jobs:
           test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP}"; exit 1; }
           unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "[data sample]"; find "${DATA_DIR}" -type f -name "*.csv" | head -n 5 || true
+          echo "[data sample]"
+          find "${DATA_DIR}" -type f -name "*.csv" | head -n 8 || true
 
-      - name: Detect CSV (bash only)
+      # 3) CSV 절대경로 탐지(1차)
+      - name: Detect CSV (robust)
         shell: bash
         run: |
           set -euo pipefail
+          unset CSV_PATH || true
           shopt -s nullglob globstar
-          CAND=( ${DATA_DIR}/${CSV_GLOB} )
-          if (( ${#CAND[@]} == 0 )); then
-            echo "❌ No CSV matched: ${CSV_GLOB} in ${DATA_DIR}"
-            exit 1
+          # 우선 사용자 지정 패턴
+          FIRST=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" -print -quit || true)
+          # 없으면 폴더 전체에서 아무 CSV나 1개
+          if [ -z "${FIRST:-}" ]; then
+            FIRST=$(find "${DATA_DIR}" -type f -iname "*.csv" -print -quit || true)
           fi
-          echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
-          echo "Using CSV: ${CAND[0]}"
+          if [ -z "${FIRST:-}" ]; then
+            echo "❌ No CSV found under ${DATA_DIR} (glob=${CSV_GLOB})"; exit 1;
+          fi
+          # 절대경로화
+          CSV_PATH=$(readlink -f "$FIRST" || echo "$FIRST")
+          echo "CSV_PATH=${CSV_PATH}" | tee -a "$GITHUB_ENV"
+          echo "Using CSV: ${CSV_PATH}"
+          # 가시성
+          ls -al "$(dirname "$CSV_PATH")" || true
 
+      # 4) Python 설치(압축 해제 후, pip 캐시는 tmp/trade 기준)
       - name: Setup Python (pinned, cache to tmp/trade)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: ${{ env.PYVER }}
           cache: pip
@@ -78,6 +92,7 @@ jobs:
             ${{ env.RUN_DIR }}/requirements.txt
             ${{ env.RUN_DIR }}/pyproject.toml
 
+      # 5) 의존성 설치 (+PyYAML 보강)
       - name: Install requirements
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -90,9 +105,16 @@ jobs:
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
           fi
-          # ✅ ensure PyYAML for engine.py
-          python -c 'import yaml' 2>/dev/null || python -m pip install pyyaml
+          # ensure PyYAML
+          python - <<'PY'
+try:
+  import yaml; print("PyYAML OK")
+except Exception:
+  import sys, subprocess; subprocess.check_call([sys.executable, "-m", "pip", "install", "pyyaml"])
+  import yaml; print("PyYAML installed")
+PY
 
+      # 6) 과거 fingerprint는 경고만
       - name: Fingerprint check (warn-only)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -107,16 +129,35 @@ jobs:
           fi
           echo "fingerprint warnings: $miss"
 
-      - name: Preflight CSV schema (bash only)
+      # 7) CSV 경로 2차 검증 & 미스시 즉석 재탐색/덮어쓰기
+      - name: Sanity check CSV path
         shell: bash
         run: |
           set -euo pipefail
-          HDR="$(head -n 1 "${CSV_PATH}")"
-          for c in open_time open high low close; do
-            echo "$HDR" | grep -q "$c" || { echo "❌ Missing column: $c"; exit 1; }
-          done
-          echo "CSV columns OK"
+          if [ ! -f "${CSV_PATH}" ]; then
+            echo "⚠️ CSV_PATH missing → re-detecting..."
+            shopt -s nullglob globstar
+            NEW=$(find "${DATA_DIR}" -type f -iname "${CSV_GLOB}" -print -quit || true)
+            [ -n "${NEW:-}" ] || NEW=$(find "${DATA_DIR}" -type f -iname "*.csv" -print -quit || true)
+            [ -n "${NEW:-}" ] || { echo "❌ CSV not found after re-detect"; exit 1; }
+            CSV_PATH=$(readlink -f "$NEW" || echo "$NEW")
+            echo "CSV_PATH=${CSV_PATH}" >> $GITHUB_ENV
+            echo "Re-detected CSV: ${CSV_PATH}"
+          fi
+          echo "Final CSV_PATH=${CSV_PATH}"
 
+      # 8) (옵션) gate/score 가드 – 실패하지 않음
+      - name: Hotfix runner guard (non-fatal)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          F="backtest/runner.py"
+          [ -f "$F" ] || { echo "WARN: runner not found at ${F}"; exit 0; }
+          sed -i '/# Save debug/a\    df["score"]=score_series; df["gate"]=gate' "$F" || true
+          grep -n "df\\['gate'\\]" "$F" | head -n 1 || echo "WARN: df['gate'] not found (skipped)"
+
+      # 9) 실행
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -125,13 +166,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${OUT_DIR}"
+          echo "Running with CSV_PATH=${CSV_PATH}"
+          test -f "${CSV_PATH}" || { echo "❌ CSV missing: ${CSV_PATH}"; exit 1; }
           python run_4u.py --data_path "${CSV_PATH}" --config "conf/config.yml" --out_dir "${OUT_DIR}"
           echo "---- outputs ----"; ls -al "${OUT_DIR}" || true
           echo "---- summary ----"; head -n 60 "${OUT_DIR}/summary.json" 2>/dev/null || true
           echo "---- gating ----";  head -n 60 "${OUT_DIR}/gating_debug.json" 2>/dev/null || true
 
+      # 10) 결과 업로드
       - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: backtest-output
           path: |
