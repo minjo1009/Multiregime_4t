@@ -1,193 +1,101 @@
 name: scalper_backtest
 
 on:
-  push:
-    branches: [ "**" ]
-  pull_request:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/scalper_backtest.yml'
+      - 'eth_scalp_trader_pack_v0_1.zip'
+      - 'ETHUSDT_1min_2020_2025.zip'
 
 permissions:
   contents: read
 
-concurrency:
-  group: backtest-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   backtest:
-    name: ETH scalper backtest
-    runs-on: ubuntu-22.04
-
-    env:
-      PYTHONIOENCODING: utf-8
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      PIP_NO_WARN_SCRIPT_LOCATION: "0"
-      FORCE_COLOR: "1"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      # === 코드 체크아웃을 액션 없이 처리 ===
-      - name: Fetch repository without actions/checkout
+      # 1) 리포 체크아웃 (풀 SHA 고정)
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+
+      # 2) 기본 검증: zip 두 개가 루트에 있는지 확인
+      - name: Verify ZIPs present
         shell: bash
         run: |
-          set -Eeuo pipefail
-          git --version
-          # 워크스페이스는 비어 있으므로 직접 clone
-          git clone --no-tags --depth 1 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" repo
-          cd repo
-          # PR/특정 SHA 대응
-          if [[ -n "${GITHUB_SHA:-}" ]]; then
-            git fetch --no-tags origin "${GITHUB_SHA}" --depth 1 || true
-            git checkout -q "${GITHUB_SHA}" || git checkout -q -B current "${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
-          fi
-          echo "REPO_DIR=$(pwd)" >> $GITHUB_ENV
+          set -euo pipefail
+          ls -al
+          test -f eth_scalp_trader_pack_v0_1.zip || { echo "❌ eth_scalp_trader_pack_v0_1.zip 없음"; exit 1; }
+          test -f ETHUSDT_1min_2020_2025.zip   || { echo "❌ ETHUSDT_1min_2020_2025.zip 없음"; exit 1; }
 
-      # === Python 환경 구성 (액션 미사용) ===
-      - name: Setup Python (system) + venv
+      # 3) 압축 해제 (코드팩/데이터)
+      - name: Unzip code pack and data
         shell: bash
         run: |
-          set -Eeuo pipefail
-          python3 --version
-          sudo apt-get update -y
-          sudo apt-get install -y python3-venv unzip
-          python3 -m venv .venv
-          source .venv/bin/activate
-          python -m pip install -U pip wheel setuptools
-          echo "VENV=$(pwd)/.venv" >> $GITHUB_ENV
+          set -euo pipefail
+          rm -rf unzipped && mkdir -p unzipped
+          unzip -q -o eth_scalp_trader_pack_v0_1.zip   -d unzipped
+          unzip -q -o ETHUSDT_1min_2020_2025.zip       -d unzipped
+          # zip 내부 폴더 구조를 표준화
+          rm -rf eth_scalp_trader_pack_v0_1 ETHUSDT_1min_2020_2025 || true
+          cp -R unzipped/eth_scalp_trader_pack_v0_1 ./eth_scalp_trader_pack_v0_1
+          mv    unzipped/ETHUSDT_1min_2020_2025      ./ETHUSDT_1min_2020_2025 || true
+          echo "----- DIR TREE (top) -----"
+          find eth_scalp_trader_pack_v0_1 -maxdepth 2 -type f -print
 
-      # === 의존성 설치 (requirements.txt 있으면 우선) ===
-      - name: Install dependencies
+      # 4) Python 설정(요구사항 파일을 '이미' 갖고 있으므로 캐시 정상 동작)
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: eth_scalp_trader_pack_v0_1/requirements.txt
+
+      # 5) 의존성 설치
+      - name: Install deps
         shell: bash
-        working-directory: ${{ env.REPO_DIR }}
         run: |
-          set -Eeuo pipefail
-          source "${VENV}/bin/activate"
-          if compgen -G "requirements*.txt" > /dev/null; then
-            echo "[pip] installing from requirements*.txt"
-            # 가장 알맞은 파일 하나 선택
-            REQ=$(ls -1 requirements*.txt | head -n1)
-            python -m pip install -r "${REQ}"
-          else
-            echo "[pip] requirements 파일이 없어 최소 패키지 설치"
-            # backtesting + 데이터핸들링 기본 세트
-            python -m pip install \
-              numpy pandas matplotlib scipy statsmodels scikit-learn \
-              pandas-ta==0.3.14b0 ta==0.11.0 \
-              backtrader==1.9.78.123 \
-              tqdm pyyaml
-          fi
-          python -c "import sys; print('PY', sys.version)"
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install -r eth_scalp_trader_pack_v0_1/requirements.txt
 
-      # === ZIP 풀기 ===
-      - name: Unpack code and data zips
+      # 6) 엔트리/설정 sanity check + 데이터 경로 자동 패치
+      - name: Sanity checks & patch config
         shell: bash
-        working-directory: ${{ env.REPO_DIR }}
         run: |
-          set -Eeuo pipefail
-          shopt -s nullglob
-          for z in *.zip; do
-            echo "Unzipping: $z"
-            mkdir -p "unzipped/${z%.zip}"
-            unzip -q "$z" -d "unzipped/${z%.zip}"
-          done
-          echo "TREE:"
-          find unzipped -maxdepth 2 -type d -print
-
-      # === 백테스트 엔트리 탐색 ===
-      - name: Locate backtest entry
-        id: find_entry
-        shell: bash
-        working-directory: ${{ env.REPO_DIR }}
-        run: |
-          set -Eeuo pipefail
-          CODE_DIR=$(find unzipped -maxdepth 2 -type d -iname "eth*_scalp*pack*" -o -iname "eth*scalp*trader*" | head -n1 || true)
-          DATA_DIR=$(find unzipped -maxdepth 2 -type d -iname "ETHUSDT*1min*" -o -iname "ETH*1min*" | head -n1 || true)
-
-          if [[ -z "${CODE_DIR}" ]]; then
-            # 코드팩 폴더명을 못 찾았으면 가장 큰 디렉터리로 추정
-            CODE_DIR=$(du -sk unzipped/* | sort -nr | awk 'NR==1{print $2}')
+          set -euo pipefail
+          test -f eth_scalp_trader_pack_v0_1/run_backtest.py || { echo "❌ run_backtest.py 없음"; ls -R eth_scalp_trader_pack_v0_1; exit 2; }
+          test -f eth_scalp_trader_pack_v0_1/config.yml      || { echo "❌ config.yml 없음"; exit 2; }
+          # config.yml에 data_dir 키가 있으면 현재 데이터 폴더로 교체
+          if grep -Eq '^[[:space:]]*data_dir:' eth_scalp_trader_pack_v0_1/config.yml; then
+            sed -i 's|^[[:space:]]*data_dir:.*|data_dir: "./ETHUSDT_1min_2020_2025"|' eth_scalp_trader_pack_v0_1/config.yml
           fi
 
-          if [[ -z "${DATA_DIR}" ]]; then
-            echo "::warning::데이터 폴더를 찾지 못했습니다. 패키지 내부에서 경로를 자체 해석할 수도 있습니다."
-          fi
-
-          # 후보 엔트리 스크립트
-          declare -a CAND=("backtest.py" "run_backtest.py" "main.py")
-          ENTRY=""
-          for c in "${CAND[@]}"; do
-            hit=$(find "$CODE_DIR" -maxdepth 2 -type f -name "$c" | head -n1 || true)
-            if [[ -n "$hit" ]]; then ENTRY="$hit"; break; fi
-          done
-
-          echo "CODE_DIR=$CODE_DIR" >> $GITHUB_OUTPUT
-          echo "DATA_DIR=${DATA_DIR:-}" >> $GITHUB_OUTPUT
-          echo "ENTRY=$ENTRY"         >> $GITHUB_OUTPUT
-
-          echo "Detected CODE_DIR: $CODE_DIR"
-          echo "Detected DATA_DIR: ${DATA_DIR:-<none>}"
-          echo "Detected ENTRY   : ${ENTRY:-<none>}"
-
-      # === 백테스트 실행 ===
+      # 7) 백테스트 실행 (엔트리 명시, 백업 엔트리까지 폴백)
       - name: Run backtest
-        shell: bash
-        working-directory: ${{ env.REPO_DIR }}
         env:
-          CODE_DIR: ${{ steps.find_entry.outputs.CODE_DIR }}
-          DATA_DIR: ${{ steps.find_entry.outputs.DATA_DIR }}
-          ENTRY:    ${{ steps.find_entry.outputs.ENTRY }}
-        run: |
-          set -Eeuo pipefail
-          source "${VENV}/bin/activate"
-
-          # PYTHONPATH에 코드팩 추가
-          export PYTHONPATH="${CODE_DIR}:${PYTHONPATH:-}"
-
-          # 공통 인자 구성 (있으면)
-          EXTRA_ARGS=()
-          if [[ -n "${DATA_DIR}" && -d "${DATA_DIR}" ]]; then
-            EXTRA_ARGS+=( --data "${DATA_DIR}" )
-          fi
-          # 심볼/타임프레임 기본값
-          EXTRA_ARGS+=( --symbol ETHUSDT --timeframe 1m )
-
-          # 엔트리 스크립트가 있으면 그것부터 시도
-          if [[ -n "${ENTRY}" && -f "${ENTRY}" ]]; then
-            echo ">>> python ${ENTRY} ${EXTRA_ARGS[*]}"
-            python "${ENTRY}" "${EXTRA_ARGS[@]}" || {
-              echo "::warning::엔트리 스크립트 실행 실패. 패키지 내부 CLI를 탐색합니다."
-              FAIL=1
-            }
-          else
-            FAIL=1
-          fi
-
-          if [[ "${FAIL:-0}" -eq 1 ]]; then
-            # 일반적인 패키지/모듈 실행 백업 루트
-            if python -c "import runpy; runpy.run_module('backtest', run_name='__main__')" 2>/dev/null; then
-              echo "Ran module 'backtest' as fallback."
-            elif python -c "import runpy; runpy.run_module('main', run_name='__main__')" 2>/dev/null; then
-              echo "Ran module 'main' as fallback."
-            else
-              echo "::error::백테스트 엔트리를 자동으로 찾지 못했습니다. 디렉터리 트리를 출력합니다."
-              tree -a -L 3 "${CODE_DIR}" || true
-              exit 2
-            fi
-          fi
-
-      # === 산출물 패키징(액션 없이) ===
-      - name: Package results
-        if: always()
+          PYTHONUNBUFFERED: "1"
         shell: bash
-        working-directory: ${{ env.REPO_DIR }}
         run: |
-          set -Eeuo pipefail
-          mkdir -p backtest_artifacts
-          # 흔한 결과물 패턴을 모아 압축
-          for d in results output outputs reports figs figures plots logs; do
-            if [[ -d "$d" ]]; then cp -r "$d" "backtest_artifacts/"; fi
-            if [[ -d "unzipped" ]]; then
-              find unzipped -maxdepth 3 -type d \( -name "$d" -o -name "*.bt" \) -exec cp -r {} backtest_artifacts/ \; || true
-            fi
-          done
-          tar -czf backtest_artifacts.tar.gz backtest_artifacts || true
-          echo "Artifacts at: $PWD/backtest_artifacts.tar.gz"
+          set -e
+          # 일반 실행 → config 명시 → core/backtester 폴백 순으로 시도
+          python -u eth_scalp_trader_pack_v0_1/run_backtest.py \
+            || python -u eth_scalp_trader_pack_v0_1/run_backtest.py --config eth_scalp_trader_pack_v0_1/config.yml \
+            || python -u eth_scalp_trader_pack_v0_1/core/backtester.py --config eth_scalp_trader_pack_v0_1/config.yml
+
+      # 8) 결과물 업로드 (로그/리포트/CSV/PNG 전부 수집)
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: backtest-results
+          if-no-files-found: warn
+          path: |
+            **/results/**
+            **/logs/**
+            **/reports/**
+            **/*.csv
+            **/*.png
