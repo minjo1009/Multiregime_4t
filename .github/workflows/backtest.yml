@@ -1,103 +1,182 @@
 name: Backtest
+
 on:
   workflow_dispatch:
     inputs:
       trade_zip:
-        description: Code ZIP at repo root
-        required: false
-        default: trade_v1.0.6_override.zip
+        description: "trade code zip"
+        required: true
+        default: "trade_v1.0.6_override.zip"
       data_zip:
-        description: Data ZIP at repo root
-        required: false
-        default: ETHUSDT_1min_2020_2025.zip
+        description: "market data zip"
+        required: true
+        default: "ETHUSDT_1min_2020_2025.zip"
       csv_glob:
-        description: CSV glob inside data dir
-        required: false
-        default: "*ETHUSDT*1min*202*.csv"
+        description: "CSV filename glob (inside data zip)"
+        required: true
+        default: "*ETHUSDT*1min*2020*2025*.csv"
       out_dir:
-        description: Output directory
-        required: false
-        default: _out_4u/run
+        description: "output directory"
+        required: true
+        default: "_out_4u/run"
+      python_version:
+        description: "Python version"
+        required: true
+        default: "3.11"
+      fail_on_fingerprint:
+        description: "fail if gating fingerprint missing (true/false)"
+        required: true
+        default: "false"
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
+    env:
+      REPO_DIR: repo
+      RUN_DIR: tmp/trade
+      DATA_DIR: tmp/data
+      TRADE_ZIP: ${{ github.event.inputs.trade_zip }}
+      DATA_ZIP:  ${{ github.event.inputs.data_zip }}
+      CSV_GLOB:  ${{ github.event.inputs.csv_glob }}
+      OUT_DIR:   ${{ github.event.inputs.out_dir }}
+      PYVER:     ${{ github.event.inputs.python_version }}
+      FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout (pinned)
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
 
-      - name: Resolve inputs
-        run: |
-          echo "TRADE_ZIP=${{ inputs.trade_zip }}" >> $GITHUB_ENV
-          echo "DATA_ZIP=${{ inputs.data_zip }}" >> $GITHUB_ENV
-          echo "CSV_GLOB=${{ inputs.csv_glob }}" >> $GITHUB_ENV
-          echo "OUT_DIR=${{ inputs.out_dir }}" >> $GITHUB_ENV
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ env.PYVER }}
+          cache: "pip"
 
-      - name: Prepare (unzip)
+      - name: Prepare workspace
         shell: bash
         run: |
           set -euo pipefail
-          : "${TRADE_ZIP:=trade_v1.0.6_override.zip}"
-          : "${DATA_ZIP:=ETHUSDT_1min_2020_2025.zip}"
-          : "${CSV_GLOB:=*ETHUSDT*1min*202*.csv}"
-          : "${OUT_DIR:=_out_4u/run}"
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-          mkdir -p tmp/trade tmp/data "$OUT_DIR"
-          test -f "$TRADE_ZIP" || { echo "❌ missing $TRADE_ZIP"; exit 1; }
-          test -f "$DATA_ZIP"  || { echo "❌ missing $DATA_ZIP"; exit 1; }
-
-          unzip -q "$TRADE_ZIP" -d tmp/trade
-          unzip -q "$DATA_ZIP"  -d tmp/data
-
-          echo "[data sample]"
-          find tmp/data -type f -name "*.csv" | head -n 5
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install requirements
-        working-directory: tmp/trade
+      - name: Unzip trade & data
+        shell: bash
         run: |
-          python -m pip install -U pip
-          python -m pip install -r requirements.txt
-          python - <<'PY'
-          import sklearn, sys
-          print("sklearn", sklearn.__version__)
-          PY
+          set -euo pipefail
+          ls -al
+          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP} at repo root"; exit 1; }
+          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP} at repo root"; exit 1; }
+          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
+          unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
+          echo "== trade files =="
+          ls -al "${RUN_DIR}" || true
+          echo "== data files =="
+          ls -al "${DATA_DIR}" || true
 
       - name: Detect CSV
+        id: detect_csv
         shell: bash
         run: |
           set -euo pipefail
-          cand=$(find tmp/data -type f -iname "$CSV_GLOB" | head -n1 || true)
-          [ -n "$cand" ] || cand=$(find tmp/data -type f -iname "*.csv" | head -n1 || true)
-          [ -n "$cand" ] || { echo "❌ No CSV found under tmp/data"; exit 1; }
-          echo "CSV_PATH=$cand" >> $GITHUB_ENV
-          echo "Using CSV_PATH=$cand"
+          shopt -s nullglob globstar
+          CAND=( ${DATA_DIR}/${CSV_GLOB} )
+          if (( ${#CAND[@]} == 0 )); then
+            echo "❌ No CSV matched pattern: ${CSV_GLOB} in ${DATA_DIR}"
+            exit 1
+          fi
+          CSV_PATH="${CAND[0]}"
+          echo "CSV_PATH=${CSV_PATH}" | tee -a $GITHUB_ENV
+          echo "Using CSV: ${CSV_PATH}"
 
-      - name: Run backtest
-        working-directory: tmp/trade
+      - name: Install requirements
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python run_4u.py --data_path "$CSV_PATH" --config "conf/config.yml" --out_dir "$GITHUB_WORKSPACE/$OUT_DIR"
-          echo "---- outputs ----"
-          ls -al "$GITHUB_WORKSPACE/$OUT_DIR"
-          echo "---- summary head ----"
-          head -n 80 "$GITHUB_WORKSPACE/$OUT_DIR/summary.json" || true
-          echo "---- gating_debug head ----"
-          head -n 80 "$GITHUB_WORKSPACE/$OUT_DIR/gating_debug.json" || true
+          python -V
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          else
+            python -m pip install numpy pandas scikit-learn
+          fi
+          python - <<'PY'
+import sklearn, sys
+print("sklearn", sklearn.__version__, sys.version)
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.linear_model import LogisticRegression
+try:
+    CalibratedClassifierCV(estimator=LogisticRegression())
+    print("OK: estimator-signature (>=1.5 family)")
+except TypeError:
+    CalibratedClassifierCV(base_estimator=LogisticRegression())
+    print("OK: base_estimator-signature (<=1.4 family)")
+PY
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Fingerprint check (v1.0.4 → v1.0.5 family)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          F="${PWD}/backtest/runner.py"
+          miss=0
+          grep -q "Coverage-aligned gating" "$F" || { echo "⚠️ missing: Coverage-aligned gating"; miss=$((miss+1)); }
+          grep -q "S1 probability floor cutoff" "$F" || { echo "⚠️ missing: S1 probability floor cutoff"; miss=$((miss+1)); }
+          if [ "$FAIL_FP" = "true" ] && [ $miss -gt 0 ]; then
+            echo "❌ fingerprint mismatch and fail_on_fingerprint=true"; exit 1
+          fi
+          echo "fingerprint warnings: $miss (run continues)"
+
+      - name: Hotfix runner (inject df['score'] & df['gate'] before debug)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          F="backtest/runner.py"
+          test -f "$F" || { echo "❌ runner not found at ${F}"; exit 1; }
+          # '# Save debug' 바로 다음 줄에 보정 컬럼 생성 코드 주입
+          sed -i '/# Save debug/a\    df["score"]=score_series; df["gate"]=gate' "$F"
+          grep -n "df\\['gate'\\]" "$F" | head -n 1 || echo "⚠️ sed injection check: could not find df['gate']"
+
+      - name: Preflight CSV schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import os, sys, pandas as pd
+csv=os.environ["CSV_PATH"]
+print("Preflight on:", csv)
+df=pd.read_csv(csv, nrows=2)
+need={'open_time','open','high','low','close'}
+miss=need - set(df.columns)
+if miss:
+    print("❌ Missing base columns:", miss); sys.exit(1)
+hints={'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','VPIN','lambda_kyle','ATS'}
+over=hints & set(df.columns)
+print("Columns OK. Optional OF columns present:", sorted(over))
+PY
+
+      - name: Run backtest
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        env:
+          OUT_DIR: ${{ env.OUT_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${OUT_DIR}"
+          python run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}" || { echo "❌ backtest failed"; exit 1; }
+          echo "---- gating debug ----"
+          cat "${OUT_DIR}/gating_debug.json" 2>/dev/null || true
+          echo "---- outputs ----"
+          ls -al "${OUT_DIR}" || true
+
+      - name: Upload artifacts (pinned SHA)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: backtest-output
           path: |
-            _out_4u/run/summary.json
-            _out_4u/run/gating_debug.json
-            _out_4u/run/trades.csv
-            _out_4u/run/preds_test.csv
-          if-no-files-found: error
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/gating_debug.json
+            ${{ env.OUT_DIR }}/charts/**
+          if-no-files-found: warn
           retention-days: 30
+          compression-level: 6
