@@ -31,7 +31,7 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # -- Pinned SHAs (정책 준수)
+      # --- Pinned SHAs
       - name: Checkout (pinned SHA)
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
@@ -41,13 +41,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Show Python & pip & sklearn versions
-        run: |
-          python -c "import sys; print('Python', sys.version)"
-          python -m pip install --upgrade pip
-          pip --version
-
-      # ------- Unpack zips
+      # --- Prepare dirs & unzip
       - name: Prepare working dirs
         run: |
           set -euo pipefail
@@ -65,58 +59,39 @@ jobs:
           set -euo pipefail
           test -f "${DATA_ZIP}" || { echo "❌ data zip not found: ${DATA_ZIP}"; exit 1; }
           unzip -q "${DATA_ZIP}" -d "${DATA_DIR}"
-          # data zip 내부 CSV 파일명을 고정한다면 위 CSV_PATH와 맞추세요.
 
-      # ------- Install deps
+      # --- Deps
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
+          python -c 'import sys; print("Python", sys.version)'
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python - <<'PY'
-import sklearn, sys
-print("sklearn", sklearn.__version__)
-PY
+          python -c 'import sklearn; print("sklearn", sklearn.__version__)'
 
-      # ------- Sklearn 호환 스모크 테스트 (1.4/1.5 모두 통과해야 계속)
+      # --- Sklearn ctor signature smoke test (1.4/1.5 호환)
       - name: CalibratedClassifierCV smoke test
         run: |
-          python - <<'PY'
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-try:
-    CalibratedClassifierCV(estimator=LogisticRegression())
-    print("OK: estimator= (>=1.5)")
-except TypeError:
-    CalibratedClassifierCV(base_estimator=LogisticRegression())
-    print("OK: base_estimator= (<=1.4)")
-PY
+          python -c 'from sklearn.calibration import CalibratedClassifierCV as C; from sklearn.linear_model import LogisticRegression as L; import inspect; s=str(inspect.signature(C.__init__)); print("CalibratedClassifierCV.__init__", s); (("estimator" in s) and C(estimator=L())) or (("base_estimator" in s) and C(base_estimator=L())); print("OK: ctor signature supported")'
 
-      # ------- 지문 검사: v1.0.4 계열인지 확인 (실수 방지)
+      # --- Fingerprint (v1.0.4a gating & cutoff)
       - name: Fingerprint check (v1.0.4a gating & cutoff)
         run: |
           set -euo pipefail
           grep -n "Coverage-aligned gating" "${RUN_DIR}/backtest/runner.py"
-          grep -n "S1 probability floor cutoff" "${RUN_DIR}/backtest/runner.py" || { echo "❌ S1 cutoff missing"; exit 1; }
+          grep -n "S1 probability floor cutoff" "${RUN_DIR}/backtest/runner.py"
 
-      # ------- Preflight: CSV 포맷 및 필수 컬럼
+      # --- CSV preflight (columns & taker_buy volume hint)
       - name: Preflight CSV
         run: |
-          python - <<'PY'
-import pandas as pd, sys, os
-csv = os.environ['CSV_PATH']
-df = pd.read_csv(csv, nrows=2)
-need = {'open_time','open','high','low','close','volume','number_of_trades'}
-missing = need - set(df.columns)
-if missing:
-    print("❌ Missing base columns:", missing); sys.exit(1)
-hints = {'taker_buy_base_asset_volume','taker_buy_quote_asset_volume'}
-if not (hints & set(df.columns)):
-    print("❌ Need taker_buy_* volume columns"); sys.exit(1)
-print("✅ CSV OK")
-PY
+          python -c 'import os,sys,pandas as pd; csv=os.environ["CSV_PATH"]; df=pd.read_csv(csv,nrows=2); need={"open_time","open","high","low","close","volume","number_of_trades"}; miss=need-set(df.columns); 
+import sys
+; 
+( len(miss)==0 ) or (_ for _ in ()).throw(SystemExit("❌ Missing base columns: "+str(miss))); hints={"taker_buy_base_asset_volume","taker_buy_quote_asset_volume"}; 
+( len(hints & set(df.columns))>0 ) or (_ for _ in ()).throw(SystemExit("❌ Need taker_buy_* volume columns")); print("✅ CSV OK")'
 
-      # ------- Run backtest
+      # --- Run backtest
       - name: Run backtest
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -124,9 +99,8 @@ PY
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ env.OUT_DIR }}"
           echo "---- gating debug ----"
           cat "${{ env.OUT_DIR }}/gating_debug.json" || true
-          echo "----------------------"
 
-      # ------- Upload artifacts (pinned SHA)
+      # --- Upload artifacts (pinned SHA)
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -134,6 +108,7 @@ PY
           path: |
             ${{ env.OUT_DIR }}/summary.json
             ${{ env.OUT_DIR }}/charts/
+            ${{ env.OUT_DIR }}/gating_debug.json
           if-no-files-found: warn
           retention-days: 30
           compression-level: 6
