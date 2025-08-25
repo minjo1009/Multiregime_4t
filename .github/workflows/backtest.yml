@@ -61,6 +61,17 @@ jobs:
           unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
           echo "== data sample =="; find "${DATA_DIR}" -type f -name "*.csv" | head -n 8 || true
 
+      # ✅ 새로추가: 캐시 의존파일 없을 때 dummy 생성 (setup-python 에러 방지)
+      - name: Ensure cache dependency files (dummy if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "${RUN_DIR}/requirements.txt" ] && [ ! -f "${RUN_DIR}/pyproject.toml" ]; then
+            echo "No requirements/pyproject under ${RUN_DIR} — creating dummy requirements.txt for cache key"
+            echo "# dummy (CI installs base libs in next step)" > "${RUN_DIR}/requirements.txt"
+          fi
+          ls -al "${RUN_DIR}" | sed -n '1,100p'
+
       - name: Detect CSV (robust)
         shell: bash
         run: |
@@ -86,6 +97,8 @@ jobs:
           cache-dependency-path: |
             ${{ env.RUN_DIR }}/requirements.txt
             ${{ env.RUN_DIR }}/pyproject.toml
+            **/requirements.txt
+            **/pyproject.toml
 
       - name: Install requirements (+PyYAML)
         shell: bash
@@ -94,7 +107,7 @@ jobs:
           set -euo pipefail
           python -V
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then
+          if [ -s requirements.txt ]; then
             python -m pip install -r requirements.txt
           else
             python -m pip install numpy pandas scikit-learn scipy matplotlib
@@ -152,7 +165,7 @@ jobs:
           fi
           echo "Final CSV_PATH=${CSV_PATH}"
 
-      # 🔧 FIX: oflow.combine_of 정상화 + 엔진에서 combine_of(X)로 고정 + import 보강
+      # OF 결합/엔진 라인 교정(브로드캐스팅/길이 불일치 방지) + import 보강
       - name: Fix oflow combine_of + force engine to combine_of(X)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -160,7 +173,6 @@ jobs:
           set -euo pipefail
           F1="trend4p/utils/oflow.py"
           [ -f "$F1" ] || { echo "❌ not found $F1"; exit 1; }
-          # combine_of 재정의: (N,k) → axis=1 평균, 안전 z-score 내장
           awk 'BEGIN{infunc=0}
                /^def[[:space:]]+combine_of\(.*\):/ {
                  print "def combine_of(df_or_X):"
@@ -176,30 +188,27 @@ jobs:
                  print "            sd = 1e-12 if (sd==0 or not np.isfinite(sd)) else sd"
                  print "            arrs.append((a-m)/sd)"
                  print "        Z=np.column_stack(arrs)   # (N, k)"
-                 print "        return np.nanmean(Z, axis=1)"
+                 print "        return np.nanmean(Z, axis=1)  # (N,)"
                  print "    else:"
-                 print "        return np.zeros(0)"
+                 print "        arr=np.asarray(df_or_X, dtype=float)"
+                 print "        if arr.ndim==2 and arr.shape[0]==3: return np.nanmean(arr, axis=0)"
+                 print "        if arr.ndim==2 and arr.shape[1]==3: return np.nanmean(arr, axis=1)"
+                 print "        if arr.ndim==1: return np.nan_to_num(arr, copy=False)"
+                 print "        return np.zeros(arr.shape[0] if arr.ndim>0 else 0, dtype=float)"
                  infunc=1; next
                }
                { if(infunc){ if($0 ~ /^def[[:space:]]+/){infunc=0; print $0} else {next} } else {print $0} }' "$F1" > "$F1.tmp" && mv "$F1.tmp" "$F1"
 
           F2="backtest/engine.py"
           [ -f "$F2" ] || { echo "❌ not found $F2"; exit 1; }
-          # of_shift = ... 줄 전체를 combine_of(X)로 교체 (첫 1회)
           awk 'BEGIN{done=0}
                {
                  if(!done && $0 ~ /^[[:space:]]*of_shift[[:space:]]*=/){
                    print "        of_shift = combine_of(X)"; done=1
                  } else print $0
                }' "$F2" > "$F2.tmp" && mv "$F2.tmp" "$F2"
-          # combine_of import 보강 (없으면 삽입)
           grep -q "from trend4p.utils.oflow import combine_of" "$F2" || \
             sed -i '1i from trend4p.utils.oflow import combine_of' "$F2"
-
-          # 안전 로그
-          grep -n "def combine_of" "$F1" | head -n 1 || true
-          grep -n "of_shift = combine_of(X)" "$F2" | head -n 1 || true
-          grep -n "from trend4p.utils.oflow import combine_of" "$F2" | head -n 1 || true
 
       - name: Run backtest
         shell: bash
@@ -213,11 +222,9 @@ jobs:
 
           echo "Running with CSV_PATH=${CSV_PATH}"
           test -f "${CSV_PATH}" || { echo "❌ CSV missing: ${CSV_PATH}"; exit 1; }
-
-          # ✅ 절대경로로 결과 생성
           python run_4u.py --data_path "${CSV_PATH}" --config "conf/config.yml" --out_dir "${ABS_OUT}"
 
-          # 🔁 혹시 tmp/trade 쪽에 썼다면 이관
+          # 혹시 tmp/trade 쪽 상대경로로 썼으면 이관
           if [ -d "_out_4u/run" ] && [ "$(ls -A _out_4u/run || true)" ]; then
             echo "⚠️ Found outputs under tmp/trade/_out_4u/run → moving to ${ABS_OUT}"
             rsync -a _out_4u/run/ "${ABS_OUT}/"
@@ -226,11 +233,9 @@ jobs:
           echo "---- outputs (workspace) ----"
           ls -al "${ABS_OUT}" || true
 
-          # 필수 산출물 확인 (없으면 업로드 전에 fail)
           for f in summary.json gating_debug.json trades.csv preds_test.csv; do
             test -f "${ABS_OUT}/${f}" || { echo "❌ missing ${ABS_OUT}/${f}"; exit 1; }
           done
-
           echo "---- summary ----"; head -n 60 "${ABS_OUT}/summary.json" || true
           echo "---- gating ----";  head -n 60 "${ABS_OUT}/gating_debug.json" || true
 
