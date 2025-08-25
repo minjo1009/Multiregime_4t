@@ -1,4 +1,4 @@
-name: trade4v run (v3.3 + diagnostics, robust)
+name: trade4v run (v3.3 + diagnostics, robust + hotfix)
 
 on:
   workflow_dispatch:
@@ -116,6 +116,20 @@ jobs:
           df.to_csv("normalized.csv", index=False)
           PY
 
+      # 5.5) Hotfix: pandas.cut 중복 라벨 허용(ordered=False)
+      - name: Hotfix pandas cut labels (ordered=False)
+        shell: bash
+        run: |
+          set -euo pipefail
+          F="trade4v/trend4p/utils.py"
+          test -f "$F" || { echo "[ERR] $F not found"; ls -R; exit 2; }
+          sed -i 's/labels=\[0,1,2,2\], include_lowest=True)/labels=[0,1,2,2], include_lowest=True, ordered=False)/' "$F"
+          if ! grep -q "ordered=False" "$F"; then
+            sed -i 's/include_lowest=True)/include_lowest=True, ordered=False)/' "$F"
+          fi
+          grep -q "ordered=False" "$F" || { echo "[ERR] hotfix failed to apply"; sed -n '1,140p' "$F"; exit 2; }
+          echo "[OK] hotfix applied"
+
       # 6) 백테스트 실행 (경로 폴백 포함)
       - name: Run backtest (v3.3)
         shell: bash
@@ -144,6 +158,7 @@ jobs:
           [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
           [ -f "$PY" ] || { echo "run_4u.py not found"; ls -R; exit 2; }
           echo "Using script: $PY"
+          echo "CSV: $CSV"
           python "$PY" \
             --data "$CSV" \
             --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
