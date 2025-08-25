@@ -42,6 +42,7 @@ jobs:
       FAIL_FP:   ${{ github.event.inputs.fail_on_fingerprint }}
 
     steps:
+      # ---- pinned SHAs (org 보안 정책 충족)
       - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
@@ -71,18 +72,25 @@ jobs:
           echo "Detected CODE_DIR=${CODE_DIR}"
           ls -al "${CODE_DIR}" || true
 
-      - name: Detect CSV (bash only)
+      - name: Detect CSV (export ABS path)
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob globstar
           CAND=( ${DATA_DIR}/${CSV_GLOB} )
           if (( ${#CAND[@]} == 0 )); then
-            echo "❌ No CSV matched: ${CSV_GLOB} in ${DATA_DIR}"
+            echo "⚠️ No CSV matched glob; fallback to *.csv"
+            CAND=( ${DATA_DIR}/**/*.csv )
+          fi
+          if (( ${#CAND[@]} == 0 )); then
+            echo "❌ No CSV found under ${DATA_DIR}"
             exit 1
           fi
-          echo "CSV_PATH=${CAND[0]}" >> $GITHUB_ENV
-          echo "Using CSV: ${CAND[0]}"
+          # 절대경로로 고정
+          ABS_CSV="$(readlink -f "${CAND[0]}" || echo "${GITHUB_WORKSPACE}/${CAND[0]}")"
+          test -f "$ABS_CSV" || { echo "❌ resolved CSV not found: $ABS_CSV"; exit 1; }
+          echo "CSV_PATH=${ABS_CSV}" | tee -a $GITHUB_ENV
+          echo "Using CSV: ${ABS_CSV}"
 
       - name: Setup Python (pinned, cache to CODE_DIR)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
