@@ -1,4 +1,4 @@
-name: trade4v run (v3.3.1 + diagnostics; robust unzip)
+name: trade4v run (v3.3.1 + diagnostics; PR-safe)
 
 on:
   workflow_dispatch:
@@ -13,30 +13,55 @@ on:
       ev_margin_bps: { description: "EV 마진(bp) (예비)", required: true, default: "1.0" }
       K_day:       { description: "일별 Top-K 맵 (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
 
+  pull_request:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/run4u.yml"
+      - "trade4v.zip"
+      - "data/**"
+
+concurrency:
+  group: trade4v-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  run:
+  # PR에서도 통과시키는 아주 가벼운 검증 잡
+  preflight:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
-
     steps:
-      # 1) Checkout (pinned SHA)
-      - name: Checkout
+      - name: Checkout (pinned)
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
+      - name: Sanity
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Branch: ${{ github.ref }}"
+          test -f .github/workflows/run4u.yml && echo "YAML present ✅"
+          echo "Preflight OK."
 
-      # 2) Python (pinned SHA)
+  # 실제 백테스트는 '수동 실행'일 때만 돌린다
+  backtest:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    needs: preflight
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+
       - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps
       - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
-          python -V
           python - <<'PY'
           import sys, subprocess
           subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade","pip","setuptools","wheel"])
@@ -44,15 +69,12 @@ jobs:
           subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
           PY
 
-      # 4) Unzip & flatten (handles nested trade4v/trade4v)
       - name: Unzip project (robust flatten)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p __extracted
-          if [ -f trade4v.zip ]; then
-            unzip -o -q trade4v.zip -d __extracted
-          fi
+          if [ -f trade4v.zip ]; then unzip -o -q trade4v.zip -d __extracted; fi
           ROOT=""
           for d in __extracted/trade4v __extracted ./trade4v . ; do
             if [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
@@ -62,23 +84,18 @@ jobs:
           rm -rf trade4v || true
           if [ -n "${ROOT}" ]; then
             if [ -d "${ROOT}/trade4v" ]; then
-              mkdir -p trade4v
-              shopt -s dotglob
+              mkdir -p trade4v; shopt -s dotglob
               mv "${ROOT}/trade4v"/* trade4v/ || true
             else
               cp -r "${ROOT}" ./trade4v
             fi
           fi
           if [ -d trade4v/trade4v ]; then
-            shopt -s dotglob
-            mv trade4v/trade4v/* trade4v/
-            rmdir trade4v/trade4v
+            shopt -s dotglob; mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v
           fi
           test -f trade4v/run_4u.py || { echo "run_4u.py not found after flatten"; ls -R; exit 2; }
-          echo "[OK] trade4v layout fixed:"
           ls -al trade4v | head -n 50
 
-      # 4.5) Hotfix: pandas.cut duplicate labels -> unique labels
       - name: Hotfix v3.3.1 (unique session labels)
         shell: bash
         run: |
@@ -103,7 +120,6 @@ PY
           patch_one trade4v/trend4p/utils.py
           patch_one trade4v/trade4v/trend4p/utils.py
 
-      # 5) Prepare data (auto-detect & normalize)
       - name: Prepare ETH 1m data (normalize headers)
         shell: bash
         run: |
@@ -116,18 +132,13 @@ PY
             CSV=$(ls -1 data/*.csv | head -n1)
           fi
           if [ -z "${CSV}" ] && ls -1 *.csv 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
-            CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1)
-            mv "$CSV" data/
-            CSV="data/$(basename "$CSV")"
+            CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1); mv "$CSV" data/; CSV="data/$(basename "$CSV")"
           fi
-          if [ -z "${CSV}" ]; then
-            echo "ERROR: CSV 데이터가 필요합니다 (예: data/ETHUSDT_1min_2020_2025.csv)"; exit 2
-          fi
+          if [ -z "${CSV}" ]; then echo "ERROR: CSV 필요(data/ETHUSDT_1min_*.csv)"; exit 2; fi
           echo "Using CSV: ${CSV}"
           python - "$CSV" <<'PY'
           import sys, pandas as pd
-          p=sys.argv[1]
-          df=pd.read_csv(p)
+          p=sys.argv[1]; df=pd.read_csv(p)
           rename={}
           for k in list(df.columns):
             kl=k.strip().lower()
@@ -142,7 +153,6 @@ PY
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 6) Run backtest
       - name: Run backtest (v3.3.1)
         shell: bash
         env:
@@ -166,8 +176,7 @@ PY
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
-          PY=trade4v/run_4u.py
-          [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
+          PY=trade4v/run_4u.py; [ -f "$PY" ] || PY=trade4v/trade4v/run_4u.py
           [ -f "$PY" ] || { echo "run_4u.py not found"; ls -R; exit 2; }
           echo "Using script: $PY"
           python "$PY" \
@@ -184,9 +193,8 @@ PY
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      # 7) Diagnostics (S1/S2/gating) — 자동 리포트 생성
-      - name: Run diagnostics
-        if: always()
+      - name: Run diagnostics (S1/S2/gating)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
@@ -205,10 +213,9 @@ PY
             echo "WARN: preds_test.csv 미존재 → 진단 생략"
           fi
 
-      # 8) Upload outputs (pinned SHA)
-      - name: Upload outputs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      - name: Upload outputs (artifact)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: _out_4u
           path: |
