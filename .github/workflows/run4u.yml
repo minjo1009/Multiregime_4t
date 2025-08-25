@@ -10,7 +10,7 @@ on:
       H:           { description: "예측지평(분)", required: true, default: "15" }
       fee_bps:     { description: "수수료(bp)", required: true, default: "1.0" }
       slip_bps:    { description: "슬리피지(bp)", required: true, default: "0.5" }
-      ev_margin_bps: { description: "EV 마진(bp) (현재 v3.3에선 내부 미사용/예비)", required: true, default: "1.0" }
+      ev_margin_bps: { description: "EV 마진(bp) (예비)", required: true, default: "1.0" }
       K_day:       { description: "일별 Top-K 맵 (rid:K,...)", required: true, default: "0:10,1:15,2:30" }
 
 jobs:
@@ -21,45 +21,61 @@ jobs:
       actions: read
 
     steps:
-      # 1) Checkout (pinned SHA)
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
 
-      # 2) Python setup (pinned SHA)
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps (requirements.txt 없어도 동작)
       - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
-          python -V
           python - <<'PY'
           import sys, subprocess
           subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade","pip","setuptools","wheel"])
-          base = ["numpy","pandas","pyarrow","scipy","scikit-learn","statsmodels"]
-          subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
+          base=["numpy","pandas","pyarrow","scipy","scikit-learn","statsmodels"]
+          subprocess.check_call([sys.executable,"-m","pip","install","-q",*base])
           PY
 
-      # 4) Unzip project (trade4v.zip -> ./trade4v)
-      - name: Unzip project
+      # === 여기서 중첩 trade4v/trade4v 폴더를 자동 평탄화 ===
+      - name: Unzip project (with re-root)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p __extracted
           if [ -f trade4v.zip ]; then
             unzip -o -q trade4v.zip -d __extracted
-            if [ -d __extracted/trade4v ]; then
+          fi
+          # 케이스1: __extracted/trade4v/run_4u.py
+          if [ -f "__extracted/trade4v/run_4u.py" ]; then
+            rm -rf trade4v || true
+            mv __extracted/trade4v ./trade4v
+          # 케이스2: __extracted/trade4v/trade4v/run_4u.py (중첩)
+          elif [ -f "__extracted/trade4v/trade4v/run_4u.py" ]; then
+            rm -rf trade4v || true
+            mv __extracted/trade4v/trade4v ./trade4v
+          # 케이스3: 루트에 run_4u.py만 있을 때
+          elif [ -f "__extracted/run_4u.py" ]; then
+            rm -rf trade4v || true
+            mkdir -p trade4v
+            mv __extracted/* trade4v/
+          fi
+          # 마지막 안전망: run_4u.py가 어디에 있든 패키지 루트 찾아서 trade4v로 맞춤
+          if [ ! -f "trade4v/run_4u.py" ]; then
+            FOUND=$(find __extracted -maxdepth 3 -type f -name "run_4u.py" | head -n1 || true)
+            if [ -n "$FOUND" ]; then
+              ROOT=$(dirname "$FOUND")
               rm -rf trade4v || true
-              mv __extracted/trade4v ./trade4v
+              mkdir -p trade4v
+              cp -R "$ROOT"/. trade4v/
             fi
           fi
-          test -d trade4v
+          # 최종 확인
+          test -f trade4v/run_4u.py || { echo "FATAL: run_4u.py not found"; find . -maxdepth 4 -name run_4u.py; exit 2; }
 
-      # 5) Prepare data (CSV/ZIP 자동탐색 + 헤더 정규화)
       - name: Prepare ETH 1m data
         shell: bash
         run: |
@@ -84,25 +100,24 @@ jobs:
           import sys, pandas as pd
           p=sys.argv[1]
           df=pd.read_csv(p)
-          rename={}
+          rn={}
           for k in list(df.columns):
             kl=k.strip().lower()
-            if kl in ("open time","opentime","time","timestamp"): rename[k]="open_time"
-            elif kl=="open":  rename[k]="open"
-            elif kl=="high":  rename[k]="high"
-            elif kl=="low":   rename[k]="low"
-            elif kl in ("close","close price","price"): rename[k]="close"
-            elif kl in ("volume","vol"): rename[k]="volume"
-          if rename: df=df.rename(columns=rename)
+            if kl in ("open time","opentime","time","timestamp"): rn[k]="open_time"
+            elif kl=="open": rn[k]="open"
+            elif kl=="high": rn[k]="high"
+            elif kl=="low": rn[k]="low"
+            elif kl in ("close","close price","price"): rn[k]="close"
+            elif kl in ("volume","vol"): rn[k]="volume"
+          if rn: df=df.rename(columns=rn)
           if "open_time" not in df.columns: raise SystemExit("open_time 컬럼이 필요합니다.")
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 6) Run backtest (v3.3, S1/S2/게이팅 포함)
-      - name: Run backtest (v3.3)
+      # === 패키지 루트 자동 검출 후 실행 (경로/중첩 방어) ===
+      - name: Run backtest (v3.3, capture logs)
         shell: bash
         env:
-          PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
           CSV: normalized.csv
           TRAIN_S: ${{ inputs.train_start }}
           TRAIN_E: ${{ inputs.train_end }}
@@ -113,17 +128,22 @@ jobs:
           SLIP:    ${{ inputs.slip_bps }}
           KDAY:    ${{ inputs.K_day }}
           OUT:     _out_4u
-          # 게이팅/QA 기본 설정(필요시 내부 수정)
           QTP: "0.90"
           QSL: "0.60"
-          OVERLAP_MODE: "cap"       # cap|pyramid|none
+          OVERLAP_MODE: "cap"
           MAX_CONC: "2"
           MIN_GAP: "5"
-          STRICT_QA: "0"            # 0=경고만, 1=하드 실패
+          STRICT_QA: "0"
+          PYTHONFAULTHANDLER: "1"
         run: |
           set -euo pipefail
-          mkdir -p "$OUT"
-          python "trade4v/run_4u.py" \
+          mkdir -p "$OUT/run"
+          # 패키지 루트 탐지
+          PKGROOT=$(dirname "$(find trade4v -type f -name run_4u.py | head -n1)")
+          echo "PKGROOT=$PKGROOT"
+          export PYTHONPATH="$PKGROOT:$(pwd)"
+          set +e
+          python -u "$PKGROOT/run_4u.py" \
             --data "$CSV" \
             --train_start "$TRAIN_S" --train_end "$TRAIN_E" \
             --test_start "$TEST_S"   --test_end "$TEST_E" \
@@ -133,33 +153,32 @@ jobs:
             --q_tp "$QTP" --q_sl "$QSL" \
             --overlap_mode "$OVERLAP_MODE" --max_concurrent "$MAX_CONC" --min_gap_bars "$MIN_GAP" \
             --strict_qa "$STRICT_QA" \
-            --out_dir "$OUT"
-          ls -al "$OUT" || true
-          ls -al "$OUT/run" || true
+            --out_dir "$OUT" \
+          2>&1 | tee "$OUT/run/run.log"
+          RC=${PIPESTATUS[0]}
+          echo "[backtest-exit-code] $RC" | tee -a "$OUT/run/run.log"
+          # 실패해도 다음 단계(진단)는 실행
+          exit 0
 
-      # 6.5) Diagnostics (S1/S2/게이팅 리포트 자동 생성)
-      - name: Run diagnostics
+      - name: Run diagnostics (best-effort)
         if: always()
         shell: bash
         env:
-          PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
           KDAY:    ${{ inputs.K_day }}
           H:       ${{ inputs.H }}
         run: |
           set -euo pipefail
+          PKGROOT=$(dirname "$(find trade4v -type f -name run_4u.py | head -n1)")
+          export PYTHONPATH="$PKGROOT:$(pwd)"
           if [ -f "_out_4u/run/preds_test.csv" ]; then
             python -m trade4v.diag.run_diag \
               --preds _out_4u/run/preds_test.csv \
               --metrics _out_4u/run/metrics_oos.json \
-              --k_day "$KDAY" \
-              --H "$H" || true
-            echo "diag_report.json:"
-            test -f "_out_4u/run/diag_report.json" && tail -n +1 "_out_4u/run/diag_report.json" | head -n 100 || true
+              --k_day "$KDAY" --H "$H" || true
           else
-            echo "WARN: preds_test.csv 미존재 → 진단 생략"
+            echo "no preds_test.csv, diagnostics skipped" | tee -a _out_4u/run/run.log
           fi
 
-      # 7) Upload outputs (pinned SHA)
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
