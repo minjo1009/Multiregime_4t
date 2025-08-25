@@ -4,8 +4,8 @@ on:
 
 env:
   REPO_DIR: repo
-  TRADE_ZIP: trade_v1.0.5_full.zip        # 레포 루트에 둔 zip
-  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip   # 레포 루트에 둔 zip
+  TRADE_ZIP: trade_v1.0.5_full.zip        # 레포 루트의 코드 zip (이름 꼭 확인)
+  DATA_ZIP:  ETHUSDT_1min_2020_2025.zip   # 레포 루트의 데이터 zip
   RUN_DIR:   tmp/trade
   DATA_DIR:  tmp/data
   OUT_DIR:   _out_4u/run
@@ -15,7 +15,7 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     steps:
-      # --- Checkout (actions/checkout 미사용: 정책 충돌 회피)
+      # --- Git checkout (actions/checkout 미사용: 정책 충돌 회피)
       - name: Checkout repository (git)
         shell: bash
         run: |
@@ -27,7 +27,7 @@ jobs:
           git checkout --force FETCH_HEAD
           ls -al
 
-      # --- 준비 & 압축 해제
+      # --- 준비 & 압축 해제 + ZIP SHA/목록 출력
       - name: Prepare workspace
         shell: bash
         run: |
@@ -35,10 +35,18 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           test -f "${REPO_DIR}/${TRADE_ZIP}" || { echo "❌ trade zip not found: ${TRADE_ZIP}"; exit 1; }
           test -f "${REPO_DIR}/${DATA_ZIP}"  || { echo "❌ data zip not found:  ${DATA_ZIP}";  exit 1; }
+          echo "Code ZIP SHA256:"
+          sha256sum "${REPO_DIR}/${TRADE_ZIP}" || true
+          echo "Data ZIP SHA256:"
+          sha256sum "${REPO_DIR}/${DATA_ZIP}"  || true
+          echo "Unzipping..."
           unzip -q "${REPO_DIR}/${TRADE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}"  -d "${DATA_DIR}"
+          echo "Top of runner & config:"
+          sed -n '1,60p' "${RUN_DIR}/backtest/runner.py" || true
+          sed -n '1,60p' "${RUN_DIR}/conf/config.yml"     || true
 
-      # --- 의존성 설치 (순수 bash, 파이썬 원라이너 없음)
+      # --- 의존성 설치
       - name: Install requirements
         working-directory: ${{ env.RUN_DIR }}
         shell: bash
@@ -48,25 +56,27 @@ jobs:
           python3 -m pip install -U pip
           python3 -m pip install -r requirements.txt
 
-      # --- Fingerprint: v1.0.4(legacy) 또는 v1.0.5(new) 표식 인정
-      - name: Fingerprint check (v1.0.4 + v1.0.5)
+      # --- Fingerprint: legacy(v1.0.4) / transitional(1.0.4b) / new(v1.0.5) 모두 허용
+      - name: Fingerprint check (legacy + transitional + v1.0.5)
         shell: bash
         run: |
           set -euo pipefail
           f="${RUN_DIR}/backtest/runner.py"
           conf="${RUN_DIR}/conf/config.yml"
           if grep -Eq "Coverage-aligned gating" "$f"; then
-            echo "OK: legacy marker found"
-          elif grep -Eq "s1_floor" "$f" && grep -Eq "regime_policy" "$conf"; then
+            echo "OK: legacy marker found (v1.0.4)"
+          elif grep -Eq "^s1_min_prob" "$conf" && grep -Eq "^coverage_mode" "$conf"; then
+            echo "OK: transitional markers found (1.0.4b)"
+          elif grep -Eq "^regime_policy:" "$conf" && grep -Eq "^s1_floor:" "$conf"; then
             echo "OK: v1.0.5 markers found"
           else
-            echo "✖ missing: legacy or v1.0.5 markers"
-            echo "---- runner.py head ----"; sed -n '1,120p' "$f" || true
-            echo "---- config.yml head ----"; sed -n '1,120p' "$conf" || true
+            echo "✖ missing markers (legacy/transitional/v1.0.5)"
+            echo "---- runner.py head ----"; sed -n '1,140p' "$f" || true
+            echo "---- config.yml head ----"; sed -n '1,140p' "$conf" || true
             exit 1
           fi
 
-      # --- CSV 프리플라이트 (경로 자동 탐지만; 컬럼 검증은 코드에 위임)
+      # --- CSV 프리플라이트 (경로 자동 탐지)
       - name: Preflight CSV
         shell: bash
         run: |
@@ -74,9 +84,9 @@ jobs:
           if [ ! -f "${CSV_PATH}" ]; then
             echo "CSV_PATH not found -> re-detecting…"
             cand=$(find "${DATA_DIR}" -type f \
-                     -iname "*ETHUSDT*1min*2020*2025*.csv" -o \
-                     -iname "*ETHUSDT*1m*2020*2025*.csv"  -o \
-                     -iname "*.csv" | head -n1 || true)
+                     \( -iname "*ETHUSDT*1min*2020*2025*.csv" -o \
+                        -iname "*ETHUSDT*1m*2020*2025*.csv"  -o \
+                        -iname "*.csv" \) | head -n1 || true)
             [ -n "$cand" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
             echo "Detected: $cand"
             echo "CSV_PATH=$cand" >> "$GITHUB_ENV"
