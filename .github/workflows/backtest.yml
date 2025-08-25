@@ -39,6 +39,7 @@ jobs:
       OUT_DIR:   ${{ github.event.inputs.out_dir        || '_out_4u/run' }}
 
     steps:
+      # 모든 액션은 commit SHA로 고정 (조직 정책 충족)
       - name: Checkout (pinned SHA)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
@@ -50,7 +51,7 @@ jobs:
       - name: Show repo listing
         run: ls -alh
 
-      # --- Unzip trade code & locate run_4u.py ---
+      # --- unzip trade code & locate run_4u.py ---
       - name: Unzip trade pack
         shell: bash
         run: |
@@ -59,20 +60,16 @@ jobs:
           mkdir -p tmp/trade
           unzip -q -o "$TRADE_ZIP" -d tmp/trade
 
-          RUN_FILE="$(find tmp/trade -type f -name 'run_4u.py' | head -n1 || true)"
-          if [ -z "$RUN_FILE" ]; then
-            echo "❌ run_4u.py not found inside $TRADE_ZIP"; exit 1
-          fi
+          RUN_FILE="$(find tmp/trade -type f -name 'run_4u.py' -print -quit || true)"
+          [ -n "$RUN_FILE" ] || { echo "❌ run_4u.py not found inside $TRADE_ZIP"; exit 1; }
           RUN_DIR="$(dirname "$RUN_FILE")"
           echo "RUN_DIR=$RUN_DIR" >> "$GITHUB_ENV"
 
-          REQS_FILE="$(find "$RUN_DIR" -maxdepth 1 -type f -name 'requirements.txt' | head -n1 || true)"
-          if [ -n "$REQS_FILE" ]; then
-            echo "REQS_FILE=$REQS_FILE" >> "$GITHUB_ENV"
-          fi
+          REQS_FILE="$(find "$RUN_DIR" -maxdepth 1 -type f -name 'requirements.txt' -print -quit || true)"
+          [ -n "$REQS_FILE" ] && echo "REQS_FILE=$REQS_FILE" >> "$GITHUB_ENV" || true
           echo "ℹ️ RUN_DIR=$RUN_DIR"
 
-      # --- Unzip data & locate CSV (ETH 1m 우선) ---
+      # --- unzip data & locate CSV (ETH 1m 우선) ---
       - name: Unzip data pack
         shell: bash
         run: |
@@ -81,13 +78,13 @@ jobs:
           mkdir -p tmp/data
           unzip -q -o "$DATA_ZIP" -d tmp/data
 
-          CSV_PATH="$(find tmp/data -type f \( -iname '*ETH*1min*.csv' -o -iname '*.csv' \) | head -n1 || true)"
+          CSV_PATH="$(find tmp/data -type f -iname '*ETH*1min*.csv' -print -quit)"
           if [ -z "$CSV_PATH" ]; then
-            echo "❌ No CSV found in $DATA_ZIP"; exit 1
+            CSV_PATH="$(find tmp/data -type f -iname '*.csv' -print -quit)"
           fi
+          [ -n "$CSV_PATH" ] || { echo "❌ No CSV found in $DATA_ZIP"; exit 1; }
           echo "CSV_PATH=$CSV_PATH" >> "$GITHUB_ENV"
           echo "ℹ️ CSV_PATH=$CSV_PATH"
-          wc -l "$CSV_PATH" || true
           head -n 3 "$CSV_PATH" || true
 
       - name: Set up Python (pinned SHA)
@@ -103,61 +100,12 @@ jobs:
           python -m pip install --upgrade pip
           if [ -n "${REQS_FILE:-}" ] && [ -f "$REQS_FILE" ]; then
             pip install -r "$REQS_FILE"
-          else:
+          else
             pip install numpy pandas scikit-learn matplotlib pyyaml
           fi
 
-      # --- Preflight & normalize (robust; no heredoc parsing issues) ---
-      - name: Preflight + Normalize CSV (if needed)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > preflight.py <<'PY'
-import os, sys, pandas as pd, numpy as np
-csv = os.environ['CSV_PATH']
-print(f"Preflight on: {csv}")
-df = pd.read_csv(csv, nrows=2)
-cols = set(df.columns)
-need_base = {'open_time','open','high','low','close','volume','number_of_trades'}
-missing = need_base - cols
-if missing:
-    print(f"❌ Missing base columns: {missing}")
-    sys.exit(1)
-
-has_base = 'taker_buy_base_asset_volume' in cols
-has_quote = 'taker_buy_quote_asset_volume' in cols
-
-if not has_base and not has_quote:
-    print("❌ Need either taker_buy_base_asset_volume or taker_buy_quote_asset_volume")
-    sys.exit(1)
-
-# If only quote exists, create a normalized CSV with base estimated by typical price
-if (not has_base) and has_quote:
-    print("ℹ️ Only quote volume found → creating normalized CSV with base volume via typical price ((H+L+C)/3).")
-    out_csv = csv.replace(".csv", "_normalized.csv")
-    it = pd.read_csv(csv, chunksize=500000)
-    with open(out_csv, "w", encoding="utf-8") as f_out:
-        first = True
-        for chunk in it:
-            for j in ['Unnamed: 0','index']:
-                if j in chunk.columns: chunk = chunk.drop(columns=[j])
-            tp = (chunk['high'] + chunk['low'] + chunk['close']) / 3.0
-            tp = tp.replace(0, np.nan)
-            chunk['taker_buy_base_asset_volume'] = (pd.to_numeric(chunk['taker_buy_quote_asset_volume'], errors='coerce') / tp).fillna(0.0)
-            if first:
-                chunk.to_csv(f_out, index=False)
-                first = False
-            else:
-                chunk.to_csv(f_out, index=False, header=False)
-    print(f"✅ Normalized CSV written: {out_csv}")
-    print(f"CSV_PATH={out_csv}")
-    # emit to GITHUB_ENV
-    with open(os.environ['GITHUB_ENV'], 'a') as env:
-        env.write(f"CSV_PATH={out_csv}\\n")
-else:
-    print("✅ Columns OK. No normalization required.")
-PY
-          python preflight.py
+      # Preflight는 코드팩 v1.0.1에서 처리(quote→base 자동 변환)
+      # heredoc 사용 없음 → YAML 파싱 에러 원천 차단
 
       - name: Run backtest
         shell: bash
@@ -167,7 +115,7 @@ PY
           echo "▶ python $RUN_DIR/run_4u.py --data_path \"$CSV_PATH\" --out_dir \"$OUT_DIR\""
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "$OUT_DIR"
 
-      - name: Verify outputs exist
+      - name: Verify outputs
         shell: bash
         run: |
           test -f "$OUT_DIR/summary.json" || { echo "❌ summary.json not found in $OUT_DIR"; exit 1; }
