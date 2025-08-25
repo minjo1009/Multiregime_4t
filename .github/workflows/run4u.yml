@@ -1,4 +1,4 @@
-name: trade4v run (v3.3.1, dispatch-only, robust)
+name: trade4v run (ROLLBACK base v3)
 
 on:
   workflow_dispatch:
@@ -20,37 +20,32 @@ jobs:
       actions: read
 
     steps:
-      # 1) Checkout (pinned SHA)
-      - name: Checkout
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5.0.0
+      - name: Checkout (pinned)
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v5
 
-      # 2) Python (pinned SHA)
-      - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      - name: Setup Python 3.11 (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      # 3) Minimal deps
       - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import sys, subprocess
-          subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade","pip","setuptools","wheel"])
+          pkgs = ["pip","setuptools","wheel"]
+          subprocess.check_call([sys.executable,"-m","pip","install","-q","--upgrade",*pkgs])
           base = ["numpy","pandas","pyarrow","scipy","scikit-learn","statsmodels"]
-          subprocess.check_call([sys.executable,"-m","pip","install","-q", *base])
+          subprocess.check_call([sys.executable,"-m","pip","install","-q",*base])
           PY
 
-      # 4) Unzip & flatten (trade4v.zip 또는 리포 내 trade4v 폴더 모두 지원)
       - name: Unzip project (robust flatten)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p __extracted
-          if [ -f trade4v.zip ]; then
-            unzip -o -q trade4v.zip -d __extracted
-          fi
+          if [ -f trade4v.zip ]; then unzip -o -q trade4v.zip -d __extracted; fi
           ROOT=""
           for d in __extracted/trade4v __extracted ./trade4v . ; do
             if [ -f "$d/trade4v/run_4u.py" ]; then ROOT="$d/trade4v"; break; fi
@@ -60,44 +55,34 @@ jobs:
           rm -rf trade4v || true
           if [ -n "${ROOT}" ]; then
             if [ -d "${ROOT}/trade4v" ]; then
-              mkdir -p trade4v; shopt -s dotglob
-              mv "${ROOT}/trade4v"/* trade4v/ || true
+              mkdir -p trade4v; shopt -s dotglob; mv "${ROOT}/trade4v"/* trade4v/ || true
             else
               cp -r "${ROOT}" ./trade4v
             fi
           fi
-          if [ -d trade4v/trade4v ]; then
-            shopt -s dotglob; mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v
-          fi
+          if [ -d trade4v/trade4v ]; then shopt -s dotglob; mv trade4v/trade4v/* trade4v/; rmdir trade4v/trade4v; fi
           test -f trade4v/run_4u.py || { echo "run_4u.py not found after flatten"; ls -R; exit 2; }
-          echo "[OK] trade4v layout fixed:"; ls -al trade4v | head -n 50
+          ls -al trade4v | head -n 50
 
-      # 4.5) Hotfix: pandas.cut duplicate labels -> unique labels
-      - name: Hotfix v3.3.1 (unique session labels)
+      # (옵션) 세션 라벨 중복 에러 방지 핫픽스만 적용
+      - name: Hotfix session labels (unique)
         shell: bash
         run: |
           set -euo pipefail
-          patch_one () {
+          fix() {
             local P="$1"
-            if [ -f "$P" ]; then
-              python - "$P" <<'PY'
+            [ -f "$P" ] || return 0
+            python - "$P" <<'PY'
 import sys, re, pathlib
-p = pathlib.Path(sys.argv[1])
-s = p.read_text(encoding="utf-8")
-s = re.sub(
-    r"sess\s*=\s*pd\.cut\(\s*hr\s*,\s*bins=\[[^\]]+\]\s*,\s*labels=\[[^\]]+\]\s*,\s*include_lowest=True\)\.astype\(int\)",
-    "sess = pd.cut(hr, bins=[-1,7,13,24], labels=[0,1,2], include_lowest=True).astype(int)",
-    s, flags=re.S
-)
-p.write_text(s, encoding="utf-8")
-print(f"[patched] {p}")
+p=pathlib.Path(sys.argv[1]); s=p.read_text(encoding="utf-8")
+s=re.sub(r"sess\s*=\s*pd\.cut\(\s*hr\s*,\s*bins=\[[^\]]+\]\s*,\s*labels=\[[^\]]+\]\s*,\s*include_lowest=True\)\.astype\(int\)",
+         "sess = pd.cut(hr, bins=[-1,7,13,24], labels=[0,1,2], include_lowest=True).astype(int)", s, flags=re.S)
+p.write_text(s, encoding="utf-8"); print(f"[patched] {p}")
 PY
-            fi
           }
-          patch_one trade4v/trend4p/utils.py
-          patch_one trade4v/trade4v/trend4p/utils.py
+          fix trade4v/trend4p/utils.py
+          fix trade4v/trade4v/trend4p/utils.py
 
-      # 5) Prepare data (auto-detect & normalize)
       - name: Prepare ETH 1m data (normalize headers)
         shell: bash
         run: |
@@ -105,9 +90,7 @@ PY
           mkdir -p data
           CSV=$(ls -1 data/*.csv 2>/dev/null | head -n1 || true)
           if [ -z "${CSV}" ] && ls -1 *.zip 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
-            ZIP=$(ls -1 ETHUSDT_1min_*.zip | head -n1)
-            unzip -o -q "$ZIP" -d data
-            CSV=$(ls -1 data/*.csv | head -n1)
+            ZIP=$(ls -1 ETHUSDT_1min_*.zip | head -n1); unzip -o -q "$ZIP" -d data; CSV=$(ls -1 data/*.csv | head -n1)
           fi
           if [ -z "${CSV}" ] && ls -1 *.csv 2>/dev/null | grep -q 'ETHUSDT_1min_'; then
             CSV=$(ls -1 ETHUSDT_1min_*.csv | head -n1); mv "$CSV" data/; CSV="data/$(basename "$CSV")"
@@ -116,23 +99,22 @@ PY
           echo "Using CSV: ${CSV}"
           python - "$CSV" <<'PY'
           import sys, pandas as pd
-          p=sys.argv[1]; df=pd.read_csv(p)
-          rename={}
-          for k in list(df.columns):
-            kl=k.strip().lower()
-            if kl in ("open time","opentime","time","timestamp"): rename[k]="open_time"
-            elif kl=="open":  rename[k]="open"
-            elif kl=="high":  rename[k]="high"
-            elif kl=="low":   rename[k]="low"
-            elif kl in ("close","close price","price"): rename[k]="close"
-            elif kl in ("volume","vol"): rename[k]="volume"
-          if rename: df=df.rename(columns=rename)
+          df=pd.read_csv(sys.argv[1])
+          ren={}
+          for c in list(df.columns):
+            k=c.strip().lower()
+            if k in ("open time","opentime","time","timestamp"): ren[c]="open_time"
+            elif k=="open": ren[c]="open"
+            elif k=="high": ren[c]="high"
+            elif k=="low": ren[c]="low"
+            elif k in ("close","close price","price"): ren[c]="close"
+            elif k in ("volume","vol"): ren[c]="volume"
+          if ren: df=df.rename(columns=ren)
           if "open_time" not in df.columns: raise SystemExit("open_time 컬럼이 필요합니다.")
           df.to_csv("normalized.csv", index=False)
           PY
 
-      # 6) Run backtest
-      - name: Run backtest (v3.3.1)
+      - name: Run backtest (baseline)
         shell: bash
         env:
           PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
@@ -146,12 +128,6 @@ PY
           SLIP:    ${{ inputs.slip_bps }}
           KDAY:    ${{ inputs.K_day }}
           OUT:     _out_4u
-          QTP: "0.90"
-          QSL: "0.60"
-          OVERLAP_MODE: "cap"
-          MAX_CONC: "2"
-          MIN_GAP: "5"
-          STRICT_QA: "0"
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
@@ -165,36 +141,11 @@ PY
             --H "$H" \
             --fee_bps "$FEE" --slip_bps "$SLIP" \
             --K_day "$KDAY" \
-            --q_tp "$QTP" --q_sl "$QSL" \
-            --overlap_mode "$OVERLAP_MODE" --max_concurrent "$MAX_CONC" --min_gap_bars "$MIN_GAP" \
-            --strict_qa "$STRICT_QA" \
             --out_dir "$OUT"
           ls -al "$OUT" || true
           ls -al "$OUT/run" || true
 
-      # 7) Diagnostics (S1/S2/gating)
-      - name: Run diagnostics
-        if: always()
-        shell: bash
-        env:
-          PYTHONPATH: ${{ github.workspace }}/trade4v:${{ github.workspace }}
-          KDAY:    ${{ inputs.K_day }}
-          H:       ${{ inputs.H }}
-        run: |
-          set -euo pipefail
-          if [ -f "_out_4u/run/preds_test.csv" ]; then
-            python -m trade4v.diag.run_diag \
-              --preds _out_4u/run/preds_test.csv \
-              --metrics _out_4u/run/metrics_oos.json \
-              --k_day "$KDAY" --H "$H" || true
-            echo "diag_report.json (head):"
-            test -f "_out_4u/run/diag_report.json" && head -n 100 "_out_4u/run/diag_report.json" || true
-          else
-            echo "WARN: preds_test.csv 미존재 → 진단 생략"
-          fi
-
-      # 8) Upload artifacts
-      - name: Upload outputs
+      - name: Upload outputs (artifact)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
