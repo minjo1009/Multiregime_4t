@@ -6,7 +6,7 @@ on:
       TRADE_ZIP:
         description: 'Code zip at repo root'
         required: true
-        default: 'trade_v1.0.7.zip'
+        default: 'trade_v1.0.7d_full.zip'
       DATA_ZIP:
         description: 'Data zip at repo root'
         required: true
@@ -30,7 +30,6 @@ jobs:
       NUMEXPR_NUM_THREADS: 2
 
     steps:
-      # --- Pinned actions (기업 보안 정책 호환) ---
       - name: Checkout (pinned)
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
@@ -40,18 +39,15 @@ jobs:
           python-version: ${{ env.PYVER }}
           cache: pip
 
-      # --- Unpack & CSV 탐지 ---
       - name: Prepare dirs & unzip
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-          # 코드팩
-          test -f "${{ github.event.inputs.TRADE_ZIP }}" || { echo "❌ code zip not found at repo root"; exit 1; }
+          test -f "${{ github.event.inputs.TRADE_ZIP }}" || { echo "code zip not found"; exit 1; }
           unzip -q "${{ github.event.inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
 
-          # 데이터
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then
             unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}" || true
           fi
@@ -60,11 +56,10 @@ jobs:
           if [ -z "$CSV" ]; then
             CSV=$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)
           fi
-          [ -n "$CSV" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
+          [ -n "$CSV" ] || { echo "No CSV found in ${DATA_DIR}"; exit 1; }
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
           echo "Using CSV_PATH=$CSV"
 
-      # --- 의존성 설치 (항상 RUN_DIR 기준) ---
       - name: Install requirements
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -72,40 +67,43 @@ jobs:
           set -euo pipefail
           python -V
           python -m pip install -U pip
-          test -f requirements.txt || { echo "❌ requirements.txt missing in $(pwd)"; ls -al; exit 1; }
+          test -f requirements.txt || { echo "requirements.txt missing in $(pwd)"; ls -al; exit 1; }
           pip install -r requirements.txt
 
-      # --- 필수 파일 존재 확인 ---
       - name: Sanity check (files)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          test -f run_4u.py || { echo "❌ run_4u.py missing"; ls -al; exit 1; }
-          test -f conf/config.yml || { echo "❌ conf/config.yml missing"; exit 1; }
-          python -c "import yaml, json, numpy, pandas, sklearn; print('deps OK')"
+          test -f run_4u.py || { echo "run_4u.py missing"; exit 1; }
+          test -f conf/config.yml || { echo "conf/config.yml missing"; exit 1; }
+          python - <<'PY'
+          import yaml, json, numpy, pandas, sklearn
+          print("deps OK:", "yaml json numpy pandas sklearn")
+          PY
 
-      # --- sklearn 1.4/1.5 계열 호환 스모크 ---
-      - name: sklearn smoke (1.4/1.5 호환)
+      # sklearn 1.4/1.5 호환 스모크 (임시 파일 방식)
+      - name: sklearn smoke (1.4/1.5)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python - <<'PY'
-import inspect, sklearn
-from sklearn.calibration import CalibratedClassifierCV as C
-params = set(getattr(inspect.signature(C), 'parameters', {}))
-print("sklearn", sklearn.__version__, "| C param:", ("estimator" if "estimator" in params else "base_estimator" if "base_estimator" in params else "unknown"))
-PY
+          cat > smoke.py <<'PY'
+          import inspect, sklearn
+          from sklearn.calibration import CalibratedClassifierCV as C
+          params = set(getattr(inspect.signature(C), 'parameters', {}))
+          print("sklearn", sklearn.__version__, "| C param:",
+                "estimator" if "estimator" in params else
+                ("base_estimator" if "base_estimator" in params else "unknown"))
+          PY
+          python smoke.py
 
-      # --- 실행 ---
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           python run_4u.py --data_path "${CSV_PATH}" --out_dir "${{ env.OUT_DIR }}"
-
           echo "---- gating debug (head) ----"
           if [ -f "${{ env.OUT_DIR }}/gating_debug.json" ]; then
             head -n 60 "${{ env.OUT_DIR }}/gating_debug.json" || true
@@ -114,7 +112,6 @@ PY
           fi
           ls -al "${{ env.OUT_DIR }}"
 
-      # --- 아티팩트 업로드 (pinned) ---
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
