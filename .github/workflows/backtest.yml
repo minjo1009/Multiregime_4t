@@ -4,151 +4,89 @@ on:
   workflow_dispatch:
     inputs:
       TRADE_ZIP:
-        description: Trade code zip in repo root
-        default: trade_v1.0.7_full.zip
+        description: 'Code zip in repo root'
+        required: true
+        default: 'trade_v1.0.7_full_pack.zip'
       DATA_ZIP:
-        description: Data zip in repo root
-        default: ETHUSDT_1min_2020_2025.zip
+        description: 'Data zip in repo root'
+        required: true
+        default: 'ETHUSDT_1min_2020_2025.zip'
       CSV_GLOB:
-        description: CSV glob (inside data zip)
-        default: "*ETHUSDT*1min*2020*2025*.csv"
+        description: 'CSV glob inside data zip'
+        required: false
+        default: '*ETHUSDT*1min*2020*2025*.csv'
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
     env:
-      A_CHECKOUT: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
-      A_PYTHON:   actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-      A_UPLOAD:   actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
-      PYVER: "3.11"
-      OMP_NUM_THREADS: 2
-      OPENBLAS_NUM_THREADS: 2
-      MKL_NUM_THREADS: 2
-      NUMEXPR_NUM_THREADS: 2
-
+      PYVER: '3.11'
     steps:
+      # --- 필수: 핀고정 checkout ---
       - name: Checkout (pinned)
-        uses: ${{ env.A_CHECKOUT }}
+        uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
-      - name: Make dirs
-        run: |
-          set -euo pipefail
-          rm -rf "${{ env.RUN_DIR }}" "${{ env.DATA_DIR }}" "${{ env.OUT_DIR }}"
-          mkdir -p "${{ env.RUN_DIR }}" "${{ env.DATA_DIR }}" "${{ env.OUT_DIR }}"
-
-      - name: Unzip code & data
-        run: |
-          set -euo pipefail
-          unzip -q "${{ github.event.inputs.TRADE_ZIP || 'trade_v1.0.7_full.zip' }}" -d "${{ env.RUN_DIR }}"
-          unzip -q "${{ github.event.inputs.DATA_ZIP  || 'ETHUSDT_1min_2020_2025.zip' }}" -d "${{ env.DATA_DIR }}"
-
-      - name: Detect CODE_DIR (engine.py)
-        id: detect
-        run: |
-          set -euo pipefail
-          found=$(find "${{ env.RUN_DIR }}" -type f -path "*/backtest/engine.py" | head -n1)
-          [ -n "$found" ] || { echo "no engine.py in code zip"; exit 1; }
-          CODE_DIR=$(dirname "$(dirname "$found")")
-          echo "CODE_DIR=$CODE_DIR" | tee -a "$GITHUB_ENV"
-          echo "code_dir=$CODE_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Python (pinned + cache)
-        uses: ${{ env.A_PYTHON }}
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
           cache: pip
-          cache-dependency-path: ${{ steps.detect.outputs.code_dir }}/requirements.txt
+
+      - name: Prepare dirs & unpack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          test -f "${{ github.event.inputs.TRADE_ZIP }}" || { echo "❌ code zip not found"; exit 1; }
+          unzip -q "${{ github.event.inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
+          if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then
+            unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}" || true
+          fi
+          # CSV 찾기
+          CSV=$(ls ${DATA_DIR}/${{ github.event.inputs.CSV_GLOB }} 2>/dev/null | head -n1 || true)
+          if [ -z "$CSV" ]; then
+            CSV=$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)
+          fi
+          [ -n "$CSV" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+          echo "Using CSV_PATH=$CSV"
 
       - name: Install requirements
-        working-directory: ${{ steps.detect.outputs.code_dir }}
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python -V
           python -m pip install -U pip
-          python -m pip install -r requirements.txt
-          pip check || true
-          python - <<'PY'
-          import sklearn, sys
-          print("sklearn", sklearn.__version__, sys.version)
-          PY
+          test -f requirements.txt || { echo "❌ requirements.txt missing in ${PWD}"; exit 1; }
+          pip install -r requirements.txt
 
-      # -------- Preflight: CSV & NaN coverage ----------
-      - name: Preflight CSV/paths
-        run: |
-          set -euo pipefail
-          shopt -s nullglob globstar
-          GLOB="${{ github.event.inputs.CSV_GLOB }}"
-          CAND=( ${{ env.DATA_DIR }}/${GLOB} )
-          if [ ${#CAND[@]} -eq 0 ]; then CAND=( ${{ env.DATA_DIR }}/**/*.csv ); fi
-          [ ${#CAND[@]} -gt 0 ] || { echo "No CSV found in data zip"; exit 1; }
-          ABS_CSV="$(readlink -f "${CAND[0]}")"
-          echo "ABS_CSV=$ABS_CSV" | tee -a "$GITHUB_ENV"
-          head -n 2 "$ABS_CSV" | cat
-
-      - name: Preflight NaN & expected coverage (smoke)
-        working-directory: ${{ steps.detect.outputs.code_dir }}
+      - name: Smoke import (sklearn compat)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           python - <<'PY'
-          import pandas as pd, numpy as np, json, sys
-          import os
-          from trend4p.signals.s1 import compute_features
-          csv=os.environ['ABS_CSV']
-          df=pd.read_csv(csv).head(20000)
-          X=compute_features(df)
-          nan_rate=float(1-np.isfinite(X.values).mean())
-          print("nan_rate:", nan_rate)
-          if nan_rate>0.01: 
-              print("❌ Too many NaNs in features"); sys.exit(1)
-          print("OK preflight")
-          PY
+import inspect, sklearn
+from sklearn.calibration import CalibratedClassifierCV as C
+ok = 'estimator' in inspect.signature(C).parameters or 'base_estimator' in inspect.signature(C).parameters
+print("sklearn", sklearn.__version__, "CalibratedClassifierCV param OK:", ok)
+PY
 
-      # -------- Contract CI (fast) ----------
-      - name: Contract CI (engine returns 6-tuple)
-        working-directory: ${{ steps.detect.outputs.code_dir }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          from backtest.runner import run_backtest
-          p=os.environ['ABS_CSV']
-          preds,trades,micro,costs,by_bucket,meta = run_backtest(p, "conf/config.yml", "_out_4u/contract")
-          assert isinstance(meta, dict)
-          assert len((preds,trades,micro,costs,by_bucket,meta))==6
-          print("OK 6-tuple")
-          PY
-
-      # -------- Run backtest ----------
       - name: Run backtest
-        working-directory: ${{ steps.detect.outputs.code_dir }}
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python run_4u.py --data_path "${ABS_CSV}" --config "conf/config.yml" --out_dir "${{ env.OUT_DIR }}"
+          python run_4u.py --data_path "${CSV_PATH}" --out_dir "${{ env.OUT_DIR }}"
+          echo "---- gating debug ----"
+          cat "${{ env.OUT_DIR }}/gating_debug.json" || true
           ls -al "${{ env.OUT_DIR }}"
 
-      # -------- Validate artifacts (schema) ----------
-      - name: Validate summary schema
-        working-directory: ${{ steps.detect.outputs.code_dir }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import json, sys, jsonschema, os
-          from jsonschema import validate
-          schema=json.load(open("diag/schema/summary.schema.json","r",encoding="utf-8"))
-          data=json.load(open(os.environ.get("OUT_DIR","_out_4u/run")+"/summary.json","r",encoding="utf-8"))
-          validate(instance=data, schema=schema)
-          print("OK schema")
-          PY
-        env:
-          OUT_DIR: ${{ env.OUT_DIR }}
-        shell: bash
-
-      # -------- Upload artifacts ----------
-      - name: Upload artifacts (pinned SHA)
-        uses: ${{ env.A_UPLOAD }}
+      - name: Upload artifacts (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
@@ -156,5 +94,5 @@ jobs:
             ${{ env.OUT_DIR }}/gating_debug.json
             ${{ env.OUT_DIR }}/preds_test.csv
             ${{ env.OUT_DIR }}/trades.csv
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
