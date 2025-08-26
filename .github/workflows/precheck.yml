@@ -1,18 +1,14 @@
-name: Precheck CSV (v1.0.9-strict)
+name: Precheck CSV (strict)
 
 on:
   workflow_dispatch:
     inputs:
-      CODE_ZIP:
-        description: "Code zip at repo root (unused here)"
-        required: false
-        default: "trade_v1.0.8.zip"
       DATA_ZIP:
-        description: "Data zip at repo root"
+        description: Data zip at repo root
         required: true
-        default: "ETHUSDT_1min_2020_2025.zip"
+        default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: "Glob inside unzipped DATA_DIR"
+        description: CSV glob inside data zip
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
 
@@ -21,50 +17,45 @@ permissions:
 
 env:
   PY: "3.11"
-  RUN_DIR: tmp/trade
   DATA_DIR: tmp/data
   OUT_DIR: _out_4u/run
-  # === FULL SHAs ONLY (strict) ===
-  CHECKOUT_SHA: 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-  SETUP_PYTHON_SHA: a26af69be951a213d495a4c3e4e4022e16d87065
-  UPLOAD_ARTIFACT_SHA: ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+  # --- pinned SHAs (strict: no tag fallback) ---
+  CHECKOUT_SHA: "11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a"
+  SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
+  UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
 
 jobs:
   preflight:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate pinned SHAs (exists)
+      - name: Validate pinned SHAs (ASCII/exists; strict, no fallback)
         shell: bash
         run: |
           set -euo pipefail
           hex40='^[0-9a-f]{40}$'
           check(){ n="$1"; s="$2"; u="https://api.github.com/repos/actions/${n}/tarball/${s}"; curl -fsIL "$u" >/dev/null; }
-          for n in checkout setup-python upload-artifact; do
-            s="$(echo "${n}_SHA" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
-            v="${!s}"
-            [[ "$v" =~ $hex40 ]] || { echo "❌ PinnedSHA: $n not 40-hex"; exit 86; }
-            check "$n" "$v" || { echo "❌ PinnedSHA: $n@$v not found"; exit 86; }
+          die(){ echo "❌ PinnedSHA: $1" >&2; exit 86; }
+          for kv in "checkout:${CHECKOUT_SHA}" "setup-python:${SETUP_PYTHON_SHA}" "upload-artifact:${UPLOAD_ARTIFACT_SHA}"; do
+            name="${kv%%:*}"; sha="${kv##*:}"
+            [[ "$sha" =~ $hex40 ]] || die "$name not 40-hex"
+            check "$name" "$sha" || die "$name $sha not found (org requires pinned SHAs)"
           done
-          echo "✅ Pinned SHAs OK"
+          echo "✅ pinned SHAs ok"
 
-      - name: Checkout (pinned, strict)
+      - name: Checkout (pinned)
         uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
 
-      - name: Setup Python (pinned, strict)
+      - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PY }}
 
-      - name: Install deps (minimal)
+      - name: Install deps (pandas/numpy/pyyaml; quiet)
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip -q install -U pip
-          if [ -f requirements.txt ]; then
-            python3 -m pip -q install -r requirements.txt
-          else
-            python3 -m pip -q install pandas numpy scikit-learn pyyaml
-          fi
+          python3 -m pip -q install pandas numpy pyyaml
 
       - name: Prepare dirs & unzip data
         shell: bash
@@ -72,41 +63,36 @@ jobs:
           set -euo pipefail
           rm -rf "${DATA_DIR}" "${OUT_DIR}"
           mkdir -p "${DATA_DIR}" "${OUT_DIR}"
-          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}" >/dev/null
-
-      - name: Write detect_csv.py
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > detect_csv.py <<'PY'
-          import os, sys, glob
-          base = os.environ["DATA_DIR"]
-          pat  = os.environ.get("CSV_GLOB_IN","").strip()
-          matches = glob.glob(os.path.join(base, "**", pat), recursive=True) if pat else []
-          if not matches:
-              matches = glob.glob(os.path.join(base, "**", "*.csv"), recursive=True)
-          if not matches:
-              print(f"ERROR: No CSV found under {base}", file=sys.stderr); sys.exit(2)
-          print(os.path.abspath(matches[0]))
-          PY
+          unzip -oq "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
+          echo "{}" > "${OUT_DIR}/gating_debug.json"
 
       - name: Detect CSV & export CSV_PATH
         shell: bash
-        env:
-          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          ABS="$(python3 detect_csv.py)"
-          echo "CSV_PATH=${ABS}" | tee -a "$GITHUB_ENV"
-          echo "Using CSV_PATH=${ABS}"
+          mkdir -p .ci
+          cat > .ci/detect_csv.py <<'PY'
+          import sys, os, glob
+          base = os.environ["DATA_DIR"]
+          pat  = os.environ.get("CSV_GLOB","").strip() or "*.csv"
+          cand = glob.glob(os.path.join(base, pat), recursive=True)
+          if not cand: cand = glob.glob(os.path.join(base, "**", "*.csv"), recursive=True)
+          if not cand:
+              print(f"ERROR: No CSV found under {base}", file=sys.stderr)
+              sys.exit(2)
+          print(os.path.abspath(cand[0]))
+          PY
+          CSV_PATH="$(python3 .ci/detect_csv.py)"
+          echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
+          echo "Using CSV_PATH=${CSV_PATH}"
 
-      - name: Write preflight.py
+      - name: Preflight columns
         shell: bash
         run: |
           set -euo pipefail
-          cat > preflight.py <<'PY'
-          import os, sys, pandas as pd
-          p = os.environ.get("CSV_PATH")
+          cat > .ci/preflight_cols.py <<'PY'
+          import sys, os, pandas as pd
+          p = os.environ.get("CSV_PATH") or (len(sys.argv)>1 and sys.argv[1])
           if not p or not os.path.exists(p):
               print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(3)
           df = pd.read_csv(p, nrows=2)
@@ -117,16 +103,4 @@ jobs:
               print("ERROR: Missing base columns:", sorted(miss)); sys.exit(4)
           print("OK: Columns present:", sorted(cols))
           PY
-
-      - name: Preflight columns
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 preflight.py
-
-      - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
-        with:
-          name: precheck-output
-          path: |
-            ${{ env.OUT_DIR }}/
+          python3 .ci/preflight_cols.py "$CSV_PATH"
