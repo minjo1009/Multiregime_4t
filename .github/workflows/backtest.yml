@@ -1,4 +1,4 @@
-name: Run backtest (strict-pinned)
+name: Run backtest (tagged-min)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 env:
-  RUN_DIR: tmp/trade
+  RUN_DIR: tmp/code
   DATA_DIR: tmp/data
   OUT_DIR: _out_4u/run
 
@@ -35,28 +35,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Validate pinned SHAs (exist)
-        env:
-          CHECKOUT_SHA: 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-          SETUP_PYTHON_SHA: a26af69be951a213d495a4c3e4e4022e16d87065
-          UPLOAD_ARTIFACT_SHA: ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
-        run: |
-          set -euo pipefail
-          hex40='^[0-9a-f]{40}$'
-          for n in checkout setup-python upload-artifact; do
-            s="${n^^}_SHA"; v="${!s}"
-            [[ "$v" =~ $hex40 ]] || { echo "PinnedSHA: $n not 40-hex"; exit 86; }
-            url="https://api.github.com/repos/actions/${n}/tarball/${v}"
-            curl -fsIL "$url" >/dev/null || { echo "PinnedSHA: $n@$v not found on GitHub"; exit 86; }
-          done
-          echo "OK pinned SHAs"
+      - name: Checkout (tagged)
+        uses: actions/checkout@v4
 
-      # uses: 예시처럼 env/매트릭스 치환이 불가하므로 SHA를 리터럴로 고정해야 함
-      - name: Checkout (pinned)
-        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Setup Python (tagged)
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ github.event.inputs.PY }}
 
@@ -65,38 +48,38 @@ jobs:
           set -euo pipefail
           rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
           mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          unzip -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR" >/dev/null
-          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" >/dev/null
+          unzip -q -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR"
+          unzip -q -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR"
           [ -f "$OUT_DIR/gating_debug.json" ] || echo '{}' > "$OUT_DIR/gating_debug.json"
 
-      - name: Install deps (requirements.txt if present)
+      - name: Install deps
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python3 -m pip -q install -U pip
+          python -m pip -q install -U pip
           if [ -f requirements.txt ]; then
-            python3 -m pip -q install -r requirements.txt
+            python -m pip -q install -r requirements.txt
           else
-            python3 -m pip -q install pandas numpy scikit-learn pyyaml
+            python -m pip -q install pandas numpy scikit-learn pyyaml
           fi
 
       - name: Detect CSV and export CSV_PATH
+        env:
+          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
           cat > detect_csv.py <<'PY'
           import os, sys, glob
           base = sys.argv[1]
           pat  = sys.argv[2]
-          matches = glob.glob(os.path.join(base, "**", pat), recursive=True)
-          if not matches:
-              matches = glob.glob(os.path.join(base, "**", "*.csv"), recursive=True)
-          if not matches:
-              print(f"ERROR: No CSV found under {base}", file=sys.stderr)
-              sys.exit(12)
-          matches.sort()
-          print(os.path.abspath(matches[0]))
+          m = glob.glob(os.path.join(base, "**", pat), recursive=True)
+          if not m: m = glob.glob(os.path.join(base, "**", "*.csv"), recursive=True)
+          if not m:
+              print(f"ERROR: No CSV found under {base}", file=sys.stderr); sys.exit(12)
+          m.sort()
+          print(os.path.abspath(m[0]))
           PY
-          CSV_PATH=$(python3 detect_csv.py "$DATA_DIR" "${{ github.event.inputs.CSV_GLOB }}")
+          CSV_PATH=$(python3 detect_csv.py "$DATA_DIR" "$CSV_GLOB_IN")
           echo "CSV_PATH=$CSV_PATH" | tee -a "$GITHUB_ENV"
           echo "Using CSV_PATH=$CSV_PATH"
 
@@ -107,20 +90,18 @@ jobs:
           import os, sys, pandas as pd
           p = os.environ.get("CSV_PATH")
           if not p or not os.path.exists(p):
-              print("ERROR: CSV_PATH missing or not exists:", p)
-              sys.exit(13)
+              print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(13)
           df = pd.read_csv(p, nrows=2)
           need = {'open_time','open','high','low','close','volume'}
           cols = {str(c).lower() for c in df.columns}
           miss = need - cols
           if miss:
-              print("ERROR: Missing base columns:", sorted(miss))
-              sys.exit(14)
-          print("OK: Columns present:", sorted(cols))
+              print("ERROR: Missing base columns:", sorted(miss)); sys.exit(14)
+          print("OK: Columns present:", sorted(need))
           PY
           python3 preflight.py
 
-      - name: Choose entrypoint and run
+      - name: Choose entrypoint and run (args fallback)
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
@@ -130,15 +111,29 @@ jobs:
             if [ -f "$c" ]; then ENTRY="$c"; break; fi
           done
           if [ -z "$ENTRY" ]; then
-            echo "ERROR: backtest entry not found in $PWD"
-            ls -al
+            echo "ERROR: backtest entry not found under $PWD"
+            find . -maxdepth 2 -type f -name "*.py" | sed -n '1,120p' || true
             exit 21
           fi
           echo "Using entry: $ENTRY"
-          python3 "$ENTRY"
+          set +e
+          python3 "$ENTRY" --csv "$CSV_PATH" --out "$OUT_ABS"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "WARN: run with --csv/--out failed(rc=$rc). Retrying without args..."
+            python3 "$ENTRY"
+            rc=$?
+          fi
+          set -e
+          exit $rc
 
-      - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+      - name: Upload artifacts (tagged)
+        uses: actions/upload-artifact@v4
         with:
           name: backtest-output
-          path: _out_4u/run/*
+          path: |
+            _out_4u/run/summary.json
+            _out_4u/run/gating_debug.json
+            _out_4u/run/preds_test.csv
+            _out_4u/run/trades.csv
+          if-no-files-found: warn
