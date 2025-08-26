@@ -1,4 +1,4 @@
-name: Backtest v1.0.8
+name: Backtest v1.0.8 (Checklist1)
 
 on:
   workflow_dispatch:
@@ -21,26 +21,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs
+      - name: Validate pinned SHAs (Checklist1)
         run: |
           set -euo pipefail
-          for spec in \
-            "actions/checkout 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a" \
-            "actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065" \
-            "actions/upload-artifact ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d" ; do
-              org=$(echo "$spec" | awk '{print $1}' | cut -d/ -f1)
-              repo=$(echo "$spec" | awk '{print $1}' | cut -d/ -f2)
-              sha=$(echo "$spec" | awk '{print $2}')
-              url="https://api.github.com/repos/${org}/${repo}/tarball/${sha}"
-              code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
-              if [ "$code" != "200" ]; then
-                echo "::error title=PinnedSHA::${org}/${repo}@${sha} not reachable (HTTP $code)"
-                exit 1
-              fi
-          done
+          verify() {
+            repo="$1"
+            sha="$2"
+            if ! git ls-remote "https://github.com/${repo}.git" "${sha}" | grep -q "^${sha}"; then
+              echo "::error title=PinNotFound::${repo}@${sha} not found via ls-remote"
+              exit 1
+            fi
+            code=$(curl -s -o /dev/null -w "%{http_code}" -I -L "https://api.github.com/repos/${repo}/tarball/${sha}" || true)
+            case "$code" in
+              2*|3*) : ;;
+              *) echo "::warning::${repo}@${sha} tarball HEAD got HTTP ${code}";;
+            esac
+          }
+          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
+          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
+          verify actions/upload-artifact ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
 
       - name: Checkout
-        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -95,9 +97,9 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt || true
+            pip install --no-cache-dir -r requirements.txt || true
           fi
-          pip install numpy pandas pyyaml scikit-learn jsonschema || true
+          pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
       - name: Write preflight + shim + runners
         run: |
@@ -113,7 +115,7 @@ jobs:
           out = {"glob": csv_glob, "found": matches[:10]}
           if not matches:
               print(json.dumps(out, ensure_ascii=True))
-              sys.exit(0)  # warn only; continue
+              sys.exit(0)
           path = matches[0]
           try:
               df = pd.read_csv(path, nrows=2)
@@ -182,7 +184,6 @@ jobs:
           SH
           chmod +x scripts/entrypoint_run.sh
 
-          # Non-destructive shim (only if missing)
           if [ ! -f tmp/trade/run_4u.py ]; then
             cat > tmp/trade/run_4u.py << 'PY'
             import os, sys
@@ -198,9 +199,8 @@ jobs:
                     print(f"[shim] runner import failed: {e}")
                     return 2
                 try:
-                    _ = run_backtest(data_path=csv, config_path=cfg)  # best-effort signature
+                    _ = run_backtest(data_path=csv, config_path=cfg)
                 except TypeError:
-                    # try alt names
                     try:
                         _ = run_backtest(csv, cfg)
                     except Exception as e:
@@ -218,7 +218,6 @@ jobs:
         run: |
           set -euo pipefail
           python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
-          # expose CSV_PATH to later steps
           if [ -f CSV_PATH.txt ]; then
             mv CSV_PATH.txt scripts/CSV_PATH.txt
           fi
