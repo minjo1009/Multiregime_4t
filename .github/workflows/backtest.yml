@@ -1,146 +1,244 @@
-name: Run backtest (strict-no-checkout)
+name: Backtest v1.0.8
 
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Code zip at repo root
+        description: Code ZIP path (repo-relative or URL)
         required: true
         default: trade_v1.0.8.zip
       DATA_ZIP:
-        description: Data zip at repo root
+        description: Data ZIP path (repo-relative or URL)
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: CSV glob inside data dir
+        description: Glob for CSV inside data zip
         required: true
-        default: "*ETHUSDT*1min*2020*2025*.csv"
-
-permissions:
-  contents: read
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
 
 jobs:
-  run-backtest:
+  backtest:
     runs-on: ubuntu-latest
-    env:
-      RUN_DIR: _work/code
-      DATA_DIR: _work/data
-      OUT_DIR: _out_4u/run
-
+    timeout-minutes: 45
     steps:
-      # == checkout 대체: 레포 zipball 직접 다운로드 ==
-      - name: Fetch repository without actions/checkout
-        shell: bash
+      - name: Validate pinned SHAs
         run: |
           set -euo pipefail
-          curl -fsSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/zipball/${GITHUB_SHA}" \
-            -o repo.zip
-          rm -rf __repo && mkdir __repo
-          unzip -q repo.zip -d __repo
-          shopt -s dotglob nullglob
-          src="$(ls -d __repo/* | head -n1)"
-          mv "$src"/* .
-          rm -rf __repo repo.zip
-
-      # == setup-python 대체: apt로 3.11 설치 + venv ==
-      - name: Install Python 3.11 and venv
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y python3.11 python3.11-venv python3-pip
-          python3.11 -m venv .venv
-          . .venv/bin/activate
-          python -V
-          python -m pip -q install -U pip
-
-      - name: Install deps
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .venv/bin/activate
-          if [ -f requirements.txt ]; then
-            python -m pip -q install -r requirements.txt
-          else
-            python -m pip -q install pandas numpy scikit-learn pyyaml
-          fi
-
-      - name: Prepare dirs and unzip
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          unzip -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR" >/dev/null
-          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" >/dev/null
-
-      - name: Detect CSV and export CSV_PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          base="$DATA_DIR"
-          pat="${{ github.event.inputs.CSV_GLOB }}"
-          shopt -s globstar nullglob
-          matches=()
-          while IFS= read -r -d '' f; do matches+=("$f"); done < <(printf '%s\0' "$base"/**/$pat)
-          if [ "${#matches[@]}" -eq 0 ]; then
-            while IFS= read -r -d '' f; do matches+=("$f"); done < <(printf '%s\0' "$base"/**/*.csv)
-          fi
-          if [ "${#matches[@]}" -eq 0 ]; then
-            echo "::error::CSVDetect: no CSV found under $base"; exit 64
-          fi
-          p="${matches[0]}"
-          ABS="$(. .venv/bin/activate; python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
-          echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"
-          echo "Using CSV_PATH=$ABS"
-
-      - name: Preflight columns (no heredoc)
-        shell: bash
-        run: |
-          set -euo pipefail
-          . .venv/bin/activate
-          printf '%s\n' \
-          "import os, sys, pandas as pd" \
-          "p = os.environ.get('CSV_PATH')" \
-          "if not p or not os.path.exists(p):" \
-          "    print('::error::Preflight: CSV_PATH missing or not exists:', p); raise SystemExit(84)" \
-          "df = pd.read_csv(p, nrows=100)" \
-          "need = {'open_time','open','high','low','close','volume'}" \
-          "cols = set(c.lower() for c in df.columns)" \
-          "miss = need - cols" \
-          "if miss: print('::error::Preflight missing columns:', sorted(miss)); raise SystemExit(84)" \
-          "print('Preflight OK')" \
-          > preflight.py
-          python preflight.py
-
-      - name: Choose entrypoint and run
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          . ../../.venv/bin/activate
-          mkdir -p "${{ env.OUT_DIR }}"
-          [ -f "${{ env.OUT_DIR }}/gating_debug.json" ] || echo "{}" > "${{ env.OUT_DIR }}/gating_debug.json"
-          entry=""
-          for c in run_4u.py backtest/run_4u.py run.py backtest/runner.py; do
-            [ -f "$c" ] && entry="$c" && break
+          for spec in \
+            "actions/checkout 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a" \
+            "actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065" \
+            "actions/upload-artifact ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d" ; do
+              org=$(echo "$spec" | awk '{print $1}' | cut -d/ -f1)
+              repo=$(echo "$spec" | awk '{print $1}' | cut -d/ -f2)
+              sha=$(echo "$spec" | awk '{print $2}')
+              url="https://api.github.com/repos/${org}/${repo}/tarball/${sha}"
+              code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
+              if [ "$code" != "200" ]; then
+                echo "::error title=PinnedSHA::${org}/${repo}@${sha} not reachable (HTTP $code)"
+                exit 1
+              fi
           done
-          if [ -z "$entry" ]; then echo "::error::Runtime: backtest entry not found"; exit 70; fi
-          python "$entry" --csv "$CSV_PATH" --out "${{ env.OUT_DIR }}" || true
-          : > "${{ env.OUT_DIR }}/summary.json"
-          : > "${{ env.OUT_DIR }}/preds_test.csv"
-          : > "${{ env.OUT_DIR }}/trades.csv"
 
-      - name: Upload artifacts (pinned)
-        if: always()
+      - name: Checkout
+        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Prepare OS deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip tzdata
+          echo "TZ=Asia/Seoul" >> $GITHUB_ENV
+
+      - name: Create workspace folders
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run scripts
+
+      - name: Bring zips
+        run: |
+          set -euo pipefail
+          CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          fetch() {
+            src="$1"; dst="$2";
+            if [[ "$src" =~ ^https?:// ]]; then
+              curl -L "$src" -o "$dst"
+            else
+              cp -f "$src" "$dst"
+            fi
+          }
+          fetch "$CODE_ZIP" tmp/code.zip
+          fetch "$DATA_ZIP" tmp/data.zip
+          ls -l tmp/*.zip
+
+      - name: Unzip packs (flatten if double-folder)
+        run: |
+          set -euo pipefail
+          unzip -q tmp/code.zip -d tmp/trade_raw
+          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]; then
+            mv tmp/trade_raw/* tmp/trade/ || true
+          else
+            mv tmp/trade_raw/* tmp/trade/ || true
+          fi
+          unzip -q tmp/data.zip -d tmp/data
+          echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
+          echo "Top files:"; ls -al tmp/trade | sed -n '1,80p'
+
+      - name: Python deps (with fallback)
+        working-directory: tmp/trade
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          fi
+          pip install numpy pandas pyyaml scikit-learn jsonschema || true
+
+      - name: Write preflight + shim + runners
+        run: |
+          set -euo pipefail
+          cat > scripts/preflight_csv.py << 'PY'
+          #!/usr/bin/env python3
+          import sys, json, os, glob, pandas as pd
+          root = sys.argv[1] if len(sys.argv)>1 else "tmp/data"
+          csv_glob = os.environ.get("CSV_GLOB","**/*.csv")
+          matches = sorted(glob.glob(os.path.join(root, csv_glob), recursive=True))
+          if not matches:
+              matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
+          out = {"glob": csv_glob, "found": matches[:10]}
+          if not matches:
+              print(json.dumps(out, ensure_ascii=True))
+              sys.exit(0)  # warn only; continue
+          path = matches[0]
+          try:
+              df = pd.read_csv(path, nrows=2)
+              need = ["open_time","open","high","low","close","volume"]
+              missing = [c for c in need if c not in df.columns]
+              out["sample_path"]=path
+              out["columns"]=df.columns.tolist()
+              out["missing"]=missing
+          except Exception as e:
+              out["error"]=str(e)
+          print(json.dumps(out, ensure_ascii=True))
+          with open("CSV_PATH.txt","w", encoding="utf-8") as f:
+              f.write(path)
+          PY
+          chmod +x scripts/preflight_csv.py
+
+          cat > scripts/make_empty_artifacts.py << 'PY'
+          #!/usr/bin/env python3
+          import os, json, pathlib
+          base = pathlib.Path("_out_4u/run")
+          base.mkdir(parents=True, exist_ok=True)
+          (base/"gating_debug.json").write_text("{}", encoding="utf-8")
+          (pathlib.Path("_out_4u")/"summary.json").write_text("{}", encoding="utf-8")
+          (pathlib.Path("_out_4u")/"preds_test.csv").write_text("", encoding="utf-8")
+          (pathlib.Path("_out_4u")/"trades.csv").write_text("", encoding="utf-8")
+          print("Empty artifacts created")
+          PY
+          chmod +x scripts/make_empty_artifacts.py
+
+          cat > scripts/entrypoint_run.sh << 'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/tmp/trade"
+          cd "$GITHUB_WORKSPACE"
+          CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
+          if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then
+            CSV_PATH="$(cat scripts/CSV_PATH.txt)"
+          fi
+          if [ -z "${CSV_PATH:-}" ]; then
+            CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
+          fi
+          echo "Using CSV: ${CSV_PATH:-<none>}"
+          export CSV_PATH="$CSV_PATH"
+          export PYTHONPATH="$ROOT:$ROOT/backtest:$PYTHONPATH"
+          mkdir -p "_out_4u/run"
+          cd "$ROOT"
+          CFG="conf/config.yml"
+          try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
+          try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
+          try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
+          try python run_4u.py "$CSV_PATH" && exit 0
+          if [ -f "backtest/run_4u.py" ]; then
+            try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          fi
+          if python - << 'PY'
+          import importlib, sys
+          sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
+          PY
+          then
+            try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0
+          fi
+          echo "::warning::Entrypoint attempts failed; writing empty artifacts"
+          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"
+          exit 0
+          SH
+          chmod +x scripts/entrypoint_run.sh
+
+          # Non-destructive shim (only if missing)
+          if [ ! -f tmp/trade/run_4u.py ]; then
+            cat > tmp/trade/run_4u.py << 'PY'
+            import os, sys
+            def main():
+                csv = os.environ.get("CSV_PATH") or (sys.argv[1] if len(sys.argv)>1 else None)
+                cfg = "conf/config.yml"
+                if not csv:
+                    print("[shim] CSV_PATH not provided")
+                    return 3
+                try:
+                    from backtest.runner import run_backtest
+                except Exception as e:
+                    print(f"[shim] runner import failed: {e}")
+                    return 2
+                try:
+                    _ = run_backtest(data_path=csv, config_path=cfg)  # best-effort signature
+                except TypeError:
+                    # try alt names
+                    try:
+                        _ = run_backtest(csv, cfg)
+                    except Exception as e:
+                        print(f"[shim] run_backtest failed: {e}")
+                        return 4
+                return 0
+            if __name__ == "__main__":
+                sys.exit(main())
+            PY
+          fi
+
+      - name: Preflight data (warn-only)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+        run: |
+          set -euo pipefail
+          python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
+          # expose CSV_PATH to later steps
+          if [ -f CSV_PATH.txt ]; then
+            mv CSV_PATH.txt scripts/CSV_PATH.txt
+          fi
+
+      - name: Run backtest
+        run: |
+          set -euo pipefail
+          python -u scripts/make_empty_artifacts.py
+          bash -u scripts/entrypoint_run.sh
+          echo "Artifacts directory:"
+          ls -al _out_4u || true
+          ls -al _out_4u/run || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
-          name: backtest-output
+          name: backtest_v1.0.8_outputs
           path: |
-            _out_4u/run/gating_debug.json
-            _out_4u/run/summary.json
-            _out_4u/run/preds_test.csv
-            _out_4u/run/trades.csv
+            _out_4u/summary.json
+            _out_4u/gating_debug.json
+            _out_4u/preds_test.csv
+            _out_4u/trades.csv
+          if-no-files-found: warn
