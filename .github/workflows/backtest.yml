@@ -1,104 +1,132 @@
-name: backtest
+name: Run backtest (strict-min)
+
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: "Code zip in repo root"
+        description: "Code zip at repo root"
         required: true
         default: "trade_v1.0.8.zip"
       DATA_ZIP:
-        description: "Data zip in repo root"
+        description: "Data zip at repo root"
         required: true
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "CSV glob inside data zip"
-        required: false
+        description: "CSV glob inside data dir (pattern)"
+        required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
 
 permissions:
   contents: read
 
 jobs:
-  backtest:
+  run-backtest:
     runs-on: ubuntu-latest
+    env:
+      PY: "3.11"
+      RUN_DIR: _work/code
+      DATA_DIR: _work/data
+      OUT_DIR: _out_4u/run
     steps:
-      # ① 반드시 풀 SHA로 고정 (표현식/태그 금지)
       - name: Checkout (pinned)
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
 
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
 
-      - name: Show versions
-        run: |
-          python3 -V
-          pip -V
-
-      - name: Install deps
+      - name: Install deps (minimal)
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m pip -q install -U pip
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+            python3 -m pip -q install -r requirements.txt
           else
-            pip install pandas numpy scikit-learn pyyaml
+            python3 -m pip -q install pandas numpy scikit-learn pyyaml
           fi
 
-      - name: Unzip data & code
+      - name: Prepare dirs and unzip
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p _work _out_4u/run
-          unzip -o "${{ github.workspace }}/${{ inputs.DATA_ZIP }}" -d _work/data >/dev/null
-          unzip -o "${{ github.workspace }}/${{ inputs.CODE_ZIP }}" -d _work/code >/dev/null
-          # CSV 탐색 (패턴 → 폴백)
-          CSV_PATH="$(ls -1 _work/data/**/${{ inputs.CSV_GLOB }} 2>/dev/null | head -n1 || true)"
-          if [ -z "$CSV_PATH" ]; then
-            CSV_PATH="$(ls -1 _work/data/**/*.csv 2>/dev/null | head -n1 || true)"
-          fi
-          if [ -z "$CSV_PATH" ]; then
-            echo "::error::CSVDetect: no CSV found by pattern or fallback"; exit 85
-          fi
-          echo "CSV_PATH=$CSV_PATH" >> $GITHUB_ENV
+          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
+          unzip -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR" >/dev/null
+          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" >/dev/null
 
-      - name: Preflight columns
+      - name: Detect CSV and export CSV_PATH
+        id: detect_csv
         shell: bash
         run: |
-          python3 - <<'PY'
-import sys, pandas as pd, os
-p=os.environ["CSV_PATH"]
-df=pd.read_csv(p, nrows=100)
-need={'open_time','open','high','low','close','volume'}
-miss=need - set(map(str.lower, df.columns))
-# 열 이름을 소문자화하여 비교(대소문자 이슈 회피)
-lower_cols=set(c.lower() for c in df.columns)
-miss=need - lower_cols
-if miss: 
-    print(f"::error::Preflight missing columns: {sorted(miss)}"); sys.exit(84)
+          set -euo pipefail
+          base="$DATA_DIR"
+          pat="${{ github.event.inputs.CSV_GLOB }}"
+          shopt -s globstar nullglob
+          matches=()
+          while IFS= read -r -d '' f; do matches+=("$f"); done < <(printf '%s\0' "$base"/**/$pat)
+          if [ "${#matches[@]}" -eq 0 ]; then
+            while IFS= read -r -d '' f; do matches+=("$f"); done < <(printf '%s\0' "$base"/**/*.csv)
+          fi
+          if [ "${#matches[@]}" -eq 0 ]; then
+            echo "::error::CSVDetect: no CSV found under $base"
+            exit 64
+          fi
+          p="${matches[0]}"
+          ABS="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
+          echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"
+          echo "Using CSV_PATH=$ABS"
+
+      - name: Preflight columns (write script then run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > preflight.py <<'PY'
+import os, sys, pandas as pd
+p = os.environ.get("CSV_PATH")
+if not p or not os.path.exists(p):
+    print("::error::Preflight: CSV_PATH missing or not exists:", p)
+    raise SystemExit(84)
+df = pd.read_csv(p, nrows=100)
+need = {'open_time','open','high','low','close','volume'}
+cols = set(c.lower() for c in df.columns)
+miss = need - cols
+if miss:
+    print("::error::Preflight missing columns:", sorted(miss))
+    raise SystemExit(84)
 print("Preflight OK")
 PY
+          python3 preflight.py
 
-      - name: Run backtest
+      - name: Choose entrypoint and run
         shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          # 엔트리포인트 우선순위 탐색
+          mkdir -p "${{ env.OUT_DIR }}"
+          [ -f "${{ env.OUT_DIR }}/gating_debug.json" ] || echo "{}" > "${{ env.OUT_DIR }}/gating_debug.json"
           entry=""
-          for c in _work/code/run_4u.py _work/code/backtest/run_4u.py _work/code/run.py _work/code/backtest/runner.py; do
-            [ -f "$c" ] && entry="$c" && break
+          for c in run_4u.py backtest/run_4u.py run.py backtest/runner.py; do
+            if [ -f "$c" ]; then entry="$c"; break; fi
           done
-          if [ -z "$entry" ]; then echo "::error::Runtime: no entrypoint found"; exit 83; fi
-          python3 "$entry" --csv "$CSV_PATH" --outdir _out_4u/run || true
-          # 실패하더라도 최소 디버그 파일 생성
-          [ -f _out_4u/run/gating_debug.json ] || echo "{}" > _out_4u/run/gating_debug.json
-          # 결과가 없을 때도 빈 파일 생성(업로드 실패 방지)
-          touch _out_4u/run/summary.json _out_4u/run/preds_test.csv _out_4u/run/trades.csv
+          if [ -z "$entry" ]; then
+            echo "::error::Runtime: backtest entry not found under $PWD"
+            exit 70
+          fi
+          python3 "$entry" --csv "$CSV_PATH" --out "${{ env.OUT_DIR }}" || true
+          # ensure minimal artifacts exist
+          : > "${{ env.OUT_DIR }}/summary.json"
+          : > "${{ env.OUT_DIR }}/preds_test.csv"
+          : > "${{ env.OUT_DIR }}/trades.csv"
 
       - name: Upload artifacts (pinned)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
           name: backtest-output
-          path: _out_4u/run/*
+          path: |
+            _out_4u/run/gating_debug.json
+            _out_4u/run/summary.json
+            _out_4u/run/preds_test.csv
+            _out_4u/run/trades.csv
