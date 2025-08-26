@@ -12,107 +12,121 @@ on:
         required: true
         type: string
       CSV_GLOB:
-        description: "CSV glob inside DATA_ZIP after unzip (e.g., *ETHUSDT*1min*2020*2025*.csv)"
+        description: "CSV glob inside DATA_DIR (e.g., *ETHUSDT*1min*2020*2025*.csv)"
         required: true
         type: string
       PYVER:
-        description: "Python version"
+        description: "Python version (3.10/3.11). Default: 3.11"
         required: false
         default: "3.11"
+        type: string
+      CHECKOUT_REF:
+        description: "actions/checkout ref (full-length commit SHA preferred; fallback v4)"
+        required: false
+        default: "v4"
+        type: string
+      SETUP_PYTHON_REF:
+        description: "actions/setup-python ref (full-length commit SHA preferred; fallback v5)"
+        required: false
+        default: "v5"
+        type: string
+      UPLOAD_ARTIFACT_REF:
+        description: "actions/upload-artifact ref (full-length commit SHA preferred; fallback v4)"
+        required: false
+        default: "v4"
         type: string
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
+
     steps:
-      # ----- Checkout (pinned SHA: actions/checkout v4) -----
-      - name: Checkout (pinned)
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+      - name: Checkout (configurable ref)
+        uses: actions/checkout@${{ inputs.CHECKOUT_REF }}
 
-      # ----- Prepare workspace & unzip code/data -----
-      - name: Prepare and unzip
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-
-          # Validate zips exist at repo root
-          test -f "${{ inputs.TRADE_ZIP }}" || { echo "❌ code zip not found: ${{ inputs.TRADE_ZIP }}"; exit 1; }
-          test -f "${{ inputs.DATA_ZIP }}" || { echo "❌ data zip not found: ${{ inputs.DATA_ZIP }}"; exit 1; }
-
-          unzip -q "${{ inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
-          unzip -q "${{ inputs.DATA_ZIP }}" -d "${DATA_DIR}"
-
-          # Detect CSV
-          CSV_PATH="$(ls ${DATA_DIR}/${{ inputs.CSV_GLOB }} 2>/dev/null | head -n 1 || true)"
-          if [ -z "${CSV_PATH}" ]; then
-            echo "❌ No CSV found in ${DATA_DIR} with glob: ${{ inputs.CSV_GLOB }}"
-            exit 1
-          fi
-          echo "Using CSV_PATH=${CSV_PATH}"
-          echo "CSV_PATH=${CSV_PATH}" >> "${GITHUB_ENV}"
-
-      # ----- Setup Python (pinned SHA: actions/setup-python v5) -----
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Setup Python (configurable ref)
+        uses: actions/setup-python@${{ inputs.SETUP_PYTHON_REF }}
         with:
           python-version: ${{ inputs.PYVER }}
           cache: pip
-          check-latest: false
+          update-environment: true
 
-      # ----- Optional dependency install (only if present) -----
-      - name: Install Python deps (optional)
+      - name: Prep & unzip code + data
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python3 -m pip -q install -U pip
-          if [ -f requirements.txt ]; then
-            echo "Installing requirements.txt ..."
-            pip -q install -r requirements.txt
-          else
-            echo "No requirements.txt; skipping pip install."
-          fi
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
+          test -f "${{ inputs.TRADE_ZIP }}" || { echo "❌ missing code zip: ${{ inputs.TRADE_ZIP }}"; exit 1; }
+          test -f "${{ inputs.DATA_ZIP }}" || { echo "❌ missing data zip: ${{ inputs.DATA_ZIP }}"; exit 1; }
+          unzip -q "${{ inputs.TRADE_ZIP }}" -d "$RUN_DIR"
+          unzip -q "${{ inputs.DATA_ZIP }}" -d "$DATA_DIR"
+          echo "✓ unzipped:"
+          ls -al "$RUN_DIR" | sed -n '1,80p'
+          ls -al "$DATA_DIR" | sed -n '1,80p'
 
-      # ----- Preflight CSV schema -----
-      - name: Preflight CSV schema
+      - name: Detect CSV & export absolute CSV_PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          CANDIDATE="$(ls ${DATA_DIR}/${{ inputs.CSV_GLOB }} 2>/dev/null | head -n1 || true)"
+          if [ -z "${CANDIDATE}" ]; then
+            CANDIDATE="$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)"
+          fi
+          [ -n "${CANDIDATE}" ] || { echo "❌ No CSV found in ${DATA_DIR}"; exit 1; }
+          ABS="$(python3 - <<'PY'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY
+ "$CANDIDATE")"
+          echo "CSV_PATH=${ABS}" | tee -a "$GITHUB_ENV"
+          echo "Using CSV_PATH=${ABS}"
+
+      - name: Preflight CSV
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, sys, pandas as pd
-          p = os.environ.get("CSV_PATH")
-          if not p:
-              print("❌ CSV_PATH missing from env"); sys.exit(1)
-          try:
-              df = pd.read_csv(p, nrows=2)
-          except Exception as e:
-              print(f"❌ CSV read failed: {e}"); sys.exit(1)
-          need = {'open_time','open','high','low','close','volume'}
-          miss = sorted(need - set(df.columns))
-          if miss:
-              print("❌ Missing base columns:", miss); sys.exit(1)
-          print("✅ Columns OK:", sorted(df.columns))
-          PY
+import os, sys, pandas as pd
+p=os.environ.get('CSV_PATH')
+if not p or not os.path.exists(p):
+    print("❌ CSV_PATH missing or not exists:", p); sys.exit(1)
+df=pd.read_csv(p, nrows=2)
+need={'open_time','open','high','low','close','volume'}
+miss=need - set(df.columns)
+if miss:
+    print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
+print("✅ Columns OK:", sorted(df.columns))
+PY
 
-      # ----- Run backtest -----
-      - name: Run backtest
-        shell: bash
+      - name: Install Python deps (optional)
         working-directory: ${{ env.RUN_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip -q install -U pip
+          if [ -f requirements.txt ]; then
+            python3 -m pip install -r requirements.txt
+          else
+            echo "(skip) requirements.txt not found"
+          fi
+
+      - name: Run backtest
+        working-directory: ${{ env.RUN_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
           python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
-          echo "---- gating debug (head) ----" || true
-          head -n 60 "${OUT_DIR}/gating_debug.json" || true
-          ls -al "${OUT_DIR}" || true
 
-      # ----- Upload artifacts (pinned SHA: upload-artifact v4) -----
-      - name: Upload artifacts (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Upload artifacts (configurable ref)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@${{ inputs.UPLOAD_ARTIFACT_REF }}
         with:
           name: backtest-output
           path: |
@@ -121,3 +135,4 @@ jobs:
             _out_4u/run/preds_test.csv
             _out_4u/run/trades.csv
           if-no-files-found: warn
+          retention-days: 30
