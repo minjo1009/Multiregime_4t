@@ -13,7 +13,7 @@ on:
         description: "CSV pattern inside DATA_DIR (e.g., *ETHUSDT*1min*2020*2025*.csv)"
         required: true
       OUT_DIR:
-        description: "Output directory (relative to workspace)"
+        description: "Output directory"
         default: "_out_4u/run"
         required: true
 
@@ -34,16 +34,16 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      - name: Validate dispatch inputs
+      - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
           [ -n "${{ inputs.TRADE_ZIP }}" ] || { echo "TRADE_ZIP empty"; exit 1; }
           [ -n "${{ inputs.DATA_ZIP }}" ]  || { echo "DATA_ZIP empty"; exit 1; }
           [ -n "${{ inputs.CSV_GLOB }}" ]  || { echo "CSV_GLOB empty"; exit 1; }
-          [ -n "${{ inputs.OUT_DIR }}" ]   || { echo "OUT_DIR empty"; exit 1; }
 
-      - name: Self-checkout repository (no actions/checkout)
+      # --- Self checkout (조직 정책상 actions/checkout 미사용) ---
+      - name: Checkout repo (manual)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,9 +55,8 @@ jobs:
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git -c protocol.version=2 fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout -q FETCH_HEAD
-          ls -al
 
-      - name: Prepare directories
+      - name: Prepare dirs
         shell: bash
         run: |
           set -euo pipefail
@@ -74,10 +73,9 @@ jobs:
           test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "Data zip not found: ${REPO_DIR}/${DATA_ZIP}"; exit 1; }
           unzip -q "${REPO_DIR}/${CODE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
-          ls -al "${RUN_DIR}" | head -n 50
-          ls -1 "${DATA_DIR}"/*.csv 2>/dev/null | head -n 5 || true
 
-      - name: Preflight CSV (robust; no heredoc execution)
+      # === 문제났던 부분: heredoc 제거 ===
+      - name: Preflight CSV (robust; no heredoc)
         shell: bash
         env:
           CSV_GLOB_IN: ${{ inputs.CSV_GLOB }}
@@ -88,39 +86,41 @@ jobs:
           [ -n "$CSV_PATH" ] || { echo "No CSV found under ${DATA_DIR}"; exit 1; }
           echo "Using CSV_PATH=${CSV_PATH}"
           echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
-          cat > preflight.py <<'PY'
-import os, sys, pandas as pd
-p=os.environ.get("CSV_PATH")
-if not p:
-    print("CSV_PATH missing"); sys.exit(1)
-df=pd.read_csv(p, nrows=2)
-need={'open_time','open','high','low','close','volume'}
-miss=need - set(df.columns)
-if miss:
-    print("Missing base columns:", sorted(miss)); sys.exit(1)
-print("Columns OK:", sorted(df.columns))
-PY
+
+          # preflight.py를 printf로 생성 (ASCII만 사용)
+          printf "%s\n" \
+"import os, sys, pandas as pd" \
+"p=os.environ.get('CSV_PATH')" \
+"if not p:" \
+"    print('CSV_PATH missing'); sys.exit(1)" \
+"df=pd.read_csv(p, nrows=2)" \
+"need={'open_time','open','high','low','close','volume'}" \
+"miss=need - set(df.columns)" \
+"if miss:" \
+"    print('Missing base columns:', sorted(miss)); sys.exit(1)" \
+"print('Columns OK:', sorted(df.columns))" \
+> preflight.py
+
           python3 preflight.py
 
-      - name: Install Python deps (optional)
+      - name: Setup Python (no project files required)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           python3 -V
           python3 -m pip -q install -U pip
-          if [ -f requirements.txt ]; then
-            python3 -m pip install -r requirements.txt
+          # repo 내부 requirements가 있으면 사용, 없으면 기본세트
+          if [ -f "${RUN_DIR}/requirements.txt" ]; then
+            python3 -m pip install -r "${RUN_DIR}/requirements.txt"
           else
             python3 -m pip install -q pyyaml pandas numpy scikit-learn
           fi
-          cat > smoke.py <<'PY'
+          python3 - <<'PY'
 import sys, sklearn, inspect
 from sklearn.calibration import CalibratedClassifierCV as C
-print("sklearn", sklearn.__version__, "| py", sys.version.split()[0])
-print("C params has 'estimator'?","estimator" in set(inspect.signature(C).parameters))
+print("sklearn", sklearn.__version__, "| py", sys.version.split()[0],
+      "| has 'estimator':", 'estimator' in set(inspect.signature(C).parameters))
 PY
-          python3 smoke.py
 
       - name: Sanity check run files
         shell: bash
