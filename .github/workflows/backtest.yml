@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1)
+name: Backtest v1.0.8 (Checklist1.1)
 
 on:
   workflow_dispatch:
@@ -21,28 +21,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1)
+      - name: Validate pinned SHAs (Checklist1.1)
         run: |
           set -euo pipefail
           verify() {
-            repo="$1"
-            sha="$2"
-            # 40-hex quick check
+            repo="$1"    # e.g., actions/checkout
+            sha="$2"     # 40-hex
             if ! echo "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "::error title=PinFormat::${repo}@${sha} is not a 40-hex SHA"
               exit 1
             fi
-            # 1) commit existence
-            if ! git ls-remote "https://github.com/${repo}.git" "${sha}" | grep -q "^${sha}"; then
-              echo "::error title=PinNotFound::${repo}@${sha} not found via ls-remote"
+            # Use codeload HEAD (200 expected). API tarball often returns 302.
+            url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"
+            code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
+            if [ "$code" != "200" ]; then
+              echo "::error title=PinUnavailable::${repo}@${sha} codeload HEAD=$code"
               exit 1
             fi
-            # 2) tarball HEAD check (2xx/3xx ok)
-            code=$(curl -s -o /dev/null -w "%{http_code}" -I -L "https://api.github.com/repos/${repo}/tarball/${sha}" || true)
-            case "$code" in
-              2*|3*) : ;;
-              *) echo "::warning::${repo}@${sha} tarball HEAD got HTTP ${code}";;
-            esac
           }
           verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
           verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
@@ -121,29 +116,24 @@ jobs:
               matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
           out = {"glob": csv_glob, "found": matches[:10]}
           if not matches:
-              print(json.dumps(out, ensure_ascii=True))
-              sys.exit(0)
+              print(json.dumps(out, ensure_ascii=True)); sys.exit(0)
           path = matches[0]
           try:
               df = pd.read_csv(path, nrows=2)
               need = ["open_time","open","high","low","close","volume"]
               missing = [c for c in need if c not in df.columns]
-              out["sample_path"]=path
-              out["columns"]=df.columns.tolist()
-              out["missing"]=missing
+              out["sample_path"]=path; out["columns"]=df.columns.tolist(); out["missing"]=missing
           except Exception as e:
               out["error"]=str(e)
           print(json.dumps(out, ensure_ascii=True))
-          with open("CSV_PATH.txt","w", encoding="utf-8") as f:
-              f.write(path)
+          with open("CSV_PATH.txt","w", encoding="utf-8") as f: f.write(path)
           PY
           chmod +x scripts/preflight_csv.py
 
           cat > scripts/make_empty_artifacts.py << 'PY'
           #!/usr/bin/env python3
-          import os, json, pathlib
-          base = pathlib.Path("_out_4u/run")
-          base.mkdir(parents=True, exist_ok=True)
+          import pathlib
+          base = pathlib.Path("_out_4u/run"); base.mkdir(parents=True, exist_ok=True)
           (base/"gating_debug.json").write_text("{}", encoding="utf-8")
           (pathlib.Path("_out_4u")/"summary.json").write_text("{}", encoding="utf-8")
           (pathlib.Path("_out_4u")/"preds_test.csv").write_text("", encoding="utf-8")
@@ -198,21 +188,18 @@ jobs:
                 csv = os.environ.get("CSV_PATH") or (sys.argv[1] if len(sys.argv)>1 else None)
                 cfg = "conf/config.yml"
                 if not csv:
-                    print("[shim] CSV_PATH not provided")
-                    return 3
+                    print("[shim] CSV_PATH not provided"); return 3
                 try:
                     from backtest.runner import run_backtest
                 except Exception as e:
-                    print(f"[shim] runner import failed: {e}")
-                    return 2
+                    print(f"[shim] runner import failed: {e}"); return 2
                 try:
                     _ = run_backtest(data_path=csv, config_path=cfg)
                 except TypeError:
                     try:
                         _ = run_backtest(csv, cfg)
                     except Exception as e:
-                        print(f"[shim] run_backtest failed: {e}")
-                        return 4
+                        print(f"[shim] run_backtest failed: {e}"); return 4
                 return 0
             if __name__ == "__main__":
                 sys.exit(main())
@@ -225,9 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
-          if [ -f CSV_PATH.txt ]; then
-            mv CSV_PATH.txt scripts/CSV_PATH.txt
-          fi
+          if [ -f CSV_PATH.txt ]; then mv CSV_PATH.txt scripts/CSV_PATH.txt; fi
 
       - name: Run backtest
         run: |
