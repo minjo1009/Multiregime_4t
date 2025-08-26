@@ -4,49 +4,31 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Code zip at repo root
-        required: true
+        description: "Code zip at repo root"
         default: trade_v1.0.8.zip
+        required: true
       DATA_ZIP:
-        description: Data zip at repo root
-        required: true
+        description: "Data zip at repo root"
         default: ETHUSDT_1min_2020_2025.zip
-      CSV_GLOB:
-        description: CSV glob inside data zip
         required: true
+      CSV_GLOB:
+        description: "CSV glob inside data dir"
         default: "*ETHUSDT*1min*2020*2025*.csv"
+        required: true
 
 permissions:
   contents: read
 
 env:
   PY: "3.11"
-  RUN_DIR: tmp/trade
+  RUN_DIR: tmp/code
   DATA_DIR: tmp/data
   OUT_DIR: _out_4u/run
-  # --- pinned SHAs (strict) ---
-  CHECKOUT_SHA: "11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a"
-  SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-  UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate pinned SHAs (ASCII/exists; strict, no fallback)
-        shell: bash
-        run: |
-          set -euo pipefail
-          hex40='^[0-9a-f]{40}$'
-          check(){ n="$1"; s="$2"; u="https://api.github.com/repos/actions/${n}/tarball/${s}"; curl -fsIL "$u" >/dev/null; }
-          die(){ echo "❌ PinnedSHA: $1" >&2; exit 86; }
-          for kv in "checkout:${CHECKOUT_SHA}" "setup-python:${SETUP_PYTHON_SHA}" "upload-artifact:${UPLOAD_ARTIFACT_SHA}"; do
-            name="${kv%%:*}"; sha="${kv##*:}"
-            [[ "$sha" =~ $hex40 ]] || die "$name not 40-hex"
-            check "$name" "$sha" || die "$name $sha not found (org requires pinned SHAs)"
-          done
-          echo "✅ pinned SHAs ok"
-
       - name: Checkout (pinned)
         uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
 
@@ -55,87 +37,75 @@ jobs:
         with:
           python-version: ${{ env.PY }}
 
-      - name: Install deps
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m pip -q install -U pip
-          if [ -f "${RUN_DIR}/requirements.txt" ]; then
-            python3 -m pip -q install -r "${RUN_DIR}/requirements.txt"
-          else
-            python3 -m pip -q install pandas numpy scikit-learn pyyaml
-          fi
-
       - name: Prepare dirs & unzip code/data
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}" .ci
-          unzip -oq "${{ github.event.inputs.CODE_ZIP }}" -d "${RUN_DIR}"
-          unzip -oq "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
-          [ -f "${OUT_DIR}/gating_debug.json" ] || echo "{}" > "${OUT_DIR}/gating_debug.json"
+          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
+          unzip -q -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR"
+          unzip -q -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR"
 
-      - name: Detect CSV & export CSV_PATH
+      - name: Install deps
         shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          cat > .ci/detect_csv.py <<'PY'
-          import sys, os, glob
-          base = os.environ["DATA_DIR"]
-          pat  = os.environ.get("CSV_GLOB","").strip() or "*.csv"
-          cand = glob.glob(os.path.join(base, pat), recursive=True)
-          if not cand: cand = glob.glob(os.path.join(base, "**", "*.csv"), recursive=True)
-          if not cand:
-              print(f"ERROR: No CSV found under {base}", file=sys.stderr)
-              sys.exit(2)
-          print(os.path.abspath(cand[0]))
-          PY
-          CSV_GLOB_IN="${{ github.event.inputs.CSV_GLOB }}"
-          export CSV_GLOB="${CSV_GLOB_IN}"
-          CSV_PATH="$(python3 .ci/detect_csv.py)"
-          echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
-          echo "Using CSV_PATH=${CSV_PATH}"
+          python -m pip -q install -U pip
+          if [ -f requirements.txt ]; then
+            python -m pip -q install -r requirements.txt
+          else
+            python -m pip -q install pandas numpy scikit-learn pyyaml
+          fi
+
+      - name: Detect CSV & export CSV_PATH
+        id: detect_csv
+        shell: bash
+        env:
+          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          base="$DATA_DIR"
+          files=( $base/**/$CSV_GLOB_IN )
+          if [ ${#files[@]} -eq 0 ]; then files=( $base/**/*.csv ); fi
+          if [ ${#files[@]} -eq 0 ]; then echo "ERROR: No CSV found under $base"; exit 1; fi
+          p="${files[0]}"
+          ABS="$(python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
+          echo "CSV_PATH=$ABS" | tee -a "$GITHUB_ENV"
+          echo "Using CSV_PATH=$ABS"
 
       - name: Preflight columns (quick)
         shell: bash
         run: |
           set -euo pipefail
-          cat > .ci/preflight_cols.py <<'PY'
-          import sys, os, pandas as pd
-          p = os.environ.get("CSV_PATH") or (len(sys.argv)>1 and sys.argv[1])
+          python - <<'PY'
+          import os, sys, pandas as pd
+          p = os.environ.get("CSV_PATH")
           if not p or not os.path.exists(p):
-              print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(3)
+              print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(1)
           df = pd.read_csv(p, nrows=2)
           need = {'open_time','open','high','low','close','volume'}
           cols = {str(c).lower() for c in df.columns}
           miss = need - cols
           if miss:
-              print("ERROR: Missing base columns:", sorted(miss)); sys.exit(4)
-          print("OK: Columns present:", sorted(cols))
+              print("ERROR: Missing base columns:", sorted(miss)); sys.exit(1)
+          print("OK: Columns present:", sorted(cols & need))
           PY
-          python3 .ci/preflight_cols.py "$CSV_PATH"
 
       - name: Choose entrypoint & run
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
+          touch "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}/gating_debug.json" || true
           ENTRY=""
           for c in "run_4u.py" "backtest/run_4u.py" "run.py" "backtest/runner.py"; do
             if [ -f "$c" ]; then ENTRY="$c"; break; fi
           done
-          if [ -z "$ENTRY" ]; then
-            echo "❌ Runtime: backtest entry not found in ${PWD}"
-            find . -maxdepth 2 -type f -name "*.py" | sed -n '1,80p' || true
-            exit 5
-          fi
-          echo "→ Using entrypoint: $ENTRY"
-          PYTHONUNBUFFERED=1 python3 "$ENTRY" --data_path "${CSV_PATH}" || {
-            echo "❌ Runtime: script failed; last 60 lines from OUT_DIR (if any):"
-            tail -n 60 "${OUT_DIR}"/* 2>/dev/null || true
-            exit 6
-          }
+          if [ -z "$ENTRY" ]; then echo "ERROR: backtest entry not found"; exit 1; fi
+          echo "Using entrypoint: $ENTRY"
+          python "$ENTRY" --csv "$CSV_PATH" --out "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}"
 
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
