@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.1)
+name: Backtest v1.0.8 (Checklist1.2)
 
 on:
   workflow_dispatch:
@@ -21,23 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1.1)
+      - name: Validate pinned SHAs (Checklist1.2)
         run: |
           set -euo pipefail
           verify() {
-            repo="$1"    # e.g., actions/checkout
-            sha="$2"     # 40-hex
-            if ! echo "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
-              echo "::error title=PinFormat::${repo}@${sha} is not a 40-hex SHA"
-              exit 1
-            fi
-            # Use codeload HEAD (200 expected). API tarball often returns 302.
+            repo="$1"; sha="$2"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha} not 40-hex"; exit 1; }
             url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"
             code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
-            if [ "$code" != "200" ]; then
-              echo "::error title=PinUnavailable::${repo}@${sha} codeload HEAD=$code"
-              exit 1
-            fi
+            [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
           }
           verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
           verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
@@ -58,9 +50,10 @@ jobs:
           sudo apt-get install -y unzip tzdata
           echo "TZ=Asia/Seoul" >> $GITHUB_ENV
 
-      - name: Create workspace folders
+      - name: Reset workspace folders (clean)
         run: |
           set -euo pipefail
+          rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
           mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run scripts
 
       - name: Bring zips
@@ -68,39 +61,44 @@ jobs:
           set -euo pipefail
           CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
           DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
-          fetch() {
-            src="$1"; dst="$2";
-            if [[ "$src" =~ ^https?:// ]]; then
-              curl -L "$src" -o "$dst"
-            else
-              cp -f "$src" "$dst"
-            fi
-          }
+          fetch() { src="$1"; dst="$2"; [[ "$src" =~ ^https?:// ]] && curl -L "$src" -o "$dst" || cp -f "$src" "$dst"; }
           fetch "$CODE_ZIP" tmp/code.zip
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
 
-      - name: Unzip packs (flatten if double-folder)
+      - name: Inspect code.zip for duplicates (warn-only)
         run: |
           set -euo pipefail
-          unzip -q tmp/code.zip -d tmp/trade_raw
-          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ]; then
-            mv tmp/trade_raw/* tmp/trade/ || true
-          else
-            mv tmp/trade_raw/* tmp/trade/ || true
+          echo "Listing duplicates in code.zip (if any)…"
+          dups=$(unzip -Z1 tmp/code.zip | sort | uniq -d || true)
+          if [ -n "$dups" ]; then
+            echo "::warning title=ZipDuplicate::Duplicate paths detected in code.zip"; printf '%s\n' "$dups"
           fi
-          unzip -q tmp/data.zip -d tmp/data
+
+      - name: Unzip packs (non-interactive, flatten)
+        run: |
+          set -euo pipefail
+          # Non-interactive unzip: -o (overwrite) + -q (quiet)
+          unzip -oq tmp/code.zip -d tmp/trade_raw
+          # Flatten single top-level folder → tmp/trade
+          shopt -s nullglob dotglob
+          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && \
+             [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/trade_raw/*/* tmp/trade/ 2>/dev/null || mv tmp/trade_raw/* tmp/trade/
+          else
+            mv tmp/trade_raw/* tmp/trade/ 2>/dev/null || true
+          fi
+          unzip -oq tmp/data.zip -d tmp/data
+
           echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
-          echo "Top files:"; ls -al tmp/trade | sed -n '1,80p'
+          echo "Top files:"; ls -al tmp/trade | sed -n '1,120p'
 
       - name: Python deps (with fallback)
         working-directory: tmp/trade
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install --no-cache-dir -r requirements.txt || true
-          fi
+          if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
       - name: Write preflight + shim + runners
@@ -112,19 +110,17 @@ jobs:
           root = sys.argv[1] if len(sys.argv)>1 else "tmp/data"
           csv_glob = os.environ.get("CSV_GLOB","**/*.csv")
           matches = sorted(glob.glob(os.path.join(root, csv_glob), recursive=True))
-          if not matches:
-              matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
+          if not matches: matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
           out = {"glob": csv_glob, "found": matches[:10]}
-          if not matches:
-              print(json.dumps(out, ensure_ascii=True)); sys.exit(0)
+          if not matches: print(json.dumps(out, ensure_ascii=True)); sys.exit(0)
           path = matches[0]
           try:
-              df = pd.read_csv(path, nrows=2)
-              need = ["open_time","open","high","low","close","volume"]
-              missing = [c for c in need if c not in df.columns]
-              out["sample_path"]=path; out["columns"]=df.columns.tolist(); out["missing"]=missing
+            df = pd.read_csv(path, nrows=2)
+            need = ["open_time","open","high","low","close","volume"]
+            out["sample_path"]=path; out["columns"]=df.columns.tolist()
+            out["missing"]=[c for c in need if c not in df.columns]
           except Exception as e:
-              out["error"]=str(e)
+            out["error"]=str(e)
           print(json.dumps(out, ensure_ascii=True))
           with open("CSV_PATH.txt","w", encoding="utf-8") as f: f.write(path)
           PY
@@ -148,36 +144,24 @@ jobs:
           ROOT="$GITHUB_WORKSPACE/tmp/trade"
           cd "$GITHUB_WORKSPACE"
           CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
-          if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then
-            CSV_PATH="$(cat scripts/CSV_PATH.txt)"
-          fi
-          if [ -z "${CSV_PATH:-}" ] ; then
-            CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
-          fi
+          if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then CSV_PATH="$(cat scripts/CSV_PATH.txt)"; fi
+          if [ -z "${CSV_PATH:-}" ]; then CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"; fi
           echo "Using CSV: ${CSV_PATH:-<none>}"
           export CSV_PATH="$CSV_PATH"
           export PYTHONPATH="$ROOT:$ROOT/backtest:$PYTHONPATH"
-          mkdir -p "_out_4u/run"
-          cd "$ROOT"
+          mkdir -p "_out_4u/run"; cd "$ROOT"
           CFG="conf/config.yml"
           try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
           try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
           try python run_4u.py "$CSV_PATH" && exit 0
-          if [ -f "backtest/run_4u.py" ]; then
-            try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
-          fi
-          if python - << 'PY'
-          import importlib, sys
-          sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
+          if [ -f "backtest/run_4u.py" ]; then try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0; fi
+          python - << 'PY' && python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
+          import importlib, sys; sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
           PY
-          then
-            try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0
-          fi
           echo "::warning::Entrypoint attempts failed; writing empty artifacts"
-          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"
-          exit 0
+          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"; exit 0
           SH
           chmod +x scripts/entrypoint_run.sh
 
@@ -187,8 +171,7 @@ jobs:
             def main():
                 csv = os.environ.get("CSV_PATH") or (sys.argv[1] if len(sys.argv)>1 else None)
                 cfg = "conf/config.yml"
-                if not csv:
-                    print("[shim] CSV_PATH not provided"); return 3
+                if not csv: print("[shim] CSV_PATH not provided"); return 3
                 try:
                     from backtest.runner import run_backtest
                 except Exception as e:
@@ -196,13 +179,10 @@ jobs:
                 try:
                     _ = run_backtest(data_path=csv, config_path=cfg)
                 except TypeError:
-                    try:
-                        _ = run_backtest(csv, cfg)
-                    except Exception as e:
-                        print(f"[shim] run_backtest failed: {e}"); return 4
+                    try: _ = run_backtest(csv, cfg)
+                    except Exception as e: print(f"[shim] run_backtest failed: {e}"); return 4
                 return 0
-            if __name__ == "__main__":
-                sys.exit(main())
+            if __name__ == "__main__": sys.exit(main())
             PY
           fi
 
@@ -212,16 +192,14 @@ jobs:
         run: |
           set -euo pipefail
           python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
-          if [ -f CSV_PATH.txt ]; then mv CSV_PATH.txt scripts/CSV_PATH.txt; fi
+          [ -f CSV_PATH.txt ] && mv CSV_PATH.txt scripts/CSV_PATH.txt || true
 
       - name: Run backtest
         run: |
           set -euo pipefail
           python -u scripts/make_empty_artifacts.py
           bash -u scripts/entrypoint_run.sh
-          echo "Artifacts directory:"
-          ls -al _out_4u || true
-          ls -al _out_4u/run || true
+          echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
