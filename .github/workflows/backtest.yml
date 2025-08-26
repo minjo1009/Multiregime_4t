@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: "Code zip at repo root"
+        description: Code zip at repo root
         required: true
-        default: "trade_v1.0.8.zip"
+        default: trade_v1.0.8.zip
       DATA_ZIP:
-        description: "Data zip at repo root"
+        description: Data zip at repo root
         required: true
-        default: "ETHUSDT_1min_2020_2025.zip"
+        default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: "CSV glob inside data dir (pattern)"
+        description: CSV glob inside data dir
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
 
@@ -27,6 +27,7 @@ jobs:
       RUN_DIR: _work/code
       DATA_DIR: _work/data
       OUT_DIR: _out_4u/run
+
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
@@ -57,7 +58,6 @@ jobs:
           unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" >/dev/null
 
       - name: Detect CSV and export CSV_PATH
-        id: detect_csv
         shell: bash
         run: |
           set -euo pipefail
@@ -78,25 +78,23 @@ jobs:
           echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"
           echo "Using CSV_PATH=$ABS"
 
-      - name: Preflight columns (write script then run)
+      - name: Preflight columns (write file safely, no heredoc)
         shell: bash
         run: |
           set -euo pipefail
-          cat > preflight.py <<'PY'
-import os, sys, pandas as pd
-p = os.environ.get("CSV_PATH")
-if not p or not os.path.exists(p):
-    print("::error::Preflight: CSV_PATH missing or not exists:", p)
-    raise SystemExit(84)
-df = pd.read_csv(p, nrows=100)
-need = {'open_time','open','high','low','close','volume'}
-cols = set(c.lower() for c in df.columns)
-miss = need - cols
-if miss:
-    print("::error::Preflight missing columns:", sorted(miss))
-    raise SystemExit(84)
-print("Preflight OK")
-PY
+          {
+            printf '%s\n' "import os, sys, pandas as pd"
+            printf '%s\n' "p = os.environ.get(\"CSV_PATH\")"
+            printf '%s\n' "if not p or not os.path.exists(p):"
+            printf '%s\n' "    print(\"::error::Preflight: CSV_PATH missing or not exists:\", p)"; printf '%s\n' "    raise SystemExit(84)"
+            printf '%s\n' "df = pd.read_csv(p, nrows=100)"
+            printf '%s\n' "need = {'open_time','open','high','low','close','volume'}"
+            printf '%s\n' "cols = set(c.lower() for c in df.columns)"
+            printf '%s\n' "miss = need - cols"
+            printf '%s\n' "if miss:"
+            printf '%s\n' "    print(\"::error::Preflight missing columns:\", sorted(miss))"; printf '%s\n' "    raise SystemExit(84)"
+            printf '%s\n' "print(\"Preflight OK\")"
+          } > preflight.py
           python3 preflight.py
 
       - name: Choose entrypoint and run
@@ -115,7 +113,6 @@ PY
             exit 70
           fi
           python3 "$entry" --csv "$CSV_PATH" --out "${{ env.OUT_DIR }}" || true
-          # ensure minimal artifacts exist
           : > "${{ env.OUT_DIR }}/summary.json"
           : > "${{ env.OUT_DIR }}/preds_test.csv"
           : > "${{ env.OUT_DIR }}/trades.csv"
