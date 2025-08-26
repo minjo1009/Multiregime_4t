@@ -1,4 +1,4 @@
-name: Run backtest (strict-min)
+name: Run backtest (strict-no-checkout)
 
 on:
   workflow_dispatch:
@@ -23,29 +23,49 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     env:
-      PY: "3.11"
       RUN_DIR: _work/code
       DATA_DIR: _work/data
       OUT_DIR: _out_4u/run
 
     steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.11"
-
-      - name: Install deps (minimal)
+      # == checkout 대체: 레포 zipball 직접 다운로드 ==
+      - name: Fetch repository without actions/checkout
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip -q install -U pip
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/zipball/${GITHUB_SHA}" \
+            -o repo.zip
+          rm -rf __repo && mkdir __repo
+          unzip -q repo.zip -d __repo
+          shopt -s dotglob nullglob
+          src="$(ls -d __repo/* | head -n1)"
+          mv "$src"/* .
+          rm -rf __repo repo.zip
+
+      # == setup-python 대체: apt로 3.11 설치 + venv ==
+      - name: Install Python 3.11 and venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y python3.11 python3.11-venv python3-pip
+          python3.11 -m venv .venv
+          . .venv/bin/activate
+          python -V
+          python -m pip -q install -U pip
+
+      - name: Install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          . .venv/bin/activate
           if [ -f requirements.txt ]; then
-            python3 -m pip -q install -r requirements.txt
+            python -m pip -q install -r requirements.txt
           else
-            python3 -m pip -q install pandas numpy scikit-learn pyyaml
+            python -m pip -q install pandas numpy scikit-learn pyyaml
           fi
 
       - name: Prepare dirs and unzip
@@ -70,49 +90,46 @@ jobs:
             while IFS= read -r -d '' f; do matches+=("$f"); done < <(printf '%s\0' "$base"/**/*.csv)
           fi
           if [ "${#matches[@]}" -eq 0 ]; then
-            echo "::error::CSVDetect: no CSV found under $base"
-            exit 64
+            echo "::error::CSVDetect: no CSV found under $base"; exit 64
           fi
           p="${matches[0]}"
-          ABS="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
+          ABS="$(. .venv/bin/activate; python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
           echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"
           echo "Using CSV_PATH=$ABS"
 
-      - name: Preflight columns (write file safely, no heredoc)
+      - name: Preflight columns (no heredoc)
         shell: bash
         run: |
           set -euo pipefail
-          {
-            printf '%s\n' "import os, sys, pandas as pd"
-            printf '%s\n' "p = os.environ.get(\"CSV_PATH\")"
-            printf '%s\n' "if not p or not os.path.exists(p):"
-            printf '%s\n' "    print(\"::error::Preflight: CSV_PATH missing or not exists:\", p)"; printf '%s\n' "    raise SystemExit(84)"
-            printf '%s\n' "df = pd.read_csv(p, nrows=100)"
-            printf '%s\n' "need = {'open_time','open','high','low','close','volume'}"
-            printf '%s\n' "cols = set(c.lower() for c in df.columns)"
-            printf '%s\n' "miss = need - cols"
-            printf '%s\n' "if miss:"
-            printf '%s\n' "    print(\"::error::Preflight missing columns:\", sorted(miss))"; printf '%s\n' "    raise SystemExit(84)"
-            printf '%s\n' "print(\"Preflight OK\")"
-          } > preflight.py
-          python3 preflight.py
+          . .venv/bin/activate
+          printf '%s\n' \
+          "import os, sys, pandas as pd" \
+          "p = os.environ.get('CSV_PATH')" \
+          "if not p or not os.path.exists(p):" \
+          "    print('::error::Preflight: CSV_PATH missing or not exists:', p); raise SystemExit(84)" \
+          "df = pd.read_csv(p, nrows=100)" \
+          "need = {'open_time','open','high','low','close','volume'}" \
+          "cols = set(c.lower() for c in df.columns)" \
+          "miss = need - cols" \
+          "if miss: print('::error::Preflight missing columns:', sorted(miss)); raise SystemExit(84)" \
+          "print('Preflight OK')" \
+          > preflight.py
+          python preflight.py
 
       - name: Choose entrypoint and run
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
+          . ../../.venv/bin/activate
           mkdir -p "${{ env.OUT_DIR }}"
           [ -f "${{ env.OUT_DIR }}/gating_debug.json" ] || echo "{}" > "${{ env.OUT_DIR }}/gating_debug.json"
           entry=""
           for c in run_4u.py backtest/run_4u.py run.py backtest/runner.py; do
-            if [ -f "$c" ]; then entry="$c"; break; fi
+            [ -f "$c" ] && entry="$c" && break
           done
-          if [ -z "$entry" ]; then
-            echo "::error::Runtime: backtest entry not found under $PWD"
-            exit 70
-          fi
-          python3 "$entry" --csv "$CSV_PATH" --out "${{ env.OUT_DIR }}" || true
+          if [ -z "$entry" ]; then echo "::error::Runtime: backtest entry not found"; exit 70; fi
+          python "$entry" --csv "$CSV_PATH" --out "${{ env.OUT_DIR }}" || true
           : > "${{ env.OUT_DIR }}/summary.json"
           : > "${{ env.OUT_DIR }}/preds_test.csv"
           : > "${{ env.OUT_DIR }}/trades.csv"
