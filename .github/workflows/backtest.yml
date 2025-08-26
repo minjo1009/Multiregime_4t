@@ -20,6 +20,7 @@ jobs:
   run-backtest:
     runs-on: ubuntu-latest
     env:
+      REPO_DIR: repo
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
@@ -30,42 +31,40 @@ jobs:
       NUMEXPR_NUM_THREADS: 2
 
     steps:
-      # ---------- Checkout with pinned SHA + fallback ----------
-      - name: Checkout (primary pinned)
-        uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-        continue-on-error: true
+      # --- Manual checkout (no GitHub Action; avoids SHA/tarball restriction) ---
+      - name: Manual checkout (git fetch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          rm -rf "${REPO_DIR}"
+          git init "${REPO_DIR}"
+          git -C "${REPO_DIR}" fetch --no-tags --depth 1 "${REPO_URL}" "${GITHUB_SHA:-${GITHUB_REF##*/}}"
+          git -C "${REPO_DIR}" checkout -q FETCH_HEAD
+          echo "Checked out to $(git -C ${REPO_DIR} rev-parse --short HEAD)"
 
-      - name: Checkout (fallback pinned)
-        if: failure()
-        uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
-
-      # ---------- Setup Python pinned + fallback ----------
-      - name: Setup Python (primary pinned)
-        uses: actions/setup-python@5ccb29d8773c3f3bc0d68f271f93f4b2b4f2c3b0
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: pip
-        continue-on-error: true
-
-      - name: Setup Python (fallback pinned)
-        if: failure()
+      # --- Setup Python (pinned OK; 이 단계는 GitHub 공식 호스티드) ---
+      - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
           cache: pip
 
-      # ---------- Unpack & CSV detection ----------
+      # --- Unpack & CSV detection (ZIP은 repo/ 하위에서 읽음) ---
       - name: Prepare dirs & unzip
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-          test -f "${{ github.event.inputs.TRADE_ZIP }}" || { echo "❌ code zip not found at repo root"; exit 1; }
-          unzip -q "${{ github.event.inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
+          CODE_ZIP="${REPO_DIR}/${{ github.event.inputs.TRADE_ZIP }}"
+          DATA_ZIP="${REPO_DIR}/${{ github.event.inputs.DATA_ZIP }}"
 
-          if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then
-            unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}" || true
+          test -f "${CODE_ZIP}" || { echo "❌ code zip not found: ${CODE_ZIP}"; ls -al "${REPO_DIR}"; exit 1; }
+          unzip -q "${CODE_ZIP}" -d "${RUN_DIR}"
+
+          if [ -f "${DATA_ZIP}" ]; then
+            unzip -q "${DATA_ZIP}" -d "${DATA_DIR}" || true
           fi
 
           CSV=$(ls ${DATA_DIR}/${{ github.event.inputs.CSV_GLOB }} 2>/dev/null | head -n1 || true)
@@ -76,7 +75,7 @@ jobs:
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
           echo "Using CSV_PATH=$CSV"
 
-      # ---------- Install requirements in RUN_DIR ----------
+      # --- Install requirements (in RUN_DIR) ---
       - name: Install requirements
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -87,7 +86,7 @@ jobs:
           test -f requirements.txt || { echo "❌ requirements.txt missing in $(pwd)"; ls -al; exit 1; }
           pip install -r requirements.txt
 
-      # ---------- Sanity: files & core deps ----------
+      # --- Sanity: files & deps ---
       - name: Sanity check (files & deps)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -100,7 +99,7 @@ jobs:
           print("deps OK:", "yaml json numpy pandas sklearn")
           PY
 
-      # ---------- sklearn 1.4/1.5 smoke (safe) ----------
+      # --- sklearn 1.4/1.5 smoke (safe) ---
       - name: sklearn smoke (1.4/1.5)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -116,7 +115,7 @@ jobs:
           PY
           python smoke.py
 
-      # ---------- Run ----------
+      # --- Run backtest ---
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -131,22 +130,8 @@ jobs:
           fi
           ls -al "${{ env.OUT_DIR }}"
 
-      # ---------- Upload artifacts pinned + fallback ----------
-      - name: Upload artifacts (primary pinned)
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb480d
-        with:
-          name: backtest-output
-          path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/preds_test.csv
-            ${{ env.OUT_DIR }}/trades.csv
-          if-no-files-found: warn
-          retention-days: 30
-        continue-on-error: true
-
-      - name: Upload artifacts (fallback pinned)
-        if: failure()
+      # --- Upload artifacts (pinned) ---
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
