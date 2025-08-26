@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.4)
+name: Backtest v1.0.8 (Checklist1.5)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1.4)
+      - name: Validate pinned SHAs (Checklist1.5)
         run: |
           set -euo pipefail
           verify() {
@@ -98,7 +98,6 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
-      # ---------- Writers: split steps, no heredoc inside if ----------
       - name: Write preflight_csv.py
         run: |
           set -euo pipefail
@@ -142,7 +141,7 @@ jobs:
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh
+      - name: Write entrypoint_run.sh (safe env)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
@@ -150,6 +149,8 @@ jobs:
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE/tmp/trade"
           cd "$GITHUB_WORKSPACE"
+
+          # Resolve CSV path
           CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
           if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then
             CSV_PATH="$(cat scripts/CSV_PATH.txt)"
@@ -158,24 +159,33 @@ jobs:
             CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
           fi
           echo "Using CSV: ${CSV_PATH:-<none>}"
-          export CSV_PATH="$CSV_PATH"
-          export PYTHONPATH="$ROOT:$ROOT/backtest:$PYTHONPATH"
+          export CSV_PATH="${CSV_PATH:-}"
+
+          # ---- FIX: safe PYTHONPATH with set -u ----
+          export PYTHONPATH="${ROOT}:${ROOT}/backtest:${PYTHONPATH:-}"
+
           mkdir -p "_out_4u/run"
           cd "$ROOT"
           CFG="conf/config.yml"
+
           try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
+
           try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
           try python run_4u.py "$CSV_PATH" && exit 0
+
           if [ -f "backtest/run_4u.py" ]; then
             try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           fi
+
           python - << 'PY_INNER'
           import importlib, sys
           sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
           PY_INNER
+
           try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
+
           echo "::warning::Entrypoint attempts failed; writing empty artifacts"
           python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"
           exit 0
@@ -233,7 +243,7 @@ jobs:
         run: |
           set -euo pipefail
           python -u scripts/make_empty_artifacts.py
-          bash -u scripts/entrypoint_run.sh
+          bash scripts/entrypoint_run.sh
           echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
 
       - name: Upload artifacts
