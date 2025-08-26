@@ -1,43 +1,38 @@
-name: Precheck CSV (v1.0.8)
+name: Precheck CSV (v1.0.9)
 
 on:
   workflow_dispatch:
     inputs:
-      CODE_ZIP:
-        description: Code zip at repo root
-        required: true
-        default: trade_v1.0.8.zip
       DATA_ZIP:
-        description: Data zip at repo root
+        description: "Data zip at repo root (e.g. ETHUSDT_1min_2020_2025.zip)"
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: CSV glob inside data dir
+        description: "CSV glob inside extracted data dir (e.g. *ETHUSDT*1min*2020*2025*.csv)"
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
-      PY:
-        description: Python version
-        required: true
-        default: "3.11"
 
 permissions:
   contents: read
 
+env:
+  PY: "3.11"
+  DATA_DIR: tmp/data
+  OUT_DIR: _out_4u/run
+  # ======= 반드시 실제 커밋 SHA로 바꿔서 사용 =======
+  CHECKOUT_SHA: 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
+  SETUP_PYTHON_SHA: a26af69be951a213d495a4c3e4e4022e16d87065
+  # ===============================================
+
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    env:
-      RUN_DIR: tmp/trade
-      DATA_DIR: tmp/data
-      OUT_DIR: _out_4u/run
-      PY: ${{ github.event.inputs.PY }}
-
     steps:
-      - name: Checkout (safe tag)
-        uses: actions/checkout@v4
+      - name: Checkout (pinned)
+        uses: actions/checkout@${{ env.CHECKOUT_SHA }}
 
-      - name: Setup Python (safe tag)
-        uses: actions/setup-python@v5
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@${{ env.SETUP_PYTHON_SHA }}
         with:
           python-version: ${{ env.PY }}
 
@@ -46,65 +41,53 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip -q install -U pip
-          if [ -f requirements.txt ]; then
-            python3 -m pip -q install -r requirements.txt
-          else
-            python3 -m pip -q install pandas numpy pyyaml
-          fi
+          python3 -m pip -q install pandas numpy scikit-learn pyyaml
 
       - name: Prepare dirs & unzip data
         shell: bash
-        env:
-          DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
         run: |
           set -euo pipefail
-          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          unzip -o "$DATA_ZIP" -d "$DATA_DIR" >/dev/null
-          ls -al "$DATA_DIR" | sed -n '1,120p'
+          rm -rf "$DATA_DIR" "$OUT_DIR"
+          mkdir -p "$DATA_DIR" "$OUT_DIR"
+          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR"
 
-      - name: Detect CSV path
+      - name: Detect CSV & export CSV_PATH
         shell: bash
         env:
           CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          cat > detect_csv.py <<'PY'
-          import os, glob, sys
-          base = os.environ['DATA_DIR']
-          pat  = os.environ.get('CSV_GLOB_IN','').strip()
-          c = []
-          if pat:
-              c = glob.glob(os.path.join(base,'**',pat), recursive=True)
-          if not c:
-              c = glob.glob(os.path.join(base,'**','*.csv'), recursive=True)
-          if not c:
-              print(f"ERROR: no CSV found under {base}", file=sys.stderr)
-              sys.exit(44)
-          c.sort()
-          print(os.path.abspath(c[0]))
-          PY
-          CSV_PATH=$(python3 detect_csv.py)
-          echo "CSV_PATH=$CSV_PATH" >> "$GITHUB_ENV"
-          echo "Using CSV_PATH=$CSV_PATH"
+          shopt -s globstar nullglob
+          base="$DATA_DIR"
+          pat="${CSV_GLOB_IN:-**/*.csv}"
+          # 1) 사용자 패턴
+          mapfile -t matches < <(compgen -G "$base/$pat" || true)
+          # 2) 폴백 **/*.csv
+          if [ ${#matches[@]} -eq 0 ]; then
+            mapfile -t matches < <(compgen -G "$base"/**/*.csv || true)
+          fi
+          if [ ${#matches[@]} -eq 0 ]; then
+            echo "ERROR: No CSV found under $base" >&2; exit 2
+          fi
+          p="${matches[0]}"
+          ABS=$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" "$p")
+          echo "CSV_PATH=$ABS" | tee -a "$GITHUB_ENV"
+          echo "Using CSV_PATH=$ABS"
 
-      - name: Preflight required columns
+      - name: Preflight columns
         shell: bash
         run: |
           set -euo pipefail
-          cat > preflight.py <<'PY'
-          import os, sys, pandas as pd
-          p = os.environ.get("CSV_PATH")
-          if not p or not os.path.exists(p):
-              print(f"ERROR: CSV_PATH missing or not exists: {p}", file=sys.stderr)
-              sys.exit(45)
-          df = pd.read_csv(p, nrows=2)
-          need = {'open_time','open','high','low','close','volume'}
-          cols = {c.lower() for c in df.columns}
-          miss = sorted(need - cols)
-          if miss:
-              print("ERROR: missing base columns:", miss, file=sys.stderr)
-              sys.exit(46)
-          print("Columns OK:", sorted(df.columns))
-          PY
-          python3 preflight.py
+          python3 - "$CSV_PATH" <<'PY'
+import sys, os, pandas as pd
+p = sys.argv[1] if len(sys.argv)>1 else os.environ.get("CSV_PATH")
+if not p or not os.path.exists(p):
+    print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(1)
+df = pd.read_csv(p, nrows=2)
+need = {'open_time','open','high','low','close','volume'}
+cols = {str(c).lower() for c in df.columns}
+miss = need - cols
+if miss:
+    print("ERROR: Missing base columns:", sorted(miss)); sys.exit(1)
+print("OK: Columns present:", sorted(cols))
+PY
