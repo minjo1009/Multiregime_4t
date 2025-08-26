@@ -6,152 +6,118 @@ on:
       TRADE_ZIP:
         description: "Code zip at repo root (e.g., trade_v1.0.7.zip)"
         required: true
+        type: string
       DATA_ZIP:
         description: "Data zip at repo root (e.g., ETHUSDT_1min_2020_2025.zip)"
         required: true
+        type: string
       CSV_GLOB:
-        description: "CSV pattern inside DATA_DIR (e.g., *ETHUSDT*1min*2020*2025*.csv)"
+        description: "CSV glob inside DATA_ZIP after unzip (e.g., *ETHUSDT*1min*2020*2025*.csv)"
         required: true
-      OUT_DIR:
-        description: "Output directory"
-        default: "_out_4u/run"
-        required: true
+        type: string
+      PYVER:
+        description: "Python version"
+        required: false
+        default: "3.11"
+        type: string
 
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     env:
-      REPO_DIR: repo
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
-      OUT_DIR: ${{ inputs.OUT_DIR }}
-      PYTHONUTF8: "1"
-      OMP_NUM_THREADS: "2"
-      OPENBLAS_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
-      NUMEXPR_NUM_THREADS: "2"
-
+      OUT_DIR: _out_4u/run
     steps:
-      - name: Validate inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "${{ inputs.TRADE_ZIP }}" ] || { echo "TRADE_ZIP empty"; exit 1; }
-          [ -n "${{ inputs.DATA_ZIP }}" ]  || { echo "DATA_ZIP empty"; exit 1; }
-          [ -n "${{ inputs.CSV_GLOB }}" ]  || { echo "CSV_GLOB empty"; exit 1; }
+      # ----- Checkout (pinned SHA: actions/checkout v4) -----
+      - name: Checkout (pinned)
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
-      # --- Self checkout (조직 정책상 actions/checkout 미사용) ---
-      - name: Checkout repo (manual)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p "${REPO_DIR}"
-          cd "${REPO_DIR}"
-          git init -q
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git -c protocol.version=2 fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
-          git checkout -q FETCH_HEAD
-
-      - name: Prepare dirs
+      # ----- Prepare workspace & unzip code/data -----
+      - name: Prepare and unzip
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-      - name: Inflate code & data
-        shell: bash
-        run: |
-          set -euo pipefail
-          CODE_ZIP="${{ inputs.TRADE_ZIP }}"
-          DATA_ZIP="${{ inputs.DATA_ZIP }}"
-          test -f "${REPO_DIR}/${CODE_ZIP}" || { echo "Code zip not found: ${REPO_DIR}/${CODE_ZIP}"; exit 1; }
-          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "Data zip not found: ${REPO_DIR}/${DATA_ZIP}"; exit 1; }
-          unzip -q "${REPO_DIR}/${CODE_ZIP}" -d "${RUN_DIR}"
-          unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
+          # Validate zips exist at repo root
+          test -f "${{ inputs.TRADE_ZIP }}" || { echo "❌ code zip not found: ${{ inputs.TRADE_ZIP }}"; exit 1; }
+          test -f "${{ inputs.DATA_ZIP }}" || { echo "❌ data zip not found: ${{ inputs.DATA_ZIP }}"; exit 1; }
 
-      # === 문제났던 부분: heredoc 제거 ===
-      - name: Preflight CSV (robust; no heredoc)
-        shell: bash
-        env:
-          CSV_GLOB_IN: ${{ inputs.CSV_GLOB }}
-        run: |
-          set -euo pipefail
-          CSV_PATH="$(ls ${DATA_DIR}/${CSV_GLOB_IN} 2>/dev/null | head -n1 || true)"
-          [ -n "$CSV_PATH" ] || CSV_PATH="$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)"
-          [ -n "$CSV_PATH" ] || { echo "No CSV found under ${DATA_DIR}"; exit 1; }
-          echo "Using CSV_PATH=${CSV_PATH}"
-          echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
+          unzip -q "${{ inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
+          unzip -q "${{ inputs.DATA_ZIP }}" -d "${DATA_DIR}"
 
-          # preflight.py를 printf로 생성 (ASCII만 사용)
-          printf "%s\n" \
-"import os, sys, pandas as pd" \
-"p=os.environ.get('CSV_PATH')" \
-"if not p:" \
-"    print('CSV_PATH missing'); sys.exit(1)" \
-"df=pd.read_csv(p, nrows=2)" \
-"need={'open_time','open','high','low','close','volume'}" \
-"miss=need - set(df.columns)" \
-"if miss:" \
-"    print('Missing base columns:', sorted(miss)); sys.exit(1)" \
-"print('Columns OK:', sorted(df.columns))" \
-> preflight.py
-
-          python3 preflight.py
-
-      - name: Setup Python (no project files required)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -V
-          python3 -m pip -q install -U pip
-          # repo 내부 requirements가 있으면 사용, 없으면 기본세트
-          if [ -f "${RUN_DIR}/requirements.txt" ]; then
-            python3 -m pip install -r "${RUN_DIR}/requirements.txt"
-          else
-            python3 -m pip install -q pyyaml pandas numpy scikit-learn
+          # Detect CSV
+          CSV_PATH="$(ls ${DATA_DIR}/${{ inputs.CSV_GLOB }} 2>/dev/null | head -n 1 || true)"
+          if [ -z "${CSV_PATH}" ]; then
+            echo "❌ No CSV found in ${DATA_DIR} with glob: ${{ inputs.CSV_GLOB }}"
+            exit 1
           fi
-          python3 - <<'PY'
-import sys, sklearn, inspect
-from sklearn.calibration import CalibratedClassifierCV as C
-print("sklearn", sklearn.__version__, "| py", sys.version.split()[0],
-      "| has 'estimator':", 'estimator' in set(inspect.signature(C).parameters))
-PY
+          echo "Using CSV_PATH=${CSV_PATH}"
+          echo "CSV_PATH=${CSV_PATH}" >> "${GITHUB_ENV}"
 
-      - name: Sanity check run files
+      # ----- Setup Python (pinned SHA: actions/setup-python v5) -----
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ inputs.PYVER }}
+          cache: pip
+          check-latest: false
+
+      # ----- Optional dependency install (only if present) -----
+      - name: Install Python deps (optional)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python3 -m pip -q install -U pip
+          if [ -f requirements.txt ]; then
+            echo "Installing requirements.txt ..."
+            pip -q install -r requirements.txt
+          else
+            echo "No requirements.txt; skipping pip install."
+          fi
+
+      # ----- Preflight CSV schema -----
+      - name: Preflight CSV schema
         shell: bash
         run: |
           set -euo pipefail
-          test -f "${RUN_DIR}/run_4u.py" || { echo "run_4u.py missing"; exit 1; }
+          python3 - <<'PY'
+          import os, sys, pandas as pd
+          p = os.environ.get("CSV_PATH")
+          if not p:
+              print("❌ CSV_PATH missing from env"); sys.exit(1)
+          try:
+              df = pd.read_csv(p, nrows=2)
+          except Exception as e:
+              print(f"❌ CSV read failed: {e}"); sys.exit(1)
+          need = {'open_time','open','high','low','close','volume'}
+          miss = sorted(need - set(df.columns))
+          if miss:
+              print("❌ Missing base columns:", miss); sys.exit(1)
+          print("✅ Columns OK:", sorted(df.columns))
+          PY
 
+      # ----- Run backtest -----
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          echo "CSV_PATH=${CSV_PATH}"
-          python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
-          echo "---- gating debug head ----"
-          if [ -f "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" ]; then
-            head -n 60 "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json" || true
-          else
-            echo "{}" > "${GITHUB_WORKSPACE}/${OUT_DIR}/gating_debug.json"
-          fi
-          ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
+          echo "---- gating debug (head) ----" || true
+          head -n 60 "${OUT_DIR}/gating_debug.json" || true
+          ls -al "${OUT_DIR}" || true
 
+      # ----- Upload artifacts (pinned SHA: upload-artifact v4) -----
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/preds_test.csv
-            ${{ env.OUT_DIR }}/trades.csv
-            ${{ env.OUT_DIR }}/charts/
+            _out_4u/run/summary.json
+            _out_4u/run/gating_debug.json
+            _out_4u/run/preds_test.csv
+            _out_4u/run/trades.csv
           if-no-files-found: warn
-          retention-days: 30
