@@ -6,7 +6,7 @@ on:
       TRADE_ZIP:
         description: 'Code zip in repo root'
         required: true
-        default: 'trade_v1.0.7_full_pack.zip'
+        default: 'trade_v1.0.7d_full.zip'
       DATA_ZIP:
         description: 'Data zip in repo root'
         required: true
@@ -24,8 +24,9 @@ jobs:
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
       PYVER: '3.11'
+
     steps:
-      # --- 필수: 핀고정 checkout ---
+      # --- 필수: 액션 SHA 핀고정 ---
       - name: Checkout (pinned)
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
@@ -35,17 +36,18 @@ jobs:
           python-version: ${{ env.PYVER }}
           cache: pip
 
-      - name: Prepare dirs & unpack
+      - name: Prepare dirs & unzip
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           test -f "${{ github.event.inputs.TRADE_ZIP }}" || { echo "❌ code zip not found"; exit 1; }
           unzip -q "${{ github.event.inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
+
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then
             unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}" || true
           fi
-          # CSV 찾기
+
           CSV=$(ls ${DATA_DIR}/${{ github.event.inputs.CSV_GLOB }} 2>/dev/null | head -n1 || true)
           if [ -z "$CSV" ]; then
             CSV=$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)
@@ -63,7 +65,7 @@ jobs:
           test -f requirements.txt || { echo "❌ requirements.txt missing in ${PWD}"; exit 1; }
           pip install -r requirements.txt
 
-      - name: Smoke import (sklearn compat)
+      - name: sklearn smoke (1.4/1.5 호환)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -71,8 +73,8 @@ jobs:
           python - <<'PY'
 import inspect, sklearn
 from sklearn.calibration import CalibratedClassifierCV as C
-ok = 'estimator' in inspect.signature(C).parameters or 'base_estimator' in inspect.signature(C).parameters
-print("sklearn", sklearn.__version__, "CalibratedClassifierCV param OK:", ok)
+p = set(getattr(inspect.signature(C),'parameters',{}))
+print("sklearn", sklearn.__version__, "| param:", ("estimator" if "estimator" in p else "base_estimator" if "base_estimator" in p else "unknown"))
 PY
 
       - name: Run backtest
