@@ -2,81 +2,88 @@ name: Precheck CSV (v1.0.8)
 on:
   workflow_dispatch:
     inputs:
-      CODE_ZIP:
-        description: Code zip at repo root
-        required: true
-        default: trade_v1.0.8.zip
-      DATA_ZIP:
-        description: Data zip at repo root
-        required: true
-        default: ETHUSDT_1min_2020_2025.zip
-      CSV_GLOB:
-        description: CSV glob inside DATA_ZIP
-        required: true
-        default: "*ETHUSDT*1min*2020*2025*.csv"
+      CODE_ZIP: { description: 'Code zip at repo root', required: true, default: trade_v1.0.8_full.zip }
+      DATA_ZIP: { description: 'Data zip at repo root', required: true, default: ETHUSDT_1min_2020_2025.zip }
+      CSV_GLOB: { description: 'CSV glob inside DATA_ZIP', required: true, default: '*ETHUSDT*1min*2020*2025*.csv' }
+permissions: { contents: read }
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    env:
-      RUN_DIR: tmp/trade
-      DATA_DIR: tmp/data
-      OUT_DIR: _out_4u/run
+    env: { PY: "3.11", DATA_DIR: tmp/data, OUT_DIR: _out_4u/run }
     steps:
+      - name: Validate pinned SHAs (ASCII/exists with retry)
+        shell: bash
+        env:
+          CHECKOUT_SHA: 11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
+          SETUP_PYTHON_SHA: a26af69be951a213d495a4c3e4e4022e16d87065
+          UPLOAD_ARTIFACT_SHA: ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+          PIN_STRICT: "false"
+          PIN_FALLBACK: "true"
+          GH_API: https://api.github.com/repos/actions
+        run: |
+          set -euo pipefail
+          hex40='^[0-9a-f]{40}$'
+          hdr=(-H "Accept: application/vnd.github+json")
+          [ -n "${GITHUB_TOKEN-}" ] && hdr+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          bad(){ echo "❌ PinnedSHA: $1"; exit 86; }
+          ok(){  echo "✅ $1"; }
+          check(){ local n="$1" s="$2" u="${GH_API}/${n}/tarball/${s}";
+            for t in 1 2 4; do curl -fsIL "${hdr[@]}" "$u" >/dev/null && return 0 || sleep "$t"; done; return 1; }
+          for kv in "checkout:${CHECKOUT_SHA}" "setup-python:${SETUP_PYTHON_SHA}" "upload-artifact:${UPLOAD_ARTIFACT_SHA}"; do
+            name="${kv%%:*}"; sha="${kv##*:}"
+            [[ "$sha" =~ $hex40 ]] || bad "$name: not 40-hex ASCII ($sha)"
+            if check("$name","$sha"); then ok "$name@$sha exists"
+            else
+              if [ "${PIN_FALLBACK}" = "true" ] && [ "${PIN_STRICT}" != "true" ]; then
+                echo "::warning:: $name@$sha not found; will fallback to tag"
+                echo "PIN_FALLBACK_${name//-/_}=1" >> "$GITHUB_ENV"
+              else bad "$name: not found on GitHub ($sha)"; fi
+            fi
+          done
       - name: Checkout (pinned)
+        if: env.PIN_FALLBACK_checkout != '1'
         uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
-      - name: Prepare dirs + unzip
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "$RUN_DIR" "$DATA_DIR" || true
-          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          [ -f "${{ github.event.inputs.CODE_ZIP }}" ] && unzip -q "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR" || true
-          [ -f "${{ github.event.inputs.DATA_ZIP }}" ] && unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" || true
+      - name: Checkout (fallback tag)
+        if: env.PIN_FALLBACK_checkout == '1'
+        uses: actions/checkout@v4
       - name: Setup Python (pinned)
+        if: env.PIN_FALLBACK_setup_python != '1'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: 3.11
-          cache: pip
-      - name: Install deps (with fallback)
+        with: { python-version: ${{ env.PY }} }
+      - name: Setup Python (fallback tag)
+        if: env.PIN_FALLBACK_setup_python == '1'
+        uses: actions/setup-python@v5
+        with: { python-version: ${{ env.PY }} }
+      - name: Prepare dirs & unzip data
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; else python -m pip install pandas numpy scikit-learn pyyaml; fi
+          rm -rf "$DATA_DIR" "$OUT_DIR"; mkdir -p "$DATA_DIR" "$OUT_DIR"
+          unzip -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" >/dev/null
       - name: Detect CSV & export CSV_PATH
         id: detect_csv
         shell: bash
+        env: { CSV_GLOB_IN: "${{ github.event.inputs.CSV_GLOB }}" }
         run: |
           set -euo pipefail
-          CANDIDATE="$(ls ${DATA_DIR}/${{ github.event.inputs.CSV_GLOB }} 2>/dev/null || true)"
-          if [ -z "$CANDIDATE" ]; then CANDIDATE="$(ls ${DATA_DIR}/**/*.csv 2>/dev/null | head -n 1 || true)"; fi
-          if [ -z "$CANDIDATE" ]; then echo "::error::CSV탐지 실패 (CSV_GLOB, **/*.csv 모두 실패)"; exit 1; fi
-          ABS="$(python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$CANDIDATE")"
-          echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"; echo "Using CSV_PATH=$ABS"
+          shopt -s globstar nullglob
+          CANDIDATE=$(ls $DATA_DIR/${CSV_GLOB_IN} 2>/dev/null | head -n 1 || true)
+          if [ -z "$CANDIDATE" ]; then CANDIDATE=$(ls $DATA_DIR/**/*.csv 2>/dev/null | head -n 1 || true); fi
+          if [ -z "$CANDIDATE" ]; then echo "❌ CSVDetect: No CSV found under $DATA_DIR"; exit 12; fi
+          ABS=$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$CANDIDATE")
+          echo "CSV_PATH=$ABS" | tee -a "$GITHUB_ENV"; echo "✓ Using CSV_PATH=$ABS"
       - name: Preflight columns
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os,sys,pandas as pd
+          python3 - <<'PY'
+          import os, sys, pandas as pd
           p=os.environ.get("CSV_PATH")
-          assert p and os.path.exists(p), f"CSV_PATH missing or not exists: {p}"
+          if not p or not os.path.exists(p):
+            print("❌ Preflight: CSV_PATH missing or not exists:", p); sys.exit(13)
           df=pd.read_csv(p, nrows=2)
           need={'open_time','open','high','low','close','volume'}
-          miss=need-set(map(str.lower, df.columns))
-          if miss:
-              print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
-          print("✅ Columns OK")
+          miss=need-set(df.columns.str.lower())
+          if miss: print("❌ Preflight: Missing base columns:", sorted(miss)); sys.exit(14)
+          print("✅ Preflight: Columns OK:", sorted(df.columns))
           PY
-      - name: Emit gating_debug stub
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUT_DIR"; echo "{{}}" > "$OUT_DIR/gating_debug.json"
-      - name: Upload precheck stubs
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
-        with:
-          name: precheck-output
-          path: |
-            ${{ env.OUT_DIR }}/gating_debug.json
