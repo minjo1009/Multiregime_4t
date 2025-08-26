@@ -1,27 +1,27 @@
-name: Run backtest (strict)
+name: Run backtest (strict-min)
 
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: "Code zip at repo root"
+        description: Code zip at repo root
+        required: true
         default: trade_v1.0.8.zip
-        required: true
       DATA_ZIP:
-        description: "Data zip at repo root"
+        description: Data zip at repo root
+        required: true
         default: ETHUSDT_1min_2020_2025.zip
-        required: true
       CSV_GLOB:
-        description: "CSV glob inside data dir"
-        default: "*ETHUSDT*1min*2020*2025*.csv"
+        description: CSV glob inside data dir
         required: true
+        default: "*ETHUSDT*1min*2020*2025*.csv"
 
 permissions:
   contents: read
 
 env:
   PY: "3.11"
-  RUN_DIR: tmp/code
+  CODE_DIR: tmp/code
   DATA_DIR: tmp/data
   OUT_DIR: _out_4u/run
 
@@ -37,18 +37,19 @@ jobs:
         with:
           python-version: ${{ env.PY }}
 
-      - name: Prepare dirs & unzip code/data
+      - name: Prepare dirs and unzip code and data
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
-          unzip -q -o "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR"
+          rm -rf "$CODE_DIR" "$DATA_DIR" "$OUT_DIR"
+          mkdir -p "$CODE_DIR" "$DATA_DIR" "$OUT_DIR"
+          unzip -q -o "${{ github.event.inputs.CODE_ZIP }}" -d "$CODE_DIR"
           unzip -q -o "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR"
+          [ -f "$OUT_DIR/gating_debug.json" ] || echo '{}' > "$OUT_DIR/gating_debug.json"
 
-      - name: Install deps
+      - name: Install dependencies
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
+        working-directory: ${{ env.CODE_DIR }}
         run: |
           set -euo pipefail
           python -m pip -q install -U pip
@@ -58,7 +59,7 @@ jobs:
             python -m pip -q install pandas numpy scikit-learn pyyaml
           fi
 
-      - name: Detect CSV & export CSV_PATH
+      - name: Detect CSV and export CSV_PATH
         id: detect_csv
         shell: bash
         env:
@@ -71,11 +72,11 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then files=( $base/**/*.csv ); fi
           if [ ${#files[@]} -eq 0 ]; then echo "ERROR: No CSV found under $base"; exit 1; fi
           p="${files[0]}"
-          ABS="$(python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
-          echo "CSV_PATH=$ABS" | tee -a "$GITHUB_ENV"
-          echo "Using CSV_PATH=$ABS"
+          abs="$(python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$p")"
+          echo "CSV_PATH=$abs" | tee -a "$GITHUB_ENV"
+          echo "Using CSV_PATH=$abs"
 
-      - name: Preflight columns (quick)
+      - name: Preflight required columns
         shell: bash
         run: |
           set -euo pipefail
@@ -83,29 +84,32 @@ jobs:
           import os, sys, pandas as pd
           p = os.environ.get("CSV_PATH")
           if not p or not os.path.exists(p):
-              print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(1)
+              print("ERROR: CSV_PATH missing or not exists:", p); sys.exit(2)
           df = pd.read_csv(p, nrows=2)
           need = {'open_time','open','high','low','close','volume'}
           cols = {str(c).lower() for c in df.columns}
           miss = need - cols
           if miss:
-              print("ERROR: Missing base columns:", sorted(miss)); sys.exit(1)
-          print("OK: Columns present:", sorted(cols & need))
+              print("ERROR: Missing base columns:", sorted(miss)); sys.exit(3)
+          print("OK: Columns present:", sorted(need))
           PY
 
-      - name: Choose entrypoint & run
+      - name: Choose entrypoint and run
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
+        working-directory: ${{ env.CODE_DIR }}
         run: |
           set -euo pipefail
-          touch "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}/gating_debug.json" || true
-          ENTRY=""
+          entry=""
           for c in "run_4u.py" "backtest/run_4u.py" "run.py" "backtest/runner.py"; do
-            if [ -f "$c" ]; then ENTRY="$c"; break; fi
+            if [ -f "$c" ]; then entry="$c"; break; fi
           done
-          if [ -z "$ENTRY" ]; then echo "ERROR: backtest entry not found"; exit 1; fi
-          echo "Using entrypoint: $ENTRY"
-          python "$ENTRY" --csv "$CSV_PATH" --out "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}"
+          if [ -z "$entry" ]; then
+            echo "ERROR: backtest entry not found under $PWD"
+            find . -maxdepth 2 -type f -name "*.py" | sed -n '1,80p' || true
+            exit 4
+          fi
+          echo "Using entrypoint: $entry"
+          python "$entry" --csv "$CSV_PATH" --out "$GITHUB_WORKSPACE/${{ env.OUT_DIR }}"
 
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
