@@ -1,18 +1,18 @@
-name: Backtest
+name: Backtest (safe)
 
 on:
   workflow_dispatch:
     inputs:
       TRADE_ZIP:
-        description: "Code zip at repo root (e.g., trade_v1.0.7.zip)"
-        required: true
+        description: "Code zip at repo root (optional)"
+        required: false
         default: "trade_v1.0.7.zip"
       DATA_ZIP:
-        description: "Data zip at repo root (e.g., ETHUSDT_1min_2020_2025.zip)"
-        required: true
+        description: "Data zip at repo root (optional)"
+        required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "CSV glob inside DATA_DIR (fallback: *.csv)"
+        description: "CSV glob inside data zip (optional; recursive)"
         required: false
         default: "*ETHUSDT*1min*2020*2025*.csv"
       PYVER:
@@ -30,113 +30,123 @@ jobs:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
-      PYVER: ${{ github.event.inputs.PYVER || '3.11' }}
-      TRADE_ZIP: ${{ github.event.inputs.TRADE_ZIP }}
-      DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
-      CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+      OMP_NUM_THREADS: 2
+      OPENBLAS_NUM_THREADS: 2
+      MKL_NUM_THREADS: 2
+      NUMEXPR_NUM_THREADS: 2
 
     steps:
-      - name: Checkout (pinned SHA)
+      # ----- 必須: 리포 체크아웃 (핀고정 SHA) -----
+      - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
-      - name: Create working dirs
+      # ----- Python 세팅 (핀고정 SHA) -----
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ github.event.inputs.PYVER || '3.11' }}
+          cache: pip
+          update-environment: true
+
+      # ----- 작업 디렉터리 준비 + zip 존재 확인 -----
+      - name: Prepare workspace
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          # 입력값(있으면) 우선, 없으면 기본값
+          TRADE_ZIP="${{ github.event.inputs.TRADE_ZIP || 'trade_v1.0.7.zip' }}"
+          DATA_ZIP="${{ github.event.inputs.DATA_ZIP  || 'ETHUSDT_1min_2020_2025.zip' }}"
+          test -f "${TRADE_ZIP}" || { echo "❌ code zip not found: ${TRADE_ZIP}"; exit 1; }
+          test -f "${DATA_ZIP}"  || { echo "❌ data zip not found: ${DATA_ZIP}";  exit 1; }
 
-      - name: Unpack code and data
+          echo "✓ Found zips:"
+          ls -al "${TRADE_ZIP}" "${DATA_ZIP}"
+
+          # 풀기
+          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
+          unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
+
+          echo "—— code tree ——";  ls -al "${RUN_DIR}" | sed -n '1,120p'
+          echo "—— data tree ——";  find "${DATA_DIR}" -maxdepth 2 -type f | sed -n '1,120p'
+
+      # ----- CSV 자동 탐지(재귀) + 절대경로 export -----
+      - name: Detect CSV & export CSV_PATH
+        id: detect_csv
         shell: bash
         run: |
           set -euo pipefail
-          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP} at repo root"; exit 1; }
-          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP} at repo root";  exit 1; }
-          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
-          unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
-          echo "Repo root:"; ls -al . | sed -n '1,80p'
-          echo "RUN_DIR:"; ls -al "${RUN_DIR}" | sed -n '1,80p'
-          echo "DATA_DIR:"; ls -al "${DATA_DIR}" | sed -n '1,80p'
+          CSV_GLOB_IN="${{ github.event.inputs.CSV_GLOB || '*ETHUSDT*1min*2020*2025*.csv' }}"
 
-      - name: Setup Python (pinned SHA)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: pip
-          cache-dependency-path: ${{ env.RUN_DIR }}/requirements.txt
+          PY='import os,glob,sys
+base=os.environ["DATA_DIR"]
+pat=os.environ["CSV_GLOB_IN"]
+c=glob.glob(os.path.join(base,"**",pat), recursive=True)
+if not c:
+  c=glob.glob(os.path.join(base,"**","*.csv"), recursive=True)
+if not c:
+  print("❌ No CSV found under", base); sys.exit(1)
+print(os.path.abspath(c[0]))'
+          CSV_PATH="$(python3 - <<'PY'
+${PY}
+PY
+)"
+          echo "CSV_PATH=${CSV_PATH}" | tee -a "$GITHUB_ENV"
+          echo "✓ Using CSV_PATH=${CSV_PATH}"
 
+      # ----- Preflight: 필수 컬럼 점검 + 빠른 실패 메시지 -----
+      - name: Preflight CSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+import os, sys, pandas as pd
+p = os.environ.get("CSV_PATH")
+if not p or not os.path.exists(p):
+  print("❌ CSV_PATH missing or not exists:", p); sys.exit(1)
+df = pd.read_csv(p, nrows=2)
+need = {'open_time','open','high','low','close','volume'}
+miss = need - set(df.columns)
+if miss:
+  print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
+print("✅ Columns OK:", sorted(df.columns))
+PY
+
+      # ----- 의존성 설치 (requirements.txt 있으면 사용, 없으면 기본) -----
       - name: Install Python deps
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python3 -m pip install -U pip
+          python3 -m pip -q install -U pip
           if [ -f requirements.txt ]; then
-            python3 -m pip install -r requirements.txt
+            python3 -m pip -q install -r requirements.txt
           else
-            python3 -m pip install pandas numpy scikit-learn pyyaml
+            python3 -m pip -q install pandas numpy scikit-learn pyyaml
           fi
-          # smoke without heredoc (mobile copy safety)
-          python3 -c "import sklearn,sys; print('sklearn', sklearn.__version__, '| python', sys.version.split()[0])"
-
-      - name: Detect CSV & export absolute CSV_PATH
-        shell: bash
-        env:
-          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
-        run: |
-          set -euo pipefail
-          CANDIDATE="$(ls ${DATA_DIR}/${CSV_GLOB_IN:-*.csv} 2>/dev/null || true)"
-          if [ -z "${CANDIDATE}" ]; then
-            CANDIDATE="$(ls ${DATA_DIR}/*.csv 2>/dev/null || true)"
-          fi
-          if [ -z "${CANDIDATE}" ]; then
-            echo "❌ No CSV found in ${DATA_DIR}"
-            exit 1
-          fi
-          ABS="$(python3 - "$CANDIDATE" <<'PY'
-import os, sys
-print(os.path.abspath(sys.argv[1]))
-PY
-)"
-          echo "CSV_PATH=${ABS}" | tee -a "$GITHUB_ENV"
-          echo "Using CSV_PATH=${ABS}"
-
-      - name: Preflight CSV
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - "$CSV_PATH" <<'PY'
-import os, sys, pandas as pd
-p = sys.argv[1] if len(sys.argv)>1 else os.environ.get("CSV_PATH")
-if not p or not os.path.exists(p):
-    print("❌ CSV_PATH missing or not exists:", p); sys.exit(1)
-df = pd.read_csv(p, nrows=2)
-need = {'open_time','open','high','low','close','volume'}
-miss = need - set(df.columns)
-if miss:
-    print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
-print("✅ Columns OK:", sorted(df.columns))
+          python3 - <<'PY'
+import sklearn, sys
+print("sklearn", sklearn.__version__, "| python", sys.version.split()[0])
 PY
 
+      # ----- 백테스트 실행 -----
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         env:
           CSV_PATH: ${{ env.CSV_PATH }}
-          OUT_DIR: ${{ env.OUT_DIR }}
+          OUT_DIR:  ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
           python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
-          echo "---- gating debug (head) ----"
-          if [ -f "${OUT_DIR}/gating_debug.json" ]; then
-            head -n 60 "${OUT_DIR}/gating_debug.json" || true
-          else
-            echo "{}" > "${OUT_DIR}/gating_debug.json"
-          fi
+          echo "—— gating debug (head) ——"
+          if [ -f "${OUT_DIR}/gating_debug.json" ]; then head -n 60 "${OUT_DIR}/gating_debug.json"; else echo "{}"; fi
+          echo "—— out dir ——"
           ls -al "${OUT_DIR}"
 
-      - name: Upload artifacts (pinned SHA)
-        if: always()
-        uses: actions/upload-artifact@5d5d22a312ec9e3392b8f3b6ab969111fde1ecb4
+      # ----- 아티팩트 업로드 (핀고정 SHA) -----
+      - name: Upload artifacts (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest-output
           path: |
@@ -144,4 +154,5 @@ PY
             ${{ env.OUT_DIR }}/gating_debug.json
             ${{ env.OUT_DIR }}/preds_test.csv
             ${{ env.OUT_DIR }}/trades.csv
-            ${{ env.OUT_DIR }}/charts/
+          if-no-files-found: warn
+          retention-days: 30
