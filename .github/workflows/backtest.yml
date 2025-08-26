@@ -4,21 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       TRADE_ZIP:
-        description: Code zip at repo root
+        description: "Code zip at repo root (e.g., trade_v1.0.7.zip)"
         required: true
-        default: trade_v1.0.7.zip
+        default: "trade_v1.0.7.zip"
       DATA_ZIP:
-        description: Data zip at repo root
+        description: "Data zip at repo root (e.g., ETHUSDT_1min_2020_2025.zip)"
         required: true
-        default: ETHUSDT_1min_2020_2025.zip
+        default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: CSV glob pattern inside data zip folder
-        required: true
+        description: "CSV glob inside DATA_DIR (fallback: *.csv)"
+        required: false
         default: "*ETHUSDT*1min*2020*2025*.csv"
       PYVER:
-        description: Python version
-        required: true
+        description: "Python version"
+        required: false
         default: "3.11"
+
+permissions:
+  contents: read
 
 jobs:
   run-backtest:
@@ -27,42 +30,41 @@ jobs:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
-      OMP_NUM_THREADS: 2
-      OPENBLAS_NUM_THREADS: 2
-      MKL_NUM_THREADS: 2
-      NUMEXPR_NUM_THREADS: 2
+      PYVER: ${{ github.event.inputs.PYVER || '3.11' }}
+      TRADE_ZIP: ${{ github.event.inputs.TRADE_ZIP }}
+      DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
+      CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
 
     steps:
       - name: Checkout (pinned SHA)
         uses: actions/checkout@b4ffde65f46336ab0f6b50b3e0e66170ea7b5f59
 
-      - name: Ensure dirs
+      - name: Create working dirs
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-      - name: Unpack code & data
+      - name: Unpack code and data
         shell: bash
         run: |
           set -euo pipefail
-          unzip -q "${{ github.workspace }}/${{ github.event.inputs.TRADE_ZIP }}" -d "${RUN_DIR}"
-          unzip -q "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}"  -d "${DATA_DIR}"
-          echo "---- RUN_DIR ----"
-          ls -al "${RUN_DIR}" | sed -n '1,120p'
-          echo "---- DATA_DIR ----"
-          ls -al "${DATA_DIR}" | sed -n '1,120p'
+          test -f "${TRADE_ZIP}" || { echo "❌ missing ${TRADE_ZIP} at repo root"; exit 1; }
+          test -f "${DATA_ZIP}"  || { echo "❌ missing ${DATA_ZIP} at repo root";  exit 1; }
+          unzip -q "${TRADE_ZIP}" -d "${RUN_DIR}"
+          unzip -q "${DATA_ZIP}"  -d "${DATA_DIR}"
+          echo "Repo root:"; ls -al . | sed -n '1,80p'
+          echo "RUN_DIR:"; ls -al "${RUN_DIR}" | sed -n '1,80p'
+          echo "DATA_DIR:"; ls -al "${DATA_DIR}" | sed -n '1,80p'
 
-      - name: Setup Python (pinned SHA; after unzip so cache path exists)
+      - name: Setup Python (pinned SHA)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ github.event.inputs.PYVER }}
+          python-version: ${{ env.PYVER }}
           cache: pip
-          cache-dependency-path: |
-            ${{ env.RUN_DIR }}/requirements.txt
-            **/pyproject.toml
+          cache-dependency-path: ${{ env.RUN_DIR }}/requirements.txt
 
-      - name: Install dependencies (graceful if no requirements.txt)
+      - name: Install Python deps
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
@@ -73,10 +75,8 @@ jobs:
           else
             python3 -m pip install pandas numpy scikit-learn pyyaml
           fi
-          python3 - <<'PY'
-import sklearn, pandas, yaml, sys
-print("sklearn", sklearn.__version__, "| python", sys.version.split()[0])
-PY
+          # smoke without heredoc (mobile copy safety)
+          python3 -c "import sklearn,sys; print('sklearn', sklearn.__version__, '| python', sys.version.split()[0])"
 
       - name: Detect CSV & export absolute CSV_PATH
         shell: bash
@@ -84,25 +84,28 @@ PY
           CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          CANDIDATE="$(ls ${DATA_DIR}/${CSV_GLOB_IN} 2>/dev/null | head -n 1 || true)"
+          CANDIDATE="$(ls ${DATA_DIR}/${CSV_GLOB_IN:-*.csv} 2>/dev/null || true)"
           if [ -z "${CANDIDATE}" ]; then
-            CANDIDATE="$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n 1 || true)"
+            CANDIDATE="$(ls ${DATA_DIR}/*.csv 2>/dev/null || true)"
           fi
           if [ -z "${CANDIDATE}" ]; then
-            echo "❌ No CSV found in ${DATA_DIR}" >&2
+            echo "❌ No CSV found in ${DATA_DIR}"
             exit 1
           fi
-          ABS="$(python3 -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$CANDIDATE")"
+          ABS="$(python3 - "$CANDIDATE" <<'PY'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY
+)"
           echo "CSV_PATH=${ABS}" | tee -a "$GITHUB_ENV"
           echo "Using CSV_PATH=${ABS}"
 
-      - name: Preflight CSV (columns check)
+      - name: Preflight CSV
         shell: bash
         run: |
           set -euo pipefail
           python3 - "$CSV_PATH" <<'PY'
-import os, sys
-import pandas as pd
+import os, sys, pandas as pd
 p = sys.argv[1] if len(sys.argv)>1 else os.environ.get("CSV_PATH")
 if not p or not os.path.exists(p):
     print("❌ CSV_PATH missing or not exists:", p); sys.exit(1)
@@ -118,22 +121,22 @@ PY
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         env:
-          OUT_DIR_ABS: ${{ github.workspace }}/${{ env.OUT_DIR }}
+          CSV_PATH: ${{ env.CSV_PATH }}
+          OUT_DIR: ${{ env.OUT_DIR }}
         run: |
           set -euo pipefail
-          python3 -V
-          python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR_ABS}"
+          python3 run_4u.py --data_path "${CSV_PATH}" --out_dir "${OUT_DIR}"
           echo "---- gating debug (head) ----"
-          if [ -f "${OUT_DIR_ABS}/gating_debug.json" ]; then
-            head -n 60 "${OUT_DIR_ABS}/gating_debug.json" || true
+          if [ -f "${OUT_DIR}/gating_debug.json" ]; then
+            head -n 60 "${OUT_DIR}/gating_debug.json" || true
           else
-            echo "{}" > "${OUT_DIR_ABS}/gating_debug.json"
+            echo "{}" > "${OUT_DIR}/gating_debug.json"
           fi
-          ls -al "${OUT_DIR_ABS}"
+          ls -al "${OUT_DIR}"
 
       - name: Upload artifacts (pinned SHA)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@5d5d22a312ec9e3392b8f3b6ab969111fde1ecb4
         with:
           name: backtest-output
           path: |
