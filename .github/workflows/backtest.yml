@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.2)
+name: Backtest v1.0.8 (Checklist1.3)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1.2)
+      - name: Validate pinned SHAs (Checklist1.3)
         run: |
           set -euo pipefail
           verify() {
@@ -69,18 +69,16 @@ jobs:
       - name: Inspect code.zip for duplicates (warn-only)
         run: |
           set -euo pipefail
-          echo "Listing duplicates in code.zip (if any)…"
           dups=$(unzip -Z1 tmp/code.zip | sort | uniq -d || true)
           if [ -n "$dups" ]; then
-            echo "::warning title=ZipDuplicate::Duplicate paths detected in code.zip"; printf '%s\n' "$dups"
+            echo "::warning title=ZipDuplicate::Duplicate paths detected in code.zip"
+            printf '%s\n' "$dups"
           fi
 
       - name: Unzip packs (non-interactive, flatten)
         run: |
           set -euo pipefail
-          # Non-interactive unzip: -o (overwrite) + -q (quiet)
           unzip -oq tmp/code.zip -d tmp/trade_raw
-          # Flatten single top-level folder → tmp/trade
           shopt -s nullglob dotglob
           if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && \
              [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
@@ -89,7 +87,6 @@ jobs:
             mv tmp/trade_raw/* tmp/trade/ 2>/dev/null || true
           fi
           unzip -oq tmp/data.zip -d tmp/data
-
           echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
           echo "Top files:"; ls -al tmp/trade | sed -n '1,120p'
 
@@ -101,32 +98,39 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
-      - name: Write preflight + shim + runners
+      # ===== File writers are split into dedicated steps with unique tokens =====
+      - name: Write preflight_csv.py
         run: |
           set -euo pipefail
-          cat > scripts/preflight_csv.py << 'PY'
+          cat <<'PY_A' > scripts/preflight_csv.py
           #!/usr/bin/env python3
           import sys, json, os, glob, pandas as pd
           root = sys.argv[1] if len(sys.argv)>1 else "tmp/data"
           csv_glob = os.environ.get("CSV_GLOB","**/*.csv")
           matches = sorted(glob.glob(os.path.join(root, csv_glob), recursive=True))
-          if not matches: matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
+          if not matches:
+              matches = sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
           out = {"glob": csv_glob, "found": matches[:10]}
-          if not matches: print(json.dumps(out, ensure_ascii=True)); sys.exit(0)
+          if not matches:
+              print(json.dumps(out, ensure_ascii=True)); sys.exit(0)
           path = matches[0]
           try:
-            df = pd.read_csv(path, nrows=2)
-            need = ["open_time","open","high","low","close","volume"]
-            out["sample_path"]=path; out["columns"]=df.columns.tolist()
-            out["missing"]=[c for c in need if c not in df.columns]
+              df = pd.read_csv(path, nrows=2)
+              need = ["open_time","open","high","low","close","volume"]
+              out["sample_path"]=path
+              out["columns"]=df.columns.tolist()
+              out["missing"]=[c for c in need if c not in df.columns]
           except Exception as e:
-            out["error"]=str(e)
+              out["error"]=str(e)
           print(json.dumps(out, ensure_ascii=True))
           with open("CSV_PATH.txt","w", encoding="utf-8") as f: f.write(path)
-          PY
+          PY_A
           chmod +x scripts/preflight_csv.py
 
-          cat > scripts/make_empty_artifacts.py << 'PY'
+      - name: Write make_empty_artifacts.py
+        run: |
+          set -euo pipefail
+          cat <<'PY_B' > scripts/make_empty_artifacts.py
           #!/usr/bin/env python3
           import pathlib
           base = pathlib.Path("_out_4u/run"); base.mkdir(parents=True, exist_ok=True)
@@ -135,43 +139,61 @@ jobs:
           (pathlib.Path("_out_4u")/"preds_test.csv").write_text("", encoding="utf-8")
           (pathlib.Path("_out_4u")/"trades.csv").write_text("", encoding="utf-8")
           print("Empty artifacts created")
-          PY
+          PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-          cat > scripts/entrypoint_run.sh << 'SH'
+      - name: Write entrypoint_run.sh
+        run: |
+          set -euo pipefail
+          cat <<'SH_A' > scripts/entrypoint_run.sh
           #!/usr/bin/env bash
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE/tmp/trade"
           cd "$GITHUB_WORKSPACE"
           CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
-          if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then CSV_PATH="$(cat scripts/CSV_PATH.txt)"; fi
-          if [ -z "${CSV_PATH:-}" ]; then CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"; fi
+          if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then
+            CSV_PATH="$(cat scripts/CSV_PATH.txt)"
+          fi
+          if [ -z "${CSV_PATH:-}" ]; then
+            CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
+          fi
           echo "Using CSV: ${CSV_PATH:-<none>}"
           export CSV_PATH="$CSV_PATH"
           export PYTHONPATH="$ROOT:$ROOT/backtest:$PYTHONPATH"
-          mkdir -p "_out_4u/run"; cd "$ROOT"
+          mkdir -p "_out_4u/run"
+          cd "$ROOT"
           CFG="conf/config.yml"
           try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
           try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
           try python run_4u.py "$CSV_PATH" && exit 0
-          if [ -f "backtest/run_4u.py" ]; then try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0; fi
-          python - << 'PY' && python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
-          import importlib, sys; sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
-          PY
+          if [ -f "backtest/run_4u.py" ]; then
+            try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          fi
+          python - << 'PY_INNER'
+          import importlib, sys
+          sys.exit(0 if importlib.util.find_spec("backtest.runner") else 1)
+          PY_INNER
+          try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
           echo "::warning::Entrypoint attempts failed; writing empty artifacts"
-          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"; exit 0
-          SH
+          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"
+          exit 0
+          SH_A
           chmod +x scripts/entrypoint_run.sh
 
+      - name: Write shim run_4u.py (only if missing)
+        run: |
+          set -euo pipefail
           if [ ! -f tmp/trade/run_4u.py ]; then
-            cat > tmp/trade/run_4u.py << 'PY'
+            mkdir -p tmp/trade
+            cat <<'PY_SHIM' > tmp/trade/run_4u.py
             import os, sys
             def main():
                 csv = os.environ.get("CSV_PATH") or (sys.argv[1] if len(sys.argv)>1 else None)
                 cfg = "conf/config.yml"
-                if not csv: print("[shim] CSV_PATH not provided"); return 3
+                if not csv:
+                    print("[shim] CSV_PATH not provided"); return 3
                 try:
                     from backtest.runner import run_backtest
                 except Exception as e:
@@ -179,11 +201,15 @@ jobs:
                 try:
                     _ = run_backtest(data_path=csv, config_path=cfg)
                 except TypeError:
-                    try: _ = run_backtest(csv, cfg)
-                    except Exception as e: print(f"[shim] run_backtest failed: {e}"); return 4
+                    try:
+                        _ = run_backtest(csv, cfg)
+                    except Exception as e:
+                        print(f"[shim] run_backtest failed: {e}"); return 4
                 return 0
-            if __name__ == "__main__": sys.exit(main())
-            PY
+            if __name__ == "__main__":
+                sys.exit(main())
+            PY_SHIM
+            chmod +x tmp/trade/run_4u.py
           fi
 
       - name: Preflight data (warn-only)
