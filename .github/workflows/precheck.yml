@@ -1,4 +1,4 @@
-name: Backtest (v1.0.8)
+name: Precheck CSV (v1.0.8)
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +15,7 @@ on:
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
 jobs:
-  run:
+  preflight:
     runs-on: ubuntu-latest
     env:
       RUN_DIR: tmp/trade
@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$RUN_DIR" "$DATA_DIR" "$OUT_DIR" || true
+          rm -rf "$RUN_DIR" "$DATA_DIR" || true
           mkdir -p "$RUN_DIR" "$DATA_DIR" "$OUT_DIR"
           [ -f "${{ github.event.inputs.CODE_ZIP }}" ] && unzip -q "${{ github.event.inputs.CODE_ZIP }}" -d "$RUN_DIR" || true
           [ -f "${{ github.event.inputs.DATA_ZIP }}" ] && unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d "$DATA_DIR" || true
@@ -45,6 +45,7 @@ jobs:
           python -m pip install -U pip
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; else python -m pip install pandas numpy scikit-learn pyyaml; fi
       - name: Detect CSV & export CSV_PATH
+        id: detect_csv
         shell: bash
         run: |
           set -euo pipefail
@@ -53,21 +54,29 @@ jobs:
           if [ -z "$CANDIDATE" ]; then echo "::error::CSV탐지 실패 (CSV_GLOB, **/*.csv 모두 실패)"; exit 1; fi
           ABS="$(python -c 'import os,sys;print(os.path.abspath(sys.argv[1]))' "$CANDIDATE")"
           echo "CSV_PATH=$ABS" >> "$GITHUB_ENV"; echo "Using CSV_PATH=$ABS"
-      - name: Run backtest
+      - name: Preflight columns
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python run_4u.py --data_path "${{ env.CSV_PATH }}" --config "conf/config.yml" --out_dir "${{ env.OUT_DIR }}"
-          echo "---- gating debug (head) ----"
-          if [ -f "${{ env.OUT_DIR }}/gating_debug.json" ]; then head -n 60 "${{ env.OUT_DIR }}/gating_debug.json" || true; fi
-          ls -al "${{ env.OUT_DIR }}" || true
-      - name: Upload artifacts (pinned)
+          python - <<'PY'
+          import os,sys,pandas as pd
+          p=os.environ.get("CSV_PATH")
+          assert p and os.path.exists(p), f"CSV_PATH missing or not exists: {p}"
+          df=pd.read_csv(p, nrows=2)
+          need={'open_time','open','high','low','close','volume'}
+          miss=need-set(map(str.lower, df.columns))
+          if miss:
+              print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
+          print("✅ Columns OK")
+          PY
+      - name: Emit gating_debug stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"; echo "{{}}" > "$OUT_DIR/gating_debug.json"
+      - name: Upload precheck stubs
         uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
-          name: backtest-output
+          name: precheck-output
           path: |
-            ${{ env.OUT_DIR }}/summary.json
             ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/preds_test.csv
-            ${{ env.OUT_DIR }}/trades.csv
