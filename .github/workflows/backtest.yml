@@ -3,19 +3,19 @@ name: Backtest
 on:
   workflow_dispatch:
     inputs:
-      trade_zip:
-        description: Trade code zip (in repo root)
+      TRADE_ZIP:
+        description: Code zip at repo root
         required: true
         default: "trade_v1.0.7_full.zip"
-      data_zip:
-        description: Data zip (in repo root)
+      DATA_ZIP:
+        description: Data zip at repo root
         required: true
         default: "ETHUSDT_1min_2020_2025.zip"
-      csv_glob:
-        description: CSV glob inside data zip
+      CSV_GLOB:
+        description: CSV glob inside DATA_DIR
         required: true
         default: "*ETHUSDT*1min*2020*2025*.csv"
-      out_dir:
+      OUT_DIR:
         description: Output directory
         required: true
         default: "_out_4u/run"
@@ -23,20 +23,19 @@ on:
 jobs:
   run-backtest:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: { contents: read }
 
     env:
       REPO_DIR: repo
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
-      OUT_DIR: ${{ inputs.out_dir }}
-      TRADE_ZIP: ${{ inputs.trade_zip }}
-      DATA_ZIP: ${{ inputs.data_zip }}
-      CSV_GLOB: ${{ inputs.csv_glob }}
+      OUT_DIR: ${{ inputs.OUT_DIR }}
+      TRADE_ZIP: ${{ inputs.TRADE_ZIP }}
+      DATA_ZIP: ${{ inputs.DATA_ZIP }}
+      CSV_GLOB: ${{ inputs.CSV_GLOB }}
 
     steps:
-      # --- Manual checkout (policy-safe; no actions/checkout) ---
+      # — Manual checkout (조직 정책: checkout 액션 금지시)
       - name: Manual checkout (policy-safe)
         shell: bash
         run: |
@@ -46,10 +45,10 @@ jobs:
           git -C "$REPO_DIR" remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           git -C "$REPO_DIR" fetch --depth 1 origin "${GITHUB_SHA:-${GITHUB_REF##*/}}"
           git -C "$REPO_DIR" checkout -q FETCH_HEAD
-          echo "Checked out:" && git -C "$REPO_DIR" rev-parse --short HEAD
+          git -C "$REPO_DIR" rev-parse --short HEAD
           ls -al "$REPO_DIR"
 
-      # --- Unzip code & data; verify required files exist ---
+      # — Unzip code & data; 필수파일 검증
       - name: Unpack zips and verify structure
         shell: bash
         run: |
@@ -61,14 +60,13 @@ jobs:
           unzip -q "$DATA_ZIP"  -d "$DATA_DIR"
           echo "== trade tree =="; ls -al "$RUN_DIR"
           echo "== data tree =="; ls -al "$DATA_DIR"
-          # required files
-          test -f "$RUN_DIR/requirements.txt" || { echo "❌ requirements.txt missing in ${RUN_DIR}"; exit 1; }
-          test -f "$RUN_DIR/run_4u.py"        || { echo "❌ run_4u.py missing in ${RUN_DIR}"; exit 1; }
-          test -f "$RUN_DIR/backtest/engine.py" || { echo "❌ backtest/engine.py missing"; exit 1; }
+          test -f "$RUN_DIR/requirements.txt"    || { echo "❌ requirements.txt missing"; exit 1; }
+          test -f "$RUN_DIR/run_4u.py"           || { echo "❌ run_4u.py missing"; exit 1; }
+          test -f "$RUN_DIR/backtest/engine.py"  || { echo "❌ backtest/engine.py missing"; exit 1; }
           test -f "$RUN_DIR/conf/config.yml"     || { echo "❌ conf/config.yml missing"; exit 1; }
 
-      # --- Setup Python AFTER unzip; pin commit; cache points to real path ---
-      - name: Setup Python (pinned; cache on real path)
+      # — Python 설치 (requirements 경로로 캐시 고정)
+      - name: Setup Python (pinned; cache path = tmp/trade/requirements.txt)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
@@ -78,7 +76,6 @@ jobs:
           allow-prereleases: false
           update-environment: true
 
-      # --- Install deps ---
       - name: Install requirements
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -96,21 +93,20 @@ jobs:
                 "| py", sys.version.split()[0])
           PY
 
-      # --- sklearn 1.4/1.5 family smoke (estimator vs base_estimator) ---
+      # — sklearn 1.4/1.5 호환 스모크
       - name: sklearn smoke (1.4/1.5 호환)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           python - <<'PY'
-          import inspect
+          import inspect, sklearn
           from sklearn.calibration import CalibratedClassifierCV as C
-          from sklearn.linear_model import LogisticRegression as L
-          params = set(getattr(inspect.signature(C), 'parameters', {}).keys())
-          print("sklearn", __import__('sklearn').__version__, "| C param:", "estimator" if 'estimator' in params else "base_estimator")
+          p=set(getattr(__import__('inspect').signature(C),'parameters',{}).keys())
+          print("sklearn", sklearn.__version__, "| C param:", "estimator" if 'estimator' in p else "base_estimator")
           PY
 
-      # --- CSV preflight (path + base columns) ---
+      # — CSV 프리플라이트
       - name: Preflight CSV
         shell: bash
         run: |
@@ -131,7 +127,7 @@ jobs:
           PY
           echo "CSV_PATH=${CSV_PATH}" >> $GITHUB_ENV
 
-      # --- Run backtest ---
+      # — 백테스트 실행
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -143,7 +139,7 @@ jobs:
           head -n 60 "${OUT_DIR}/gating_debug.json" || true
           ls -al "${OUT_DIR}"
 
-      # --- Upload artifacts (pinned SHA) ---
+      # — 아티팩트 업로드 (SHA pinned)
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
