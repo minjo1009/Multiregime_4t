@@ -22,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-
     env:
       REPO_DIR: repo
       RUN_DIR: tmp/trade
@@ -35,23 +34,15 @@ jobs:
       NUMEXPR_NUM_THREADS: "2"
 
     steps:
-      # ---------- 입력 검증(대문자 키) ----------
       - name: Validate dispatch inputs
         shell: bash
         run: |
           set -euo pipefail
-          bad=0
-          for k in TRADE_ZIP DATA_ZIP CSV_GLOB OUT_DIR; do
-            v="${{ inputs.TRADE_ZIP }}"
-            : # noop (GH 제한 회피용)
-          done
-          [ -n "${{ inputs.TRADE_ZIP }}" ] || { echo "❌ TRADE_ZIP empty"; bad=1; }
-          [ -n "${{ inputs.DATA_ZIP }}" ]  || { echo "❌ DATA_ZIP empty"; bad=1; }
-          [ -n "${{ inputs.CSV_GLOB }}" ]  || { echo "❌ CSV_GLOB empty"; bad=1; }
-          [ -n "${{ inputs.OUT_DIR }}" ]   || { echo "❌ OUT_DIR empty"; bad=1; }
-          [ $bad -eq 0 ] || exit 1
+          [ -n "${{ inputs.TRADE_ZIP }}" ] || { echo "TRADE_ZIP empty"; exit 1; }
+          [ -n "${{ inputs.DATA_ZIP }}" ]  || { echo "DATA_ZIP empty"; exit 1; }
+          [ -n "${{ inputs.CSV_GLOB }}" ]  || { echo "CSV_GLOB empty"; exit 1; }
+          [ -n "${{ inputs.OUT_DIR }}" ]   || { echo "OUT_DIR empty"; exit 1; }
 
-      # ---------- 자체 체크아웃(액션 불필요) ----------
       - name: Self-checkout repository (no actions/checkout)
         shell: bash
         env:
@@ -66,31 +57,27 @@ jobs:
           git checkout -q FETCH_HEAD
           ls -al
 
-      # ---------- 작업 폴더 준비 ----------
-      - name: Prepare run/data/out directories
+      - name: Prepare directories
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
 
-      # ---------- 코드/데이터 ZIP 전개 ----------
       - name: Inflate code & data
         shell: bash
         run: |
           set -euo pipefail
           CODE_ZIP="${{ inputs.TRADE_ZIP }}"
           DATA_ZIP="${{ inputs.DATA_ZIP }}"
-          test -f "${REPO_DIR}/${CODE_ZIP}" || { echo "❌ Code zip not found: ${REPO_DIR}/${CODE_ZIP}"; exit 1; }
-          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "❌ Data zip not found: ${REPO_DIR}/${DATA_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${CODE_ZIP}" || { echo "Code zip not found: ${REPO_DIR}/${CODE_ZIP}"; exit 1; }
+          test -f "${REPO_DIR}/${DATA_ZIP}" || { echo "Data zip not found: ${REPO_DIR}/${DATA_ZIP}"; exit 1; }
           unzip -q "${REPO_DIR}/${CODE_ZIP}" -d "${RUN_DIR}"
           unzip -q "${REPO_DIR}/${DATA_ZIP}" -d "${DATA_DIR}"
-          echo "✅ Unzipped."
-          echo "RUN_DIR tree (top):"; ls -al "${RUN_DIR}" | head -n 50
-          echo "DATA_DIR csv candidates:"; ls -1 "${DATA_DIR}"/*.csv 2>/dev/null | head -n 5 || true
+          ls -al "${RUN_DIR}" | head -n 50
+          ls -1 "${DATA_DIR}"/*.csv 2>/dev/null | head -n 5 || true
 
-      # ---------- Preflight CSV (환경변수 export + 영속화) ----------
-      - name: Preflight CSV
+      - name: Preflight CSV (robust; no heredoc execution)
         shell: bash
         env:
           CSV_GLOB_IN: ${{ inputs.CSV_GLOB }}
@@ -98,26 +85,23 @@ jobs:
           set -euo pipefail
           CSV_PATH="$(ls ${DATA_DIR}/${CSV_GLOB_IN} 2>/dev/null | head -n1 || true)"
           [ -n "$CSV_PATH" ] || CSV_PATH="$(ls ${DATA_DIR}/*.csv 2>/dev/null | head -n1 || true)"
-          [ -n "$CSV_PATH" ] || { echo "❌ No CSV found under ${DATA_DIR}"; exit 1; }
+          [ -n "$CSV_PATH" ] || { echo "No CSV found under ${DATA_DIR}"; exit 1; }
           echo "Using CSV_PATH=${CSV_PATH}"
-          export CSV_PATH
-
-          python - <<'PY'
-import os, sys
-import pandas as pd
-p=os.environ.get('CSV_PATH')
-if not p: print("❌ CSV_PATH missing"); sys.exit(1)
+          echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
+          cat > preflight.py <<'PY'
+import os, sys, pandas as pd
+p=os.environ.get("CSV_PATH")
+if not p:
+    print("CSV_PATH missing"); sys.exit(1)
 df=pd.read_csv(p, nrows=2)
 need={'open_time','open','high','low','close','volume'}
 miss=need - set(df.columns)
 if miss:
-    print("❌ Missing base columns:", sorted(miss)); sys.exit(1)
-print("✅ Columns OK:", sorted(df.columns))
+    print("Missing base columns:", sorted(miss)); sys.exit(1)
+print("Columns OK:", sorted(df.columns))
 PY
+          python3 preflight.py
 
-          echo "CSV_PATH=${CSV_PATH}" >> "$GITHUB_ENV"
-
-      # ---------- 파이썬 준비(요구사항 있으면 설치, 없으면 스킵) ----------
       - name: Install Python deps (optional)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -126,30 +110,24 @@ PY
           python3 -V
           python3 -m pip -q install -U pip
           if [ -f requirements.txt ]; then
-            echo "Found requirements.txt -> installing"
             python3 -m pip install -r requirements.txt
           else
-            echo "No requirements.txt -> installing minimum runtime"
             python3 -m pip install -q pyyaml pandas numpy scikit-learn
           fi
-          python3 - <<'PY'
-import sklearn, sys
-print("sklearn", sklearn.__version__, "| py", sys.version)
+          cat > smoke.py <<'PY'
+import sys, sklearn, inspect
 from sklearn.calibration import CalibratedClassifierCV as C
-import inspect
-params = set(inspect.signature(C).parameters)
-print("CalibratedClassifierCV param set:", sorted(params)[:5], "...(len=%d)"%len(params))
+print("sklearn", sklearn.__version__, "| py", sys.version.split()[0])
+print("C params has 'estimator'?","estimator" in set(inspect.signature(C).parameters))
 PY
+          python3 smoke.py
 
-      # ---------- 실행 전 파일 구조 확인 ----------
       - name: Sanity check run files
         shell: bash
         run: |
           set -euo pipefail
-          ls -al "${RUN_DIR}" | sed -n '1,120p'
-          test -f "${RUN_DIR}/run_4u.py" || { echo "❌ run_4u.py missing in ${RUN_DIR}"; exit 1; }
+          test -f "${RUN_DIR}/run_4u.py" || { echo "run_4u.py missing"; exit 1; }
 
-      # ---------- 백테스트 실행 ----------
       - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -165,7 +143,6 @@ PY
           fi
           ls -al "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      # ---------- 아티팩트 업로드(핀 SHA) ----------
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
