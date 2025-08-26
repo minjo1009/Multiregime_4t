@@ -27,10 +27,17 @@ jobs:
           verify() {
             repo="$1"
             sha="$2"
+            # 40-hex quick check
+            if ! echo "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error title=PinFormat::${repo}@${sha} is not a 40-hex SHA"
+              exit 1
+            fi
+            # 1) commit existence
             if ! git ls-remote "https://github.com/${repo}.git" "${sha}" | grep -q "^${sha}"; then
               echo "::error title=PinNotFound::${repo}@${sha} not found via ls-remote"
               exit 1
             fi
+            # 2) tarball HEAD check (2xx/3xx ok)
             code=$(curl -s -o /dev/null -w "%{http_code}" -I -L "https://api.github.com/repos/${repo}/tarball/${sha}" || true)
             case "$code" in
               2*|3*) : ;;
@@ -39,7 +46,7 @@ jobs:
           }
           verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
           verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
-          verify actions/upload-artifact ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -154,7 +161,7 @@ jobs:
           if [ -z "${CSV_PATH:-}" ] && [ -f "scripts/CSV_PATH.txt" ]; then
             CSV_PATH="$(cat scripts/CSV_PATH.txt)"
           fi
-          if [ -z "${CSV_PATH:-}" ]; then
+          if [ -z "${CSV_PATH:-}" ] ; then
             CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
           fi
           echo "Using CSV: ${CSV_PATH:-<none>}"
@@ -232,7 +239,7 @@ jobs:
           ls -al _out_4u/run || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest_v1.0.8_outputs
           path: |
