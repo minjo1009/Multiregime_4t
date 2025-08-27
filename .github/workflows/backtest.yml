@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist2.3)
+name: Backtest v1.0.8 (Checklist2.3a)
 
 on:
   workflow_dispatch:
@@ -15,6 +15,10 @@ on:
         description: Glob for CSV inside data zip
         required: true
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      ALLOW_DEDUP:
+        description: "Deduplicate code.zip automatically if duplicate paths found"
+        required: false
+        default: "false"
 
 jobs:
   backtest:
@@ -25,7 +29,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
-      - name: Validate pinned SHAs (Checklist2.3)
+      - name: Validate pinned SHAs (Checklist2.3a)
         run: |
           set -euo pipefail
           verify() {
@@ -74,15 +78,25 @@ jobs:
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
 
-      - name: Inspect code.zip for duplicates (fail-fast)
+      - name: Inspect code.zip for duplicates (fail-fast or auto-dedupe)
         run: |
           set -euo pipefail
           dups=$(unzip -Z1 tmp/code.zip | sort | uniq -d || true)
           if [ -n "$dups" ]; then
             echo "$dups" | tee _out_4u/logs/zip_duplicates.txt
-            echo "::error title=ZipDuplicate::Duplicate paths detected in code.zip"
-            printf '%s\n' "$dups"
-            exit 1
+            echo "Duplicate paths detected in code.zip:"; printf '%s\n' "$dups"
+            if [ "${{ github.event.inputs.ALLOW_DEDUP }}" = "true" ]; then
+              echo "::warning::Auto-dedup enabled. Repacking code.zip…"
+              rm -rf tmp/code_src
+              mkdir -p tmp/code_src
+              unzip -oq tmp/code.zip -d tmp/code_src
+              (cd tmp/code_src && zip -qr -X ../code.fixed.zip .)
+              mv -f tmp/code.fixed.zip tmp/code.zip
+              echo "::notice::Dedup complete; proceeding with cleaned archive."
+            else
+              echo "::error title=ZipDuplicate::Please rebuild code.zip without duplicates (or rerun with ALLOW_DEDUP=true)"
+              exit 1
+            fi
           fi
 
       - name: Unzip packs (flatten) + sample csv list
@@ -266,7 +280,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist2.3) ---
+          # --- Injected Calibrator shim (Checklist2.3a) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
