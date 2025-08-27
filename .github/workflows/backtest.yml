@@ -36,7 +36,13 @@ jobs:
       - name: Validate pinned SHAs (Checklist2.3a)
         run: |
           set -euo pipefail
-          verify() { repo="$1"; sha="$2"; [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha} not 40-hex"; exit 1; }; url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"; code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true); [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }; }
+          verify() {
+            repo="$1"; sha="$2"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha} not 40-hex"; exit 1; }
+            url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"
+            code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
+            [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
+          }
           verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
           verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
           verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -50,7 +56,8 @@ jobs:
           python-version: '3.11'
 
       - name: Prepare OS deps
-        env: { DEBIAN_FRONTEND: noninteractive }
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -141,7 +148,7 @@ jobs:
           chmod +x scripts/*.py 2>/dev/null || true
           echo "Synced scripts:"; ls -al scripts || true
 
-      # === 변경 1: CSV 경로 파일을 항상 생성 (here-doc 제거) ===
+      # === CSV 경로 파일을 항상 생성 (here-doc 불사용) ===
       - name: Write CSV path (preflight)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
@@ -156,20 +163,26 @@ jobs:
           fi
           echo "Resolved CSV: $(cat scripts/CSV_PATH.txt)"
 
-      # === 변경 2: Verify도 here-doc 제거 ===
+      # === Verify: 작은 파이썬 파일로 저장 후 실행 (YAML 파서 안전) ===
       - name: Verify skeleton & import
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           CSV_PATH="$(cat scripts/CSV_PATH.txt)"; export CSV_PATH
-          python -c "import os,importlib,json; p=os.environ.get('CSV_PATH','').strip(); out={'csv_path':p,'csv_exists':os.path.isfile(p)}; mods=['backtest.runner','trend4p.calibration']; 
-for m in mods:
+          cat > scripts/_verify_import.py <<'PY'
+import os, importlib, json, sys
+p = os.environ.get("CSV_PATH","").strip()
+out = {"csv_path": p, "csv_exists": os.path.isfile(p)}
+for mod in ("backtest.runner","trend4p.calibration"):
     try:
-        mod=importlib.import_module(m); out[m]=getattr(mod,'__file__',None)
+        m = importlib.import_module(mod)
+        out[mod] = getattr(m, "__file__", None)
     except Exception as e:
-        out[m]=f'IMPORT_ERROR: {e}'
-print(json.dumps(out, ensure_ascii=False)); 
-import sys; sys.exit(0 if out['csv_exists'] else 3)"
+        out[mod] = f"IMPORT_ERROR: {e}"
+print(json.dumps(out, ensure_ascii=False))
+sys.exit(0 if out["csv_exists"] else 3)
+PY
+          python scripts/_verify_import.py
 
       - name: Engine compile triage & auto-fix
         continue-on-error: true
@@ -307,7 +320,8 @@ else:
 PY
 
       - name: Post analyze gating
-        env: { COVERAGE_GUARD: ${{ github.event.inputs.COVERAGE_GUARD }} }
+        env:
+          COVERAGE_GUARD: ${{ github.event.inputs.COVERAGE_GUARD }}
         run: |
           set -euo pipefail
           python -u scripts/post_analyze.py
