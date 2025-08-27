@@ -1,4 +1,4 @@
-name: Backtest v1.1.1 (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix)
+name: Backtest v1.1.3b (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix + CSV handshake fix)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: Code ZIP path (repo-relative or URL)
         required: true
-        default: trade_v1.1.1.zip
+        default: trade_v1.1.3b_execfix.zip
       DATA_ZIP:
         description: Data ZIP path (repo-relative or URL)
         required: true
@@ -152,113 +152,128 @@ jobs:
           chmod +x scripts/*.py 2>/dev/null || true
           echo "Synced scripts:"; ls -al scripts || true
 
+      # === 변경 1: CSV 경로 파일을 항상 생성 ===
       - name: Write CSV path (preflight)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
-          [ -f CSV_PATH.txt ] && mv CSV_PATH.txt scripts/CSV_PATH.txt || true
-          echo "Preflight path:"; cat scripts/CSV_PATH.txt || true
-          echo "Exists?"; [ -f "$(cat scripts/CSV_PATH.txt 2>/dev/null)" ] && echo yes || echo no
+          mkdir -p scripts _out_4u/run
+          python - <<'PY' > scripts/CSV_PATH.txt
+import os, glob
+ws = os.environ.get("GITHUB_WORKSPACE",".")
+pat = os.environ.get("CSV_GLOB","**/*.csv") or "**/*.csv"
+roots = [os.path.join(ws,"tmp","data")]
+cands = []
+for r in roots:
+    cands += sorted(glob.glob(os.path.join(r, pat), recursive=True))
+print(cands[0] if cands else "")
+PY
+          if [ ! -s scripts/CSV_PATH.txt ]; then
+            echo "::group::tmp/data tree"; find tmp/data -maxdepth 3 -type f -name '*.csv' -print || true; echo "::endgroup::"
+            echo "::error title=CSV::No CSV matched under tmp/data with pattern '${CSV_GLOB}'"
+            exit 3
+          fi
+          echo "Resolved CSV: $(cat scripts/CSV_PATH.txt)"
 
+      # === 변경 2: 생성된 CSV_PATH.txt 사용해 검증 ===
       - name: Verify skeleton & import
-        continue-on-error: true
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          CSV_PATH="$(cat scripts/CSV_PATH.txt)"
+          export CSV_PATH
           python - <<'PY'
-          import os, importlib, json
-          p=open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
-          out={"csv_path":p, "csv_exists": os.path.isfile(p)}
-          for mod in ["backtest.runner","trend4p.calibration"]:
-              try:
-                  m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)
-              except Exception as e:
-                  out[mod]=f"IMPORT_ERROR: {e}"
-          print(json.dumps(out, ensure_ascii=False))
-          if not out["csv_exists"]: raise SystemExit(3)
-          PY
+import os, importlib, json
+p = os.environ.get("CSV_PATH","").strip()
+out = {"csv_path": p, "csv_exists": os.path.isfile(p)}
+for mod in ["backtest.runner","trend4p.calibration"]:
+    try:
+        m = importlib.import_module(mod); out[mod] = getattr(m, "__file__", None)
+    except Exception as e:
+        out[mod] = f"IMPORT_ERROR: {e}"
+print(json.dumps(out, ensure_ascii=False))
+if not out["csv_exists"]:
+    raise SystemExit(3)
+PY
 
       - name: Engine compile triage & auto-fix
         continue-on-error: true
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, py_compile, re
-          cands=["tmp/trade/backtest/engine.py","tmp/trade/engine.py"]
-          p=next((x for x in cands if os.path.isfile(x)), "")
-          print("ENG=", p)
-          if not p:
-              print("NO_ENGINE"); raise SystemExit(0)
-          raw=open(p,'rb').read()
-          raw=raw.lstrip(b'\xef\xbb\xbf').replace(b'\r\n',b'\n').replace(b'\t',b'    ')
-          open(p,'wb').write(raw)
-          try:
-              py_compile.compile(p, doraise=True)
-              print("COMPILE_OK")
-          except Exception as e:
-              print("COMPILE_ERR:", e)
-              txt=open(p,encoding='utf-8',errors='ignore').read().splitlines()
-              ln=getattr(e,'lineno',None)
-              if ln:
-                  a=max(0,ln-10); b=min(len(txt),ln+10)
-                  print("--- engine.py snippet ---")
-                  for i in range(a,b):
-                      pref=">>" if i+1==ln else "  "
-                      print(f"{pref} {i+1:04d}: {txt[i]}")
-                  print("--- end ---")
-              fixed=re.sub(r'(?m)^\s+$','', '\n'.join(txt))
-              open(p,'w',encoding='utf-8').write(fixed)
-              try:
-                  py_compile.compile(p, doraise=True)
-                  print("RETRY_COMPILE_OK_AFTER_FIX")
-              except Exception as e2:
-                  print("RETRY_COMPILE_ERR:", e2)
-          PY
+import os, py_compile, re
+cands=["tmp/trade/backtest/engine.py","tmp/trade/engine.py"]
+p=next((x for x in cands if os.path.isfile(x)), "")
+print("ENG=", p)
+if not p:
+    print("NO_ENGINE"); raise SystemExit(0)
+raw=open(p,'rb').read()
+raw=raw.lstrip(b'\xef\xbb\xbf').replace(b'\r\n',b'\n').replace(b'\t',b'    ')
+open(p,'wb').write(raw)
+try:
+    py_compile.compile(p, doraise=True); print("COMPILE_OK")
+except Exception as e:
+    print("COMPILE_ERR:", e)
+    txt=open(p,encoding='utf-8',errors='ignore').read().splitlines()
+    ln=getattr(e,'lineno',None)
+    if ln:
+        a=max(0,ln-10); b=min(len(txt),ln+10)
+        print("--- engine.py snippet ---")
+        for i in range(a,b):
+            pref=">>" if i+1==ln else "  "
+            print(f"{pref} {i+1:04d}: {txt[i]}")
+        print("--- end ---")
+    fixed=re.sub(r'(?m)^\s+$','', '\n'.join(txt))
+    open(p,'w',encoding='utf-8').write(fixed)
+    try:
+        py_compile.compile(p, doraise=True); print("RETRY_COMPILE_OK_AFTER_FIX")
+    except Exception as e2:
+        print("RETRY_COMPILE_ERR:", e2)
+PY
 
       - name: Smoke test Calibrator API
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           python - <<'PY'
-          import numpy as np
-          from trend4p.calibration import Calibrator
-          c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
-          x = [0.2,0.5,0.8]
-          for fn in ("transform","predict","predict_proba"):
-              y = getattr(c, fn)(x)
-              arr = np.asarray(y, float)
-              assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
-          print("Calibrator API OK")
-          PY
+import numpy as np
+from trend4p.calibration import Calibrator
+c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
+x = [0.2,0.5,0.8]
+for fn in ("transform","predict","predict_proba"):
+    y = getattr(c, fn)(x)
+    arr = np.asarray(y, float)
+    assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
+print("Calibrator API OK")
+PY
 
       - name: Bootstrap helper scripts (fallback)
         run: |
           set -euo pipefail
           mkdir -p scripts _out_4u/run _out_4u/logs
           cat > scripts/make_empty_artifacts.py <<'PY'
-          import pathlib;p=pathlib.Path("_out_4u");(p/"run").mkdir(parents=True,exist_ok=True)
-          (p/"run"/"gating_debug.json").write_text("{}",encoding="utf-8")
-          (p/"gating_debug.json").write_text("{}",encoding="utf-8")
-          (p/"summary.json").write_text("{}",encoding="utf-8")
-          (p/"preds_test.csv").write_text("",encoding="utf-8")
-          (p/"trades.csv").write_text("",encoding="utf-8")
-          (p/"logs").mkdir(parents=True,exist_ok=True)
-          (p/"logs"/"stdout.log").write_text("",encoding="utf-8")
-          print("Empty artifacts created")
-          PY
+import pathlib;p=pathlib.Path("_out_4u");(p/"run").mkdir(parents=True,exist_ok=True)
+(p/"run"/"gating_debug.json").write_text("{}",encoding="utf-8")
+(p/"gating_debug.json").write_text("{}",encoding="utf-8")
+(p/"summary.json").write_text("{}",encoding="utf-8")
+(p/"preds_test.csv").write_text("",encoding="utf-8")
+(p/"trades.csv").write_text("",encoding="utf-8")
+(p/"logs").mkdir(parents=True,exist_ok=True)
+(p/"logs"/"stdout.log").write_text("",encoding="utf-8")
+print("Empty artifacts created")
+PY
           chmod +x scripts/make_empty_artifacts.py
           cat > scripts/canon_csv.py <<'PY'
-          import os,sys,glob
-          ws=os.environ.get("GITHUB_WORKSPACE",os.getcwd())
-          cand=(sys.argv[1] if len(sys.argv)>1 else "").strip()
-          p=os.path.abspath(cand if os.path.isabs(cand) else os.path.join(ws,cand))
-          if p and os.path.isfile(p): print(p); raise SystemExit(0)
-          for f in glob.glob(os.path.join(ws,"tmp","data","**","*.csv"),recursive=True):
-              print(os.path.abspath(f)); raise SystemExit(0)
-          print(""); raise SystemExit(0)
-          PY
+import os,sys,glob
+ws=os.environ.get("GITHUB_WORKSPACE",os.getcwd())
+cand=(sys.argv[1] if len(sys.argv)>1 else "").strip()
+p=os.path.abspath(cand if os.path.isabs(cand) else os.path.join(ws,cand))
+if p and os.path.isfile(p): print(p); raise SystemExit(0)
+for f in glob.glob(os.path.join(ws,"tmp","data","**","*.csv"),recursive=True):
+    print(os.path.abspath(f)); raise SystemExit(0)
+print(""); raise SystemExit(0)
+PY
           chmod +x scripts/canon_csv.py
           ls -al scripts || true
 
@@ -312,34 +327,34 @@ jobs:
           (head -n1 _out_4u/preds_test.csv || true) | tr ',' '\n' | nl -ba
           echo "[3] summary.splits/test size (if present):"
           python - <<'PY'
-          import json, os
-          p="_out_4u/summary.json"
-          if os.path.exists(p) and os.stat(p).st_size>2:
-              j=json.load(open(p))
-              print(j.get("splits") or {"note":"no splits"})
-          else:
-              print("no summary.json")
-          PY
+import json, os
+p="_out_4u/summary.json"
+if os.path.exists(p) and os.stat(p).st_size>2:
+    j=json.load(open(p))
+    print(j.get("splits") or {"note":"no splits"})
+else:
+    print("no summary.json")
+PY
           echo "[4] Which engine is loaded?"
           python - <<'PY'
-          import inspect
-          try:
-              import backtest.engine as E
-              print(inspect.getfile(E))
-          except Exception as e:
-              print("ENGINE_IMPORT_ERROR:", e)
-          PY
+import inspect
+try:
+    import backtest.engine as E
+    print(inspect.getfile(E))
+except Exception as e:
+    print("ENGINE_IMPORT_ERROR:", e)
+PY
           echo "[5] Gate percentiles delta (p99-p01):"
           python - <<'PY'
-          import json, os
-          p="_out_4u/run/gating_debug.json"
-          if os.path.exists(p) and os.stat(p).st_size>2:
-              g=json.load(open(p)).get("gate_percentiles",{})
-              d=(g.get('0.99',0)-g.get('0.01',0)) if g else None
-              print("gate_percentiles:", g, "delta:", d)
-          else:
-              print("no gating_debug.json (yet)")
-          PY
+import json, os
+p="_out_4u/run/gating_debug.json"
+if os.path.exists(p) and os.stat(p).st_size>2:
+    g=json.load(open(p)).get("gate_percentiles",{})
+    d=(g.get('0.99',0)-g.get('0.01',0)) if g else None
+    print("gate_percentiles:", g, "delta:", d)
+else:
+    print("no gating_debug.json (yet)")
+PY
 
       - name: Post analyze gating
         env:
@@ -376,5 +391,5 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.1.1_outputs
+          name: backtest_v1.1.3b_outputs
           path: _out_4u/**
