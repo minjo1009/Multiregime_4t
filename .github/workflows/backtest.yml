@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.8)
+name: Backtest v1.0.8 (Checklist1.9)
 
 on:
   workflow_dispatch:
@@ -20,8 +20,11 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - name: Validate pinned SHAs (Checklist1.8)
+      - name: Validate pinned SHAs (Checklist1.9)
         run: |
           set -euo pipefail
           verify() {
@@ -50,11 +53,12 @@ jobs:
           sudo apt-get install -y unzip tzdata
           echo "TZ=Asia/Seoul" >> $GITHUB_ENV
 
-      - name: Reset workspace folders (clean)
+      - name: Reset workspace folders (clean + precreate logs)
         run: |
           set -euo pipefail
           rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
           mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run _out_4u/logs scripts
+          : > _out_4u/logs/stdout.log  # 빈 로그도 항상 존재
 
       - name: Bring zips
         run: |
@@ -138,7 +142,7 @@ jobs:
           PY_A
           chmod +x scripts/preflight_csv.py
 
-      - name: Write make_empty_artifacts.py (dual gating_debug)
+      - name: Write make_empty_artifacts.py (dual gating_debug + logs)
         run: |
           set -euo pipefail
           cat <<'PY_B' > scripts/make_empty_artifacts.py
@@ -151,11 +155,13 @@ jobs:
           (root/"summary.json").write_text("{}", encoding="utf-8")
           (root/"preds_test.csv").write_text("", encoding="utf-8")
           (root/"trades.csv").write_text("", encoding="utf-8")
+          (root/"logs").mkdir(parents=True, exist_ok=True)
+          (root/"logs/stdout.log").write_text("", encoding="utf-8")
           print("Empty artifacts created")
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh (full log + safe env)
+      - name: Write entrypoint_run.sh (faulthandler + full tee + trap)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
@@ -164,6 +170,8 @@ jobs:
           ROOT="$GITHUB_WORKSPACE/tmp/trade"
           LOG="$GITHUB_WORKSPACE/_out_4u/logs/stdout.log"
           cd "$GITHUB_WORKSPACE"
+
+          trap 'echo "::group::tail stdout.log"; tail -n 200 "$LOG" 2>/dev/null || true; echo "::endgroup::"' EXIT
 
           # Resolve CSV path
           CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
@@ -183,24 +191,24 @@ jobs:
           cd "$ROOT"
           CFG="conf/config.yml"
 
-          # tee-friendly try
+          py() { python -X faulthandler -u "$@"; }
           try() {
             echo "+ $*" | tee -a "$LOG"
             ( "$@" ) >>"$LOG" 2>&1
             return ${PIPESTATUS[0]}
           }
 
-          try python -u run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
-          try python -u run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
-          try python -u run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
-          try python -u run_4u.py "$CSV_PATH" && exit 0
+          try py run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          try py run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
+          try py run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
+          try py run_4u.py "$CSV_PATH" && exit 0
           if [ -f "backtest/run_4u.py" ]; then
-            try python -u backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+            try py backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           fi
-          try python -u -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
+          try py -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
 
           echo "::warning::Entrypoint attempts failed; writing empty artifacts" | tee -a "$LOG"
-          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py" | tee -a "$LOG"
+          py "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py" | tee -a "$LOG"
           exit 0
           SH_A
           chmod +x scripts/entrypoint_run.sh
@@ -245,7 +253,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist1.8) ---
+          # --- Injected Calibrator shim (Checklist1.9) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -340,8 +348,8 @@ jobs:
         run: |
           set -euo pipefail
           # pick up files from common alt paths inside tmp/trade
-          for name in summary.json preds_test.csv trades.csv gating_debug.json; do
-            f=$(find tmp/trade -maxdepth 5 -type f -name "$name" | head -n1 || true)
+          for name in summary.json preds_test.csv trades.csv gating_debug.json metrics.json; do
+            f=$(find tmp/trade -maxdepth 6 -type f -name "$name" | head -n1 || true)
             if [ -n "$f" ]; then
               cp -f "$f" "_out_4u/$name" || true
               echo "collected $name from $f"
@@ -370,15 +378,9 @@ jobs:
                   print(f"::warning::empty artifact: {p} ({sz} bytes)")
           PY
 
-      - name: Upload artifacts
+      - name: Upload artifacts (entire folder)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest_v1.0.8_outputs
-          path: |
-            _out_4u/summary.json
-            _out_4u/gating_debug.json
-            _out_4u/run/gating_debug.json
-            _out_4u/preds_test.csv
-            _out_4u/trades.csv
-            _out_4u/logs/stdout.log
+          path: _out_4u/**
           if-no-files-found: warn
