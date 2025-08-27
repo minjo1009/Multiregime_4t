@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.7)
+name: Backtest v1.0.8 (Checklist1.8)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1.7)
+      - name: Validate pinned SHAs (Checklist1.8)
         run: |
           set -euo pipefail
           verify() {
@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
-          mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run scripts
+          mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run _out_4u/logs scripts
 
       - name: Bring zips
         run: |
@@ -155,13 +155,14 @@ jobs:
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh (safe env)
+      - name: Write entrypoint_run.sh (full log + safe env)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
           #!/usr/bin/env bash
-          set -euo pipefail
+          set -Eeuo pipefail
           ROOT="$GITHUB_WORKSPACE/tmp/trade"
+          LOG="$GITHUB_WORKSPACE/_out_4u/logs/stdout.log"
           cd "$GITHUB_WORKSPACE"
 
           # Resolve CSV path
@@ -172,28 +173,34 @@ jobs:
           if [ -z "${CSV_PATH:-}" ]; then
             CSV_PATH="$(find tmp/data -type f -name "*.csv" | head -n1 || true)"
           fi
-          echo "Using CSV: ${CSV_PATH:-<none>}"
+          echo "Using CSV: ${CSV_PATH:-<none>}" | tee -a "$LOG"
           export CSV_PATH="${CSV_PATH:-}"
 
           # Safe PYTHONPATH under set -u
           export PYTHONPATH="${ROOT}:${ROOT}/backtest:${PYTHONPATH:-}"
 
-          mkdir -p "_out_4u/run"
+          mkdir -p "_out_4u/run" "_out_4u/logs"
           cd "$ROOT"
           CFG="conf/config.yml"
-          try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
 
-          try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
-          try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
-          try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
-          try python run_4u.py "$CSV_PATH" && exit 0
+          # tee-friendly try
+          try() {
+            echo "+ $*" | tee -a "$LOG"
+            ( "$@" ) >>"$LOG" 2>&1
+            return ${PIPESTATUS[0]}
+          }
+
+          try python -u run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          try python -u run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
+          try python -u run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
+          try python -u run_4u.py "$CSV_PATH" && exit 0
           if [ -f "backtest/run_4u.py" ]; then
-            try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+            try python -u backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           fi
-          try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
+          try python -u -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
 
-          echo "::warning::Entrypoint attempts failed; writing empty artifacts"
-          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py"
+          echo "::warning::Entrypoint attempts failed; writing empty artifacts" | tee -a "$LOG"
+          python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py" | tee -a "$LOG"
           exit 0
           SH_A
           chmod +x scripts/entrypoint_run.sh
@@ -238,7 +245,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist1.7) ---
+          # --- Injected Calibrator shim (Checklist1.8) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -325,31 +332,41 @@ jobs:
           set -euo pipefail
           python -u scripts/make_empty_artifacts.py
           bash scripts/entrypoint_run.sh
-          # keep root copy of gating_debug in sync if run output exists
+          # sync run/ -> root if run output exists
           [ -f _out_4u/run/gating_debug.json ] && cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
           echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
+
+      - name: Sweep for outputs (if code saved elsewhere)
+        run: |
+          set -euo pipefail
+          # pick up files from common alt paths inside tmp/trade
+          for name in summary.json preds_test.csv trades.csv gating_debug.json; do
+            f=$(find tmp/trade -maxdepth 5 -type f -name "$name" | head -n1 || true)
+            if [ -n "$f" ]; then
+              cp -f "$f" "_out_4u/$name" || true
+              echo "collected $name from $f"
+            fi
+          done
 
       - name: Post-run sanity (warn if empty)
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, json, sys
+          import os
           paths = [
               "_out_4u/summary.json",
               "_out_4u/preds_test.csv",
               "_out_4u/trades.csv",
               "_out_4u/gating_debug.json",
               "_out_4u/run/gating_debug.json",
+              "_out_4u/logs/stdout.log",
           ]
           for p in paths:
               if not os.path.exists(p):
                   print(f"::warning::missing {p}")
                   continue
-              try:
-                  sz = os.path.getsize(p)
-              except Exception:
-                  sz = -1
-              if sz <= 2:
+              sz = os.path.getsize(p)
+              if sz <= 2 and not p.endswith(".log"):
                   print(f"::warning::empty artifact: {p} ({sz} bytes)")
           PY
 
@@ -363,4 +380,5 @@ jobs:
             _out_4u/run/gating_debug.json
             _out_4u/preds_test.csv
             _out_4u/trades.csv
+            _out_4u/logs/stdout.log
           if-no-files-found: warn
