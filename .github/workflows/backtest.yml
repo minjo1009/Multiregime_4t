@@ -1,4 +1,4 @@
-name: Backtest v1.1.0 (Checklist2.3a+V1-fixed)
+name: Backtest v1.1.0 (Checklist2.3a+V1-fixed2)
 
 on:
   workflow_dispatch:
@@ -140,11 +140,18 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
+      # -------- FIX: scripts 전체 동기화 + 실행권한 부여 --------
       - name: Writers (helpers)
         run: |
           set -euo pipefail
-          cp -f scripts/* tmp/trade/ 2>/dev/null || true
-          cp -f tmp/trade/scripts/*.py scripts/ 2>/dev/null || true
+          mkdir -p scripts
+          if [ -d tmp/trade/scripts ]; then
+            rsync -a tmp/trade/scripts/ scripts/
+          fi
+          chmod +x scripts/*.sh 2>/dev/null || true
+          chmod +x scripts/*.bash 2>/dev/null || true
+          chmod +x scripts/*.py 2>/dev/null || true
+          echo "Synced scripts:"; ls -al scripts || true
 
       - name: Write CSV path (preflight)
         env:
@@ -189,10 +196,18 @@ jobs:
           print("Calibrator API OK")
           PY
 
+      # -------- FIX: entrypoint 존재 가드 + 폴백 복사 --------
       - name: Run backtest
         run: |
           set -euo pipefail
           python -u scripts/make_empty_artifacts.py
+          if [ ! -f scripts/entrypoint_run.sh ] && [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
+            cp -f tmp/trade/scripts/entrypoint_run.sh scripts/
+            chmod +x scripts/entrypoint_run.sh
+          fi
+          if [ ! -f scripts/entrypoint_run.sh ]; then
+            echo "::error::missing scripts/entrypoint_run.sh (after sync)"; ls -al scripts || true; exit 127
+          fi
           bash scripts/entrypoint_run.sh
           [ -f _out_4u/run/gating_debug.json ] && cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
           echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
