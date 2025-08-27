@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist2.2-fix)
+name: Backtest v1.0.8 (Checklist2.3)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
-      - name: Validate pinned SHAs (Checklist2.2-fix)
+      - name: Validate pinned SHAs (Checklist2.3)
         run: |
           set -euo pipefail
           verify() {
@@ -74,16 +74,18 @@ jobs:
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
 
-      - name: Inspect code.zip for duplicates (warn-only)
+      - name: Inspect code.zip for duplicates (fail-fast)
         run: |
           set -euo pipefail
           dups=$(unzip -Z1 tmp/code.zip | sort | uniq -d || true)
           if [ -n "$dups" ]; then
-            echo "::warning title=ZipDuplicate::Duplicate paths detected in code.zip"
+            echo "$dups" | tee _out_4u/logs/zip_duplicates.txt
+            echo "::error title=ZipDuplicate::Duplicate paths detected in code.zip"
             printf '%s\n' "$dups"
+            exit 1
           fi
 
-      - name: Unzip packs (non-interactive, flatten) + sample csv list
+      - name: Unzip packs (flatten) + sample csv list
         run: |
           set -euo pipefail
           unzip -oq tmp/code.zip -d tmp/trade_raw
@@ -143,7 +145,7 @@ jobs:
           PY_A
           chmod +x scripts/preflight_csv.py
 
-      - name: Write canon_csv.py (avoid nested heredoc)
+      - name: Write canon_csv.py (robust ABS + fallback search)
         run: |
           set -euo pipefail
           cat <<'PY' > scripts/canon_csv.py
@@ -152,11 +154,9 @@ jobs:
           ws = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
           cand = (sys.argv[1] if len(sys.argv)>1 else "").strip()
           def abs1(p): return os.path.abspath(p) if p else ""
-          # candidate absolute
           p = abs1(cand if os.path.isabs(cand) else os.path.join(ws, cand))
           if p and os.path.isfile(p):
               print(p); sys.exit(0)
-          # search under tmp/data
           for f in glob.glob(os.path.join(ws, "tmp", "data", "**", "*.csv"), recursive=True):
               print(os.path.abspath(f)); sys.exit(0)
           print(""); sys.exit(0)
@@ -182,7 +182,7 @@ jobs:
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh (no nested heredoc, --data_path first)
+      - name: Write entrypoint_run.sh (--data_path first, full logs)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
@@ -193,11 +193,8 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           trap 'echo "::group::tail stdout.log"; tail -n 200 "$LOG" 2>/dev/null || true; echo "::endgroup::"' EXIT
 
-          # read candidate (may be empty/whitespace)
           RAW="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
           CAND="$(python -c 'import sys; print(sys.stdin.read().strip())' <<<"$RAW")"
-
-          # canon path via helper (absolute + fallback search)
           CSV_PATH="$(GITHUB_WORKSPACE="$GITHUB_WORKSPACE" python -u scripts/canon_csv.py "$CAND")"
           if [ -z "${CSV_PATH:-}" ] || [ ! -f "$CSV_PATH" ]; then
             echo "::error::No CSV found under tmp/data (got: '${CAND:-<empty>}')" | tee -a "$LOG"
@@ -207,7 +204,6 @@ jobs:
           echo "Using CSV: $CSV_PATH (exists=yes)" | tee -a "$LOG"
 
           export PYTHONPATH="${ROOT}:${ROOT}/backtest:${PYTHONPATH:-}"
-
           mkdir -p "_out_4u/run" "_out_4u/logs"
           cd "$ROOT"
           CFG="conf/config.yml"
@@ -215,7 +211,6 @@ jobs:
           py() { python -X faulthandler -u "$@"; }
           try() { echo "+ $*" | tee -a "$LOG"; ( "$@" ) >>"$LOG" 2>&1; return ${PIPESTATUS[0]}; }
 
-          # prefer project signature
           try py run_4u.py --data_path "$CSV_PATH" --config "$CFG" && exit 0
           try py run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try py run_4u.py "$CSV_PATH" && exit 0
@@ -231,7 +226,7 @@ jobs:
           SH_A
           chmod +x scripts/entrypoint_run.sh
 
-      - name: Write shim source (standalone file)
+      - name: Write shim source (standalone)
         run: |
           set -euo pipefail
           cat <<'PY_SHIM' > scripts/run_4u_shim.py
@@ -271,7 +266,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist2.2-fix) ---
+          # --- Injected Calibrator shim (Checklist2.3) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -328,6 +323,29 @@ jobs:
             echo "Original run_4u.py present; shim not installed."
           fi
 
+      - name: Verify project skeleton (config/runner)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, json, pathlib, yaml
+          root = pathlib.Path("tmp/trade")
+          must_exist = ["conf/config.yml"]
+          candidates = ["run_4u.py", "backtest/run_4u.py", "backtest/runner.py"]
+          miss = [p for p in must_exist if not (root/p).exists()]
+          found = [p for p in candidates if (root/p).exists()]
+          out = {"missing": miss, "runner_candidates": found}
+          cfgp = root/"conf/config.yml"
+          if cfgp.exists():
+              try:
+                  data = yaml.safe_load(cfgp.read_text(encoding="utf-8")) or {}
+                  out["config_keys"] = list(data)[:15]
+                  out["config_size"] = cfgp.stat().st_size
+              except Exception as e:
+                  out["config_error"] = str(e)
+          print(json.dumps(out, ensure_ascii=False))
+          if miss: sys.exit(2)
+          PY
+
       - name: Preflight data (warn-only)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
@@ -338,23 +356,21 @@ jobs:
           echo "Preflight path:"; cat scripts/CSV_PATH.txt || true
           echo "Exists?"; [ -f "$(cat scripts/CSV_PATH.txt 2>/dev/null)" ] && echo yes || echo no
 
-      - name: Verify runner & calibrator before run
+      - name: Verify runner & calibrator before run (import test)
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           python - <<'PY'
-          import sys, os
+          import sys, os, importlib, json
           p = open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
-          print("CSV_PATH(pre-run):", p, "exists=", os.path.isfile(p))
-          try:
-              from trend4p.calibration import Calibrator
-          except Exception as e:
-              print("!! Calibrator import failed:", e); sys.exit(2)
-          try:
-              from backtest.runner import run_backtest
-          except Exception as e:
-              print("!! backtest.runner import failed:", e); sys.exit(3)
-          print("OK: Calibrator & run_backtest ready")
+          out={"csv_path":p, "csv_exists": os.path.isfile(p)}
+          for mod in ["backtest.runner","trend4p.calibration"]:
+              try:
+                  m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)
+              except Exception as e:
+                  out[mod]=f"IMPORT_ERROR: {e}"
+          print(json.dumps(out, ensure_ascii=False))
+          if not out["csv_exists"]: sys.exit(3)
           PY
 
       - name: Run backtest
@@ -397,6 +413,17 @@ jobs:
               if sz <= 2 and not p.endswith(".log"):
                   print(f"::warning::empty artifact: {p} ({sz} bytes)")
           PY
+
+      - name: Enforce non-empty outputs (debug gate; non-blocking)
+        continue-on-error: true
+        if: always()
+        run: |
+          set -euo pipefail
+          bad=0
+          for f in _out_4u/summary.json _out_4u/preds_test.csv _out_4u/trades.csv; do
+            if [ ! -s "$f" ]; then echo "::error::$f is empty or missing"; bad=$((bad+1)); fi
+          done
+          if [ $bad -ge 3 ]; then exit 1; fi
 
       - name: Upload artifacts (entire folder)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
