@@ -1,4 +1,4 @@
-name: Backtest v1.1.1 (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix + PreflightCSVFix)
+name: Backtest v1.1.1 (Patched-Minimal: CSVFix + SafeDupCheck + GatingSync)
 
 on:
   workflow_dispatch:
@@ -88,16 +88,26 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum tmp/code.zip; else shasum -a 256 tmp/code.zip; fi
           unzip -Z1 tmp/code.zip | head -n 50 || true
 
-      - name: Inspect code.zip for duplicates
+      - name: Inspect code.zip for duplicates (safe)
         run: |
           set -euo pipefail
-          dups=$(unzip -Z1 tmp/code.zip | sort | uniq -d || true)
-          if [ -n "$dups" ]; then
-            echo "$dups" | tee _out_4u/logs/zip_duplicates.txt
-            echo "Duplicate paths detected in code.zip:"; printf '%s
-' "$dups"
+          mkdir -p _out_4u/logs
+          python - <<'PY'
+          import zipfile, sys, os
+          dup, seen = [], set()
+          with zipfile.ZipFile('tmp/code.zip','r') as z:
+              for n in z.namelist():
+                  if n in seen and n not in dup:
+                      dup.append(n)
+                  seen.add(n)
+          open('_out_4u/logs/zip_duplicates.txt','w',encoding='utf-8').write('\n'.join(dup))
+          print(f"DUP_COUNT={len(dup)}")
+          PY
+          if [ -s _out_4u/logs/zip_duplicates.txt ]; then
+            echo "Duplicate paths detected in code.zip:"
+            head -n 20 _out_4u/logs/zip_duplicates.txt || true
             if [ "${{ github.event.inputs.ALLOW_DEDUP }}" = "true" ]; then
-              echo "::warning::Auto-dedup enabled. Repacking code.zip…"
+              echo "::notice::Auto-dedup enabled. Repacking code.zip…"
               rm -rf tmp/code_src
               mkdir -p tmp/code_src
               unzip -oq tmp/code.zip -d tmp/code_src
@@ -162,7 +172,6 @@ jobs:
           root="tmp/data"
           pat=os.environ.get("CSV_GLOB") or "**/*.csv"
           if pat.startswith("/"):
-              # absolute path passed; trust it
               cand=[pat] if os.path.isfile(pat) else []
           else:
               cand=sorted(glob.glob(os.path.join(root, pat), recursive=True))
@@ -214,22 +223,6 @@ jobs:
               print("COMPILE_OK")
           except Exception as e:
               print("COMPILE_ERR:", e)
-              txt=open(p,encoding='utf-8',errors='ignore').read().splitlines()
-              ln=getattr(e,'lineno',None)
-              if ln:
-                  a=max(0,ln-10); b=min(len(txt),ln+10)
-                  print("--- engine.py snippet ---")
-                  for i in range(a,b):
-                      pref=">>" if i+1==ln else "  "
-                      print(f"{pref} {i+1:04d}: {txt[i]}")
-                  print("--- end ---")
-              fixed=re.sub(r'(?m)^\s+$','', '\n'.join(txt))
-              open(p,'w',encoding='utf-8').write(fixed)
-              try:
-                  py_compile.compile(p, doraise=True)
-                  print("RETRY_COMPILE_OK_AFTER_FIX")
-              except Exception as e2:
-                  print("RETRY_COMPILE_ERR:", e2)
           PY
 
       - name: Smoke test Calibrator API
@@ -248,113 +241,22 @@ jobs:
           print("Calibrator API OK")
           PY
 
-      - name: Bootstrap helper scripts (fallback)
-        run: |
-          set -euo pipefail
-          mkdir -p scripts _out_4u/run _out_4u/logs
-          cat > scripts/make_empty_artifacts.py <<'PY'
-          import pathlib;p=pathlib.Path("_out_4u");(p/"run").mkdir(parents=True,exist_ok=True)
-          (p/"run"/"gating_debug.json").write_text("{}",encoding="utf-8")
-          (p/"gating_debug.json").write_text("{}",encoding="utf-8")
-          (p/"summary.json").write_text("{}",encoding="utf-8")
-          (p/"preds_test.csv").write_text("",encoding="utf-8")
-          (p/"trades.csv").write_text("",encoding="utf-8")
-          (p/"logs").mkdir(parents=True,exist_ok=True)
-          (p/"logs"/"stdout.log").write_text("",encoding="utf-8")
-          print("Empty artifacts created")
-          PY
-          chmod +x scripts/make_empty_artifacts.py
-          cat > scripts/canon_csv.py <<'PY'
-          import os,sys,glob
-          ws=os.environ.get("GITHUB_WORKSPACE",os.getcwd())
-          cand=(sys.argv[1] if len(sys.argv)>1 else "").strip()
-          p=os.path.abspath(cand if os.path.isabs(cand) else os.path.join(ws,cand))
-          if p and os.path.isfile(p): print(p); raise SystemExit(0)
-          for f in glob.glob(os.path.join(ws,"tmp","data","**","*.csv"),recursive=True):
-              print(os.path.abspath(f)); raise SystemExit(0)
-          print(""); raise SystemExit(0)
-          PY
-          chmod +x scripts/canon_csv.py
-          ls -al scripts || true
-
       - name: Run backtest
         continue-on-error: true
         run: |
           set -euo pipefail
-          python -u scripts/make_empty_artifacts.py || true
-          if [ ! -f scripts/entrypoint_run.sh ] && [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
-            cp -f tmp/trade/scripts/entrypoint_run.sh scripts/
-            chmod +x scripts/entrypoint_run.sh
-          fi
+          mkdir -p _out_4u/run
           if [ -f scripts/entrypoint_run.sh ]; then
             bash scripts/entrypoint_run.sh || echo "::warning::entrypoint failed (continuing)"
+          elif [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
+            bash tmp/trade/scripts/entrypoint_run.sh || echo "::warning::entrypoint failed (continuing)"
           else
-            echo "::warning::missing scripts/entrypoint_run.sh; skipping to post-analyze"
+            echo "::warning::missing entrypoint_run.sh; skipping to post-analyze"
           fi
           [ -f _out_4u/run/gating_debug.json ] && cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
-          echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
-
-      - name: Sweep for outputs
-        run: |
-          set -euo pipefail
-          pick() {
-            name="$1"; out="$2"
-            f="$(find tmp/trade -maxdepth 6 -type f -name "$name" | head -n1 || true)"
-            if [ -n "$f" ]; then
-              cp -f "$f" "_out_4u/$out"
-              echo "collected $out from $f"
-            else
-              echo "miss $name"
-            fi
-            return 0
-          }
-          for n in summary.json metrics.json; do pick "$n" "$n"; done
-          pick "preds_test.csv" "preds_test.csv"
-          [ -s _out_4u/preds_test.csv ] || pick "preds.csv" "preds_test.csv"
-          if [ ! -s _out_4u/preds_test.csv ]; then
-            gz="$(find tmp/trade -maxdepth 6 -type f -name 'preds*.csv.gz' | head -n1 || true)"
-            if [ -n "$gz" ]; then gzip -dc "$gz" > _out_4u/preds_test.csv && echo "collected preds_test.csv from $gz (gunzip)"; fi
-          fi
-          pick "trades.csv" "trades.csv"
-          [ -s _out_4u/trades.csv ] || pick "orders.csv" "trades.csv"
-
-      - name: Debug triage (coverage root-cause)
-        run: |
-          set -euo pipefail
-          echo "[1] Files under tmp/trade (preds/trades/summary):"
-          find tmp/trade -maxdepth 6 -type f \( -name 'preds*.csv' -o -name 'trades*.csv' -o -name 'summary.json' \) | sed -n '1,80p' || true
-          echo "[2] preds_test.csv columns:"
-          (head -n1 _out_4u/preds_test.csv || true) | tr ',' '\n' | nl -ba
-          echo "[3] summary.splits/test size (if present):"
-          python - <<'PY'
-          import json, os
-          p="_out_4u/summary.json"
-          if os.path.exists(p) and os.stat(p).st_size>2:
-              j=json.load(open(p))
-              print(j.get("splits") or {"note":"no splits"})
-          else:
-              print("no summary.json")
-          PY
-          echo "[4] Which engine is loaded?"
-          python - <<'PY'
-          import inspect
-          try:
-              import backtest.engine as E
-              print(inspect.getfile(E))
-          except Exception as e:
-              print("ENGINE_IMPORT_ERROR:", e)
-          PY
-          echo "[5] Gate percentiles delta (p99-p01):"
-          python - <<'PY'
-          import json, os
-          p="_out_4u/run/gating_debug.json"
-          if os.path.exists(p) and os.stat(p).st_size>2:
-              g=json.load(open(p)).get("gate_percentiles",{})
-              d=(g.get('0.99',0)-g.get('0.01',0)) if g else None
-              print("gate_percentiles:", g, "delta:", d)
-          else:
-              print("no gating_debug.json (yet)")
-          PY
+          : > _out_4u/summary.json
+          : > _out_4u/preds_test.csv
+          : > _out_4u/trades.csv
 
       - name: Post analyze gating
         env:
@@ -379,23 +281,9 @@ jobs:
           set -euo pipefail
           cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
 
-      - name: Upload debug bundle (workspace snapshot)
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: debug_bundle
-          path: |
-            preflight.json
-            scripts/**
-            _out_4u/**
-            tmp/trade/conf/**
-            tmp/trade/backtest/**.py
-            tmp/trade/trend4p/**.py
-            tmp/trade/run_4u.py
-
       - name: Upload artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
           name: backtest_v1.1.1_outputs
           path: _out_4u/**
