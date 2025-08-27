@@ -1,4 +1,4 @@
-name: Backtest v1.1.3e (Checklist2.3a+V1; no heredoc; no python -c in smoke)
+name: Backtest v1.1.3f (Checklist2.3a+V1; no heredoc; no risky python -c)
 
 on:
   workflow_dispatch:
@@ -227,7 +227,7 @@ jobs:
               "import numpy as _np" \
               "y1=c.transform(x); y2=c.predict(x); y3=c.predict_proba(x)" \
               "assert _np.asarray(y1,float).shape[0]==3 and _np.isfinite(_np.asarray(y1,float)).all()" \
-              "assert _np.asarray(y2,float).shape[0]==3 and _np.isfinite(_np.asarray(y2,float)).all()" \
+              "assert _np.asarray(y2,float).shape[0]==3 and _np.isfinite(_np.asarray[y2,float] if False else _np.asarray(y2,float)).all()" \
               "assert _np.asarray(y3,float).shape[0]==3 and _np.isfinite(_np.asarray(y3,float)).all()" \
               "print('Calibrator API OK')" \
             > scripts/_smoke_calib.py
@@ -290,26 +290,44 @@ jobs:
       - name: Debug triage (coverage root-cause)
         run: |
           set -euo pipefail
-          echo "[1] Files under tmp/trade (preds/trades/summary):"
-          find tmp/trade -maxdepth 6 -type f \( -name 'preds*.csv' -o -name 'trades*.csv' -o -name 'summary.json' \) | sed -n '1,80p' || true
-          echo "[2] preds_test.csv columns:"; (head -n1 _out_4u/preds_test.csv || true) | tr ',' '\n' | nl -ba
-          echo "[3] summary.splits/test size (if present):"
-          python -c "import json, os; p='_out_4u/summary.json'; \
-j=(json.load(open(p)) if (os.path.exists(p) and os.stat(p).st_size>2) else None); \
-print(j.get('splits') if j else 'no summary.json')"
-          echo "[4] Which engine is loaded?"
-          python -c "import inspect, importlib; \
-print(inspect.getfile(importlib.import_module('backtest.engine'))) if True else None" || \
-python -c "import importlib, inspect; \
-import sys; \
-print('ENGINE_IMPORT_ERROR:', __import__('traceback').format_exc())"
-          echo "[5] Gate percentiles delta (p99-p01):"
-          python -c "import json, os; p='_out_4u/run/gating_debug.json'; \
-import sys; \
-ok=(os.path.exists(p) and os.stat(p).st_size>2); \
-g=(json.load(open(p)).get('gate_percentiles',{}) if ok else {}); \
-d=(g.get('0.99',0)-g.get('0.01',0)) if g else None; \
-print('no gating_debug.json (yet)' if not ok else f'gate_percentiles: {g} delta: {d}')"
+          {
+            printf '%s\n' \
+              "import os, json, inspect, importlib, sys, glob" \
+              "print('[1] Files under tmp/trade (preds/trades/summary):')" \
+              "import subprocess as sp" \
+              "try:" \
+              "    sp.run(['bash','-lc','find tmp/trade -maxdepth 6 -type f -name \"preds*.csv\" -o -name \"trades*.csv\" -o -name \"summary.json\" | sed -n \"1,80p\"'], check=False)" \
+              "except Exception as e: print('find-error', e)" \
+              "print('[2] preds_test.csv columns:')" \
+              "try:" \
+              "    import pandas as pd" \
+              "    import csv" \
+              "    import itertools" \
+              "    fn='_out_4u/preds_test.csv';" \
+              "    h=open(fn).readline().strip() if os.path.exists(fn) else ''" \
+              "    print(list(h.split(','))[:50])" \
+              "except Exception as e: print('preds-header-error', e)" \
+              "print('[3] summary.splits/test size (if present):')" \
+              "try:" \
+              "    p='_out_4u/summary.json';" \
+              "    j=(json.load(open(p)) if (os.path.exists(p) and os.stat(p).st_size>2) else None)" \
+              "    print(j.get('splits') if j else 'no summary.json')" \
+              "except Exception as e: print('summary-parse-error', e)" \
+              "print('[4] Which engine is loaded?')" \
+              "try:" \
+              "    m=importlib.import_module('backtest.engine'); print(inspect.getfile(m))" \
+              "except Exception as e: print('ENGINE_IMPORT_ERROR:', e)" \
+              "print('[5] Gate percentiles delta (p99-p01):')" \
+              "try:" \
+              "    p='_out_4u/run/gating_debug.json';" \
+              "    ok=(os.path.exists(p) and os.stat(p).st_size>2)" \
+              "    g=(json.load(open(p)).get('gate_percentiles',{}) if ok else {})" \
+              "    d=(g.get('0.99',0)-g.get('0.01',0)) if g else None" \
+              "    print('no gating_debug.json (yet)' if not ok else f'gate_percentiles: {g} delta: {d}')" \
+              "except Exception as e: print('gate-debug-error', e)" \
+            > scripts/_debug_triage.py
+          }
+          python scripts/_debug_triage.py
 
       - name: Post analyze gating
         env:
@@ -346,5 +364,5 @@ print('no gating_debug.json (yet)' if not ok else f'gate_percentiles: {g} delta:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.1.3e_outputs
+          name: backtest_v1.1.3f_outputs
           path: _out_4u/**
