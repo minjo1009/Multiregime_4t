@@ -84,7 +84,6 @@ jobs:
             if [ -f "$SRC" ]; then cp "$SRC" code.zip; else echo "::error::CODE_ZIP not found"; exit 1; fi
           fi
           unzip -q -o code.zip -d tmp/trade_raw
-          # flatten if single top-level dir
           ROOTS=$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)
           if [ "$ROOTS" = "1" ]; then
             mv tmp/trade_raw/*/* tmp/trade/ 2>/dev/null || true
@@ -116,31 +115,13 @@ jobs:
       - name: Ensure helper scripts (fallbacks)
         run: |
           set -Eeuo pipefail
-          # canon_csv.py fallback: prints one CSV path chosen using glob
-          if [ ! -f tmp/trade/scripts/canon_csv.py ]; then
-            cat > scripts/canon_csv.py << 'PY'
-import sys,glob,json,os
-pat = sys.argv[1] if len(sys.argv)>1 else "**/*.csv"
-paths = sorted(glob.glob(pat, recursive=True))
-paths = [p for p in paths if os.path.isfile(p)]
-print(paths[0] if paths else "")
-PY
-          fi
-          if [ ! -f tmp/trade/scripts/preflight_csv.py ]; then
-            cat > scripts/preflight_csv.py << 'PY'
-import sys, os, json, pandas as pd
-p = sys.argv[1] if len(sys.argv)>1 else ""
-out = {"path": p, "exists": os.path.isfile(p)}
-if out["exists"]:
-  try:
-    df = pd.read_csv(p, nrows=1000)
-    out["columns"] = list(df.columns)
-    out["rows_previewed"] = len(df)
-  except Exception as e:
-    out["read_error"] = str(e)
-print(json.dumps(out, ensure_ascii=False))
-PY
-          fi
+          # canon_csv.py fallback (no heredoc)
+          mkdir -p scripts
+          printf '%s
+'             'import sys,glob,json,os'             'pat = sys.argv[1] if len(sys.argv)>1 else "**/*.csv"'             'paths = sorted(glob.glob(pat, recursive=True))'             'paths = [p for p in paths if os.path.isfile(p)]'             'print(paths[0] if paths else "")'             > scripts/canon_csv.py
+          # preflight_csv.py fallback (no heredoc)
+          printf '%s
+'             'import sys, os, json, pandas as pd'             'p = sys.argv[1] if len(sys.argv)>1 else ""'             'out = {"path": p, "exists": os.path.isfile(p)}'             'if out["exists"]:'             '    try:'             '        df = pd.read_csv(p, nrows=1000)'             '        out["columns"] = list(df.columns)'             '        out["rows_previewed"] = len(df)'             '    except Exception as e:'             '        out["read_error"] = str(e)'             'print(json.dumps(out, ensure_ascii=False))'             > scripts/preflight_csv.py
 
       - name: Write CSV path (preflight)
         run: |
@@ -148,12 +129,8 @@ PY
           cd tmp/data
           PAT="${{ github.event.inputs.CSV_GLOB }}"
           echo "CSV_GLOB=$PAT"
-          # prefer repo-provided helper if exists
-          if [ -f ../trade/scripts/canon_csv.py ]; then
-            PYFILE="../trade/scripts/canon_csv.py"
-          else
-            PYFILE="../../scripts/canon_csv.py"
-          fi
+          PYFILE="../trade/scripts/canon_csv.py"
+          if [ ! -f "$PYFILE" ]; then PYFILE="../../scripts/canon_csv.py"; fi
           SEL=$(python -u "$PYFILE" "${PAT}")
           cd - >/dev/null
           if [ -z "${SEL:-}" ] || [ ! -f "$SEL" ]; then
@@ -164,98 +141,61 @@ PY
           echo "$SEL" > scripts/CSV_PATH.txt
           echo "CSV_PATH=$SEL" >> "$GITHUB_ENV"
           # preflight JSON
-          if [ -f tmp/trade/scripts/preflight_csv.py ]; then
-            python -u tmp/trade/scripts/preflight_csv.py "$SEL" | tee preflight.json || true
-          else
-            python -u scripts/preflight_csv.py "$SEL" | tee preflight.json || true
-          fi
+          PREF="tmp/trade/scripts/preflight_csv.py"
+          if [ ! -f "$PREF" ]; then PREF="scripts/preflight_csv.py"; fi
+          python -u "$PREF" "$SEL" | tee preflight.json || true
           echo "Selected CSV:"; cat scripts/CSV_PATH.txt
           ls -l "$SEL"
 
-      - name: Verify skeleton & import
+      - name: Verify skeleton and import
         continue-on-error: true
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python - <<'PY'
-import os, importlib, json, sys, pathlib
-p = os.environ.get("CSV_PATH") or (pathlib.Path("scripts/CSV_PATH.txt").read_text().strip() if pathlib.Path("scripts/CSV_PATH.txt").exists() else "")
-out={"csv_path":p, "csv_exists": os.path.isfile(p)}
-for mod in ["backtest.runner","trend4p.calibration"]:
-    try:
-        m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)
-    except Exception as e:
-        out[mod]=f"IMPORT_ERROR: {e}"
-print(json.dumps(out, ensure_ascii=False))
-sys.exit(0 if out["csv_exists"] else 3)
-PY
+          printf '%s
+'             'import os, importlib, json, sys, pathlib'             'p = os.environ.get("CSV_PATH") or (pathlib.Path("scripts/CSV_PATH.txt").read_text().strip() if pathlib.Path("scripts/CSV_PATH.txt").exists() else "")'             'out={"csv_path":p, "csv_exists": os.path.isfile(p)}'             'for mod in ["backtest.runner","trend4p.calibration"]:'             '    try:'             '        m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)'             '    except Exception as e:'             '        out[mod]=f"IMPORT_ERROR: {e}"'             'print(json.dumps(out, ensure_ascii=False))'             'import sys as _s; _s.exit(0 if out["csv_exists"] else 3)'             > verify_import.py
+          python -u verify_import.py
 
-      - name: Engine compile triage & auto-fix
+      - name: Engine compile triage
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          python - <<'PY'
-import sys, os, py_compile, pathlib, json
-roots=["tmp/trade","tmp/trade/backtest","tmp/trade/trend4p"]
-files=[]
-for r in roots:
-    if os.path.isdir(r):
-        for p in pathlib.Path(r).rglob("*.py"):
-            files.append(str(p))
-fails=[]
-for f in files:
-    try:
-        py_compile.compile(f, doraise=True)
-    except Exception as e:
-        fails.append((f,str(e)))
-print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))
-PY
+          printf '%s
+'             'import sys, os, py_compile, pathlib, json'             'roots=["tmp/trade","tmp/trade/backtest","tmp/trade/trend4p"]'             'files=[]'             'for r in roots:'             '    if os.path.isdir(r):'             '        for p in pathlib.Path(r).rglob("*.py"):'             '            files.append(str(p))'             'fails=[]'             'for f in files:'             '    try:'             '        py_compile.compile(f, doraise=True)'             '    except Exception as e:'             '        fails.append((f,str(e)))'             'print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))'             > triage.py
+          python -u triage.py
 
       - name: Run backtest (entrypoint sweep)
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           tryrun() { echo "[try] $*"; python -u "$@" && return 0 || return 1; }
-          # prefer entry script if provided
           if [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
             bash tmp/trade/scripts/entrypoint_run.sh || true
           else
-            # try common entrypoints
             if [ -f tmp/trade/run_4u.py ]; then tryrun tmp/trade/run_4u.py || true; fi
             if [ -f tmp/trade/backtest/runner.py ]; then tryrun tmp/trade/backtest/runner.py || true; fi
-            python - <<'PY' || true
-import importlib
-import sys
-mods=["backtest.runner"]
-for m in mods:
-    try:
-        importlib.import_module(m)
-        if hasattr(sys.modules[m], "main"):
-            sys.modules[m].main()
-    except Exception as e:
-        pass
-PY
           fi
-          # ensure artifacts dir exists
           mkdir -p _out_4u/run
+          python - "$@" <<'PYCODE' >/dev/null 2>&1 || true
+PYCODE
+          python - <<'PYCODE' >/dev/null 2>&1 || true
+PYCODE
           # ensure minimal artifacts exist
-          python - <<'PY'
+          python - "$@" <<'PY'
 import json, os, pathlib
-root=pathlib.Path("_out_4u")
-root.mkdir(exist_ok=True, parents=True)
+root=pathlib.Path("_out_4u"); root.mkdir(exist_ok=True, parents=True)
 run=(root/"run"); run.mkdir(exist_ok=True, parents=True)
-for fp, default in [
-  (root/"summary.json", {"status":"empty"}),
-  (root/"gating_debug.json", {}),
-  (run/"gating_debug.json", {}),
-  (root/"preds_test.csv", ""),
-  (root/"trades.csv", ""),
-]:
+def ensure(fp, default):
     if not fp.exists():
         if isinstance(default, dict):
             fp.write_text(json.dumps(default))
         else:
             fp.write_text(default)
+ensure(root/"summary.json", {"status":"empty"})
+ensure(root/"gating_debug.json", {})
+ensure(run/"gating_debug.json", {})
+ensure(root/"preds_test.csv", "")
+ensure(root/"trades.csv", "")
 PY
 
       - name: Post analyze gating (if available)
@@ -279,4 +219,3 @@ PY
           path: |
             _out_4u/**
             preflight.json
-          if-no-files-found: warn
