@@ -1,4 +1,4 @@
-name: Backtest v1.1.1 (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap)
+name: Backtest v1.1.1 (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix)
 
 on:
   workflow_dispatch:
@@ -163,6 +163,7 @@ jobs:
           echo "Exists?"; [ -f "$(cat scripts/CSV_PATH.txt 2>/dev/null)" ] && echo yes || echo no
 
       - name: Verify skeleton & import
+        continue-on-error: true
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
@@ -177,6 +178,43 @@ jobs:
                   out[mod]=f"IMPORT_ERROR: {e}"
           print(json.dumps(out, ensure_ascii=False))
           if not out["csv_exists"]: raise SystemExit(3)
+          PY
+
+      - name: Engine compile triage & auto-fix
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, py_compile, re
+          cands=["tmp/trade/backtest/engine.py","tmp/trade/engine.py"]
+          p=next((x for x in cands if os.path.isfile(x)), "")
+          print("ENG=", p)
+          if not p:
+              print("NO_ENGINE"); raise SystemExit(0)
+          raw=open(p,'rb').read()
+          raw=raw.lstrip(b'\xef\xbb\xbf').replace(b'\r\n',b'\n').replace(b'\t',b'    ')
+          open(p,'wb').write(raw)
+          try:
+              py_compile.compile(p, doraise=True)
+              print("COMPILE_OK")
+          except Exception as e:
+              print("COMPILE_ERR:", e)
+              txt=open(p,encoding='utf-8',errors='ignore').read().splitlines()
+              ln=getattr(e,'lineno',None)
+              if ln:
+                  a=max(0,ln-10); b=min(len(txt),ln+10)
+                  print("--- engine.py snippet ---")
+                  for i in range(a,b):
+                      pref=">>" if i+1==ln else "  "
+                      print(f"{pref} {i+1:04d}: {txt[i]}")
+                  print("--- end ---")
+              fixed=re.sub(r'(?m)^\s+$','', '\n'.join(txt))
+              open(p,'w',encoding='utf-8').write(fixed)
+              try:
+                  py_compile.compile(p, doraise=True)
+                  print("RETRY_COMPILE_OK_AFTER_FIX")
+              except Exception as e2:
+                  print("RETRY_COMPILE_ERR:", e2)
           PY
 
       - name: Smoke test Calibrator API
@@ -195,7 +233,6 @@ jobs:
           print("Calibrator API OK")
           PY
 
-      # ---------- NEW: Bootstrap helper scripts (fallback) ----------
       - name: Bootstrap helper scripts (fallback)
         run: |
           set -euo pipefail
@@ -224,7 +261,6 @@ jobs:
           PY
           chmod +x scripts/canon_csv.py
           ls -al scripts || true
-      # -------------------------------------------------------------
 
       - name: Run backtest
         continue-on-error: true
@@ -257,16 +293,13 @@ jobs:
             fi
             return 0
           }
-          # summary/metrics
           for n in summary.json metrics.json; do pick "$n" "$n"; done
-          # preds (fallbacks incl. csv.gz)
           pick "preds_test.csv" "preds_test.csv"
           [ -s _out_4u/preds_test.csv ] || pick "preds.csv" "preds_test.csv"
           if [ ! -s _out_4u/preds_test.csv ]; then
             gz="$(find tmp/trade -maxdepth 6 -type f -name 'preds*.csv.gz' | head -n1 || true)"
             if [ -n "$gz" ]; then gzip -dc "$gz" > _out_4u/preds_test.csv && echo "collected preds_test.csv from $gz (gunzip)"; fi
           fi
-          # trades (fallbacks)
           pick "trades.csv" "trades.csv"
           [ -s _out_4u/trades.csv ] || pick "orders.csv" "trades.csv"
 
@@ -324,6 +357,20 @@ jobs:
         run: |
           set -euo pipefail
           python -u scripts/quick_report.py || true
+
+      - name: Upload debug bundle (workspace snapshot)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: debug_bundle
+          path: |
+            preflight.json
+            scripts/**
+            _out_4u/**
+            tmp/trade/conf/**
+            tmp/trade/backtest/**.py
+            tmp/trade/trend4p/**.py
+            tmp/trade/run_4u.py
 
       - name: Upload artifacts
         if: ${{ always() }}
