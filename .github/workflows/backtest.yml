@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist2.1)
+name: Backtest v1.0.8 (Checklist2.2)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - name: Validate pinned SHAs (Checklist2.1)
+      - name: Validate pinned SHAs (Checklist2.2)
         run: |
           set -euo pipefail
           verify() {
@@ -82,7 +82,7 @@ jobs:
             printf '%s\n' "$dups"
           fi
 
-      - name: Unzip packs (non-interactive, flatten)
+      - name: Unzip packs (non-interactive, flatten) + sample csv list
         run: |
           set -euo pipefail
           unzip -oq tmp/code.zip -d tmp/trade_raw
@@ -95,7 +95,7 @@ jobs:
           fi
           unzip -oq tmp/data.zip -d tmp/data
           echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
-          echo "Top files:"; ls -al tmp/trade | sed -n '1,120p'
+          echo "CSV sample (max 10):"; find tmp/data -type f -name "*.csv" | head -n 10 || true
 
       - name: Sanitize stdlib shadows (importlib/typing/enum/dataclasses)
         run: |
@@ -161,7 +161,7 @@ jobs:
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh (ABS CSV + faulthandler + full tee)
+      - name: Write entrypoint_run.sh (robust CSV resolve + --data_path first)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
@@ -172,21 +172,39 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           trap 'echo "::group::tail stdout.log"; tail -n 200 "$LOG" 2>/dev/null || true; echo "::endgroup::"' EXIT
 
-          # Resolve CSV path from preflight (absolute path enforced)
-          CSV_PATH="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
-          if [ -z "${CSV_PATH:-}" ]; then
-            CSV_PATH="$(find "$GITHUB_WORKSPACE/tmp/data" -type f -name "*.csv" | head -n1 || true)"
-          fi
-          if [ -n "${CSV_PATH:-}" ]; then
-            CSV_PATH="$(python - <<'PY'
-          import os,sys
-          p=sys.stdin.read().strip()
-          print(os.path.abspath(p))
+          # 1) Read candidate from preflight (strip) — may be empty or whitespace-only
+          RAW="$(cat scripts/CSV_PATH.txt 2>/dev/null || true)"
+          CAND="$(python - <<'PY'
+          import sys; print(sys.stdin.read().strip())
           PY
-          <<<"$CSV_PATH")"
+          <<<"$RAW")"
+
+          # 2) If candidate is relative, make absolute; if not a *file*, search tmp/data
+          canon() {
+            python - <<'PY'
+import os, sys, glob
+ws = os.environ.get("GITHUB_WORKSPACE")
+cand = os.environ.get("CAND","").strip()
+def abs1(p): return os.path.abspath(p) if p else ""
+p = abs1(cand if os.path.isabs(cand) else os.path.join(ws, cand))
+if p and os.path.isfile(p):
+    print(p); raise SystemExit
+# search under tmp/data
+for f in glob.glob(os.path.join(ws, "tmp", "data", "**", "*.csv"), recursive=True):
+    print(os.path.abspath(f)); raise SystemExit
+print("")  # not found
+PY
+          }
+          export CAND="$CAND"
+          CSV_PATH="$(canon)"
+
+          # 3) Final guard: must be a real file
+          if [ -z "${CSV_PATH:-}" ] || [ ! -f "$CSV_PATH" ]; then
+            echo "::error::No CSV found under tmp/data (got: '${CAND:-<empty>}')" | tee -a "$LOG"
+            python -u "$GITHUB_WORKSPACE/scripts/make_empty_artifacts.py" | tee -a "$LOG"
+            exit 0
           fi
-          echo "Using CSV: ${CSV_PATH:-<none>}" | tee -a "$LOG"
-          export CSV_PATH="${CSV_PATH:-}"
+          echo "Using CSV: $CSV_PATH (exists=$( [ -f "$CSV_PATH" ] && echo yes || echo no ))" | tee -a "$LOG"
 
           # Safe PYTHONPATH under set -u
           export PYTHONPATH="${ROOT}:${ROOT}/backtest:${PYTHONPATH:-}"
@@ -196,18 +214,15 @@ jobs:
           CFG="conf/config.yml"
 
           py() { python -X faulthandler -u "$@"; }
-          try() {
-            echo "+ $*" | tee -a "$LOG"
-            ( "$@" ) >>"$LOG" 2>&1
-            return ${PIPESTATUS[0]}
-          }
+          try() { echo "+ $*" | tee -a "$LOG"; ( "$@" ) >>"$LOG" 2>&1; return ${PIPESTATUS[0]}; }
 
-          try py run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
+          # ---- prefer --data_path first (project signature) ----
           try py run_4u.py --data_path "$CSV_PATH" --config "$CFG" && exit 0
+          try py run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try py run_4u.py "$CSV_PATH" && exit 0
           if [ -f "backtest/run_4u.py" ]; then
-            try py backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
             try py backtest/run_4u.py --data_path "$CSV_PATH" --config "$CFG" && exit 0
+            try py backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           fi
           try py -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
 
@@ -257,7 +272,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist2.1) ---
+          # --- Injected Calibrator shim (Checklist2.2) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -331,7 +346,7 @@ jobs:
           python - <<'PY'
           import sys, os
           p = open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
-          print("CSV_PATH(pre-run):", p, "exists=", os.path.exists(p))
+          print("CSV_PATH(pre-run):", p, "exists=", os.path.isfile(p))
           try:
               from trend4p.calibration import Calibrator
           except Exception as e:
