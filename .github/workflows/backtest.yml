@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist2.3a)
+name: Backtest v1.0.9 (Checklist2.3a+gatefix)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: Code ZIP path (repo-relative or URL)
         required: true
-        default: trade_v1.0.8.zip
+        default: trade_v1.0.9.zip
       DATA_ZIP:
         description: Data ZIP path (repo-relative or URL)
         required: true
@@ -18,7 +18,11 @@ on:
       ALLOW_DEDUP:
         description: "Deduplicate code.zip automatically if duplicate paths found"
         required: false
-        default: "false"
+        default: "true"  # 2.3a 업데이트: 기본 자동 디듀프 허용
+      COVERAGE_GUARD:
+        description: "Fail run when inferred coverage == 0"
+        required: false
+        default: "true"
 
 jobs:
   backtest:
@@ -57,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -yq --no-install-recommends unzip tzdata
+          sudo apt-get install -yq --no-install-recommends unzip tzdata rsync
           sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
           sudo dpkg-reconfigure -f noninteractive tzdata
 
@@ -78,6 +82,12 @@ jobs:
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
 
+      - name: Show code.zip sha256 & list
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null; then sha256sum tmp/code.zip; else shasum -a 256 tmp/code.zip; fi
+          unzip -Z1 tmp/code.zip | head -n 50 || true
+
       - name: Inspect code.zip for duplicates (fail-fast or auto-dedupe)
         run: |
           set -euo pipefail
@@ -90,8 +100,8 @@ jobs:
               rm -rf tmp/code_src
               mkdir -p tmp/code_src
               unzip -oq tmp/code.zip -d tmp/code_src
-              (cd tmp/code_src && zip -qr -X ../code.fixed.zip .)
-              mv -f tmp/code.fixed.zip tmp/code.zip
+              (cd tmp && zip -qr -X code.dedup.zip code_src)
+              mv -f tmp/code.dedup.zip tmp/code.zip
               echo "::notice::Dedup complete; proceeding with cleaned archive."
             else
               echo "::error title=ZipDuplicate::Please rebuild code.zip without duplicates (or rerun with ALLOW_DEDUP=true)"
@@ -133,7 +143,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
-      # ---------- Writers ----------
+      # ---------- Writers (scripts) ----------
       - name: Write preflight_csv.py (ABS path writer)
         run: |
           set -euo pipefail
@@ -166,8 +176,8 @@ jobs:
           #!/usr/bin/env python3
           import os, sys, glob
           ws = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
-          cand = (sys.argv[1] if len(sys.argv)>1 else "").strip()
           def abs1(p): return os.path.abspath(p) if p else ""
+          cand = (sys.argv[1] if len(sys.argv)>1 else "").strip()
           p = abs1(cand if os.path.isabs(cand) else os.path.join(ws, cand))
           if p and os.path.isfile(p):
               print(p); sys.exit(0)
@@ -267,7 +277,7 @@ jobs:
           PY_SHIM
           chmod +x scripts/run_4u_shim.py
 
-      - name: Write calibration shim injector
+      - name: Write calibration shim injector (predict/predict_proba 포함)
         run: |
           set -euo pipefail
           cat <<'PY_CAL' > scripts/ensure_calibrator.py
@@ -277,48 +287,97 @@ jobs:
           if not f.exists():
               sys.exit(0)
           code = f.read_text(encoding="utf-8")
-          if re.search(r'\bclass\s+Calibrator\b', code):
-              print("Calibrator already exists"); sys.exit(0)
+          if re.search(r'\bclass\s+Calibrator\b', code) and ("predict(" in code) and ("predict_proba(" in code):
+              print("Calibrator already provides predict/predict_proba"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist2.3a) ---
+          # --- Injected Calibrator shim (Checklist2.3a+gatefix) ---
           try:
-              import numpy as np
-              from sklearn.isotonic import IsotonicRegression
+              import numpy as _np
+              from sklearn.isotonic import IsotonicRegression as _Iso
           except Exception:
-              class _Identity:
-                  def fit(self, *a, **k): return self
-                  def transform(self, x): return x
-              IsotonicRegression = _Identity
-          import numpy as _np
+              import numpy as _np
+              class _Iso:
+                  def __init__(self,*a,**k): pass
+                  def fit(self,*a,**k): return self
+                  def transform(self, x): return _np.asarray(x,float).ravel()
           class Calibrator:
               def __init__(self, method="isotonic", by_session=False, **kwargs):
-                  self.method = method; self.by_session = by_session; self.kwargs = kwargs; self._models = {}
-              def _fit_one(self, y, p):
-                  y = _np.asarray(y).astype(float); p = _np.asarray(p).astype(float)
-                  p = _np.clip(p, 1e-6, 1-1e-6)
-                  try:
-                      ir = IsotonicRegression(out_of_bounds="clip"); ir.fit(p, y); return ir
-                  except Exception:
-                      return None
-              def fit(self, y=None, p=None, **kwargs):
-                  if y is None and p is None and "proba" in kwargs and "target" in kwargs: p, y = kwargs["proba"], kwargs["target"]
-                  if y is not None and p is None and isinstance(y, (tuple, list)) and len(y)==2: p, y = y
-                  if p is not None and y is None and isinstance(p, (tuple, list)) and len(p)==2: y, p = p
-                  self._models["global"] = self._fit_one(y, p); return self
+                  self.method = (method or "off").lower(); self.by_session=bool(by_session); self._m=None
+              def _prep(self, y, p):
+                  y=_np.asarray(y,float).ravel(); p=_np.asarray(p,float).ravel()
+                  m=_np.isfinite(y)&_np.isfinite(p); return y[m],p[m]
+              def fit(self, y=None, p=None, **kw):
+                  if y is None and p is None:
+                      p = kw.get("proba") or kw.get("p"); y = kw.get("target") or kw.get("y")
+                  if p is None or y is None:
+                      self._m=None; return self
+                  y,p=self._prep(y,p)
+                  if y.size<3:
+                      self._m=None; return self
+                  self._m = _Iso(out_of_bounds="clip").fit(p,y) if self.method in ("isotonic","iso") else None
+                  return self
               def transform(self, p):
-                  m = self._models.get("global"); 
-                  if m is None: return p
-                  p = _np.asarray(p).astype(float)
-                  try: return _np.clip(m.transform(p), 1e-6, 1-1e-6)
-                  except Exception: return p
+                  p=_np.asarray(p,float).ravel()
+                  try: out=self._m.transform(p) if self._m is not None else p
+                  except Exception: out=p
+                  return _np.clip(_np.asarray(out,float).ravel(),1e-6,1-1e-6)
+              def predict(self, p): return self.transform(p)
+              def predict_proba(self, p): return self.transform(p)
               def __call__(self, p): return self.transform(p)
-              def fit_transform(self, y, p, **kwargs): return self.fit(y=y, p=p, **kwargs).transform(p)
+              def fit_transform(self, y, p, **kw): return self.fit(y=y,p=p,**kw).transform(p)
           # --- End shim ---
           '''
           f.write_text(code + "\n" + append, encoding="utf-8")
-          print("Injected Calibrator shim into trend4p/calibration.py")
+          print("Injected Calibrator shim with predict/predict_proba")
           PY_CAL
           chmod +x scripts/ensure_calibrator.py
+
+      - name: Write gating post-analyze & self-check (gatefix)
+        run: |
+          set -euo pipefail
+          cat <<'PY_POST' > scripts/post_analyze.py
+          #!/usr/bin/env python3
+          import os, json, pandas as pd
+          from pathlib import Path
+          OUT = Path("_out_4u"); RUN = OUT/"run"; RUN.mkdir(parents=True, exist_ok=True)
+          diag = {}
+          preds_p = OUT/"preds_test.csv"; trades_p = OUT/"trades.csv"
+          def safe_read(p):
+              try: return pd.read_csv(p)
+              except Exception: return None
+          preds = safe_read(preds_p); trades = safe_read(trades_p)
+          diag["exists"]={"preds": preds is not None, "trades": trades is not None}
+          diag["sizes"]={"preds_rows": 0 if preds is None else int(len(preds)),
+                         "trades_rows": 0 if trades is not None else int(len(trades))}
+          cov=0.0
+          if trades is not None and len(trades)>0:
+              cov = float(len(trades))/max(1, diag["sizes"]["preds_rows"])
+          elif preds is not None and "gate" in preds.columns:
+              cov = float((preds["gate"].astype(float)>0.5).mean())
+          if preds is not None and "gate" in preds.columns:
+              g=preds["gate"].astype(float)
+              qs=[0.0,0.01,0.5,0.9,0.95,0.99,1.0]
+              diag["gate_percentiles"]={str(q): float(g.quantile(q)) for q in qs}
+              diag["gate_mean"]=float(g.mean())
+          diag["coverage_overall_inferred"]=cov
+          (RUN/"gating_debug.json").write_text(json.dumps(diag, indent=2, ensure_ascii=False), encoding="utf-8")
+          print("[post_analyze] coverage≈", cov)
+          if os.environ.get("COVERAGE_GUARD","false").lower()=="true" and cov<=0.0:
+              import sys; print("::error::coverage==0"); sys.exit(3)
+          PY_POST
+          chmod +x scripts/post_analyze.py
+
+          cat <<'PY_SC' > scripts/self_check_gate.py
+          #!/usr/bin/env python3
+          import json
+          from pathlib import Path
+          p = Path("_out_4u/run/gating_debug.json")
+          assert p.exists() and p.stat().st_size>2, "gating_debug.json missing or empty"
+          obj = json.loads(p.read_text(encoding="utf-8"))
+          assert "coverage_overall_inferred" in obj, "missing coverage"
+          print("[self_check_gate] OK; coverage≈", obj.get("coverage_overall_inferred"))
+          PY_SC
+          chmod +x scripts/self_check_gate.py
 
       - name: Patch calibration if needed
         run: |
@@ -387,6 +446,22 @@ jobs:
           if not out["csv_exists"]: sys.exit(3)
           PY
 
+      - name: Smoke test Calibrator API
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          python - <<'PY'
+          import numpy as np
+          from trend4p.calibration import Calibrator
+          c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
+          x = [0.2,0.5,0.8]
+          for fn in ("transform","predict","predict_proba"):
+              y = getattr(c, fn)(x)
+              arr = np.asarray(y, float)
+              assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
+          print("Calibrator API OK")
+          PY
+
       - name: Run backtest
         run: |
           set -euo pipefail
@@ -405,6 +480,18 @@ jobs:
               echo "collected $name from $f"
             fi
           done
+
+      - name: Post analyze gating (fill run/gating_debug.json)
+        env:
+          COVERAGE_GUARD: ${{ github.event.inputs.COVERAGE_GUARD }}
+        run: |
+          set -euo pipefail
+          python -u scripts/post_analyze.py
+
+      - name: Self-check gating
+        run: |
+          set -euo pipefail
+          python -u scripts/self_check_gate.py
 
       - name: Post-run sanity (warn if empty)
         run: |
@@ -442,6 +529,6 @@ jobs:
       - name: Upload artifacts (entire folder)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.0.8_outputs
+          name: backtest_v1.0.9_outputs
           path: _out_4u/**
           if-no-files-found: warn
