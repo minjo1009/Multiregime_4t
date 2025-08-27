@@ -1,4 +1,4 @@
-name: Backtest v1.1.3d (Checklist2.3a+V1; no heredoc anywhere)
+name: Backtest v1.1.3e (Checklist2.3a+V1; no heredoc; no python -c in smoke)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: Code ZIP path (repo-relative or URL)
         required: true
-        default: trade_v1.1.3b_execfix.zip
+        default: trade_v1.1.3.zip
       DATA_ZIP:
         description: Data ZIP path (repo-relative or URL)
         required: true
@@ -218,11 +218,21 @@ jobs:
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python -c "import numpy as np; from trend4p.calibration import Calibrator; c=Calibrator(method='isotonic').fit([0,1,1,0],[0.1,0.8,0.9,0.2]); x=[0.2,0.5,0.8]; import numpy as _np; \
-y1=c.transform(x); y2=c.predict(x); y3=c.predict_proba(x); \
-assert _np.asarray(y1,float).shape[0]==3; assert _np.isfinite(_np.asarray(y1,float)).all(); \
-assert _np.asarray(y2,float).shape[0]==3; assert _np.isfinite(_np.asarray(y2,float)).all(); \
-assert _np.asarray(y3,float).shape[0]==3; assert _np.isfinite(_np.asarray(y3,float)).all(); print('Calibrator API OK')"
+          {
+            printf '%s\n' \
+              "import numpy as np" \
+              "from trend4p.calibration import Calibrator" \
+              "c=Calibrator(method='isotonic').fit([0,1,1,0],[0.1,0.8,0.9,0.2])" \
+              "x=[0.2,0.5,0.8]" \
+              "import numpy as _np" \
+              "y1=c.transform(x); y2=c.predict(x); y3=c.predict_proba(x)" \
+              "assert _np.asarray(y1,float).shape[0]==3 and _np.isfinite(_np.asarray(y1,float)).all()" \
+              "assert _np.asarray(y2,float).shape[0]==3 and _np.isfinite(_np.asarray(y2,float)).all()" \
+              "assert _np.asarray(y3,float).shape[0]==3 and _np.isfinite(_np.asarray(y3,float)).all()" \
+              "print('Calibrator API OK')" \
+            > scripts/_smoke_calib.py
+          }
+          python scripts/_smoke_calib.py
 
       - name: Bootstrap helper scripts (fallback)
         run: |
@@ -336,5 +346,5 @@ print('no gating_debug.json (yet)' if not ok else f'gate_percentiles: {g} delta:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.1.3d_outputs
+          name: backtest_v1.1.3e_outputs
           path: _out_4u/**
