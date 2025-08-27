@@ -1,18 +1,18 @@
-name: "Backtest v1.1.1 (Patched-Minimal: CSVFix + SafeDupCheck + GatingSync)"
+name: "Backtest v1.1.1 (Patched Minimal - CSVFix SafeDup LinuxPy GatingSync)"
 
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Code ZIP path (repo-relative or URL)
+        description: "Code ZIP path (repo-relative or URL)"
         required: true
-        default: trade_v1.1.1.zip
+        default: "trade_v1.1.1.zip"
       DATA_ZIP:
-        description: Data ZIP path (repo-relative or URL)
+        description: "Data ZIP path (repo-relative or URL)"
         required: true
-        default: ETHUSDT_1min_2020_2025.zip
+        default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: Glob for CSV inside data zip
+        description: "Glob for CSV inside data zip"
         required: true
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       ALLOW_DEDUP:
@@ -33,7 +33,7 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
-      - name: Validate pinned SHAs (Checklist2.3a)
+      - name: Validate pinned SHAs
         run: |
           set -euo pipefail
           verify() {
@@ -53,11 +53,11 @@ jobs:
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Prepare OS deps
         env:
-          DEBIAN_FRONTEND: noninteractive
+          DEBIAN_FRONTEND: "noninteractive"
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           mkdir -p _out_4u/logs
           python - <<'PY'
-          import zipfile, sys, os
+          import zipfile, os
           dup, seen = [], set()
           with zipfile.ZipFile('tmp/code.zip','r') as z:
               for n in z.namelist():
@@ -150,6 +150,15 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
+      - name: Shim py launcher (Linux)
+        run: |
+          set -Eeuo pipefail
+          printf '#!/usr/bin/env bash
+python "$@"
+' > py
+          chmod +x py
+          echo "$PWD" >> "$GITHUB_PATH"
+
       - name: Writers (helpers)
         run: |
           set -euo pipefail
@@ -167,7 +176,7 @@ jobs:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python - <<'PY' > preflight.json
           import os, sys, glob, json
           root="tmp/data"
           pat=os.environ.get("CSV_GLOB") or "**/*.csv"
@@ -186,7 +195,7 @@ jobs:
           echo "Preflight path:"; cat scripts/CSV_PATH.txt
           echo "Exists?"; [ -f "$(cat scripts/CSV_PATH.txt)" ] && echo yes || echo no
 
-      - name: Verify skeleton & import
+      - name: Verify skeleton and import
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -204,25 +213,25 @@ jobs:
           if not out["csv_exists"]: raise SystemExit(3)
           PY
 
-      - name: Engine compile triage & auto-fix
+      - name: Engine compile triage
         continue-on-error: true
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, py_compile, re
-          cands=["tmp/trade/backtest/engine.py","tmp/trade/engine.py"]
-          p=next((x for x in cands if os.path.isfile(x)), "")
-          print("ENG=", p)
-          if not p:
-              print("NO_ENGINE"); raise SystemExit(0)
-          raw=open(p,'rb').read()
-          raw=raw.lstrip(b'\xef\xbb\xbf').replace(b'\r\n',b'\n').replace(b'\t',b'    ')
-          open(p,'wb').write(raw)
-          try:
-              py_compile.compile(p, doraise=True)
-              print("COMPILE_OK")
-          except Exception as e:
-              print("COMPILE_ERR:", e)
+          import sys, os, py_compile, pathlib, json
+          roots=["tmp/trade","tmp/trade/backtest","tmp/trade/trend4p"]
+          files=[]
+          for r in roots:
+              if os.path.isdir(r):
+                  for p in pathlib.Path(r).rglob("*.py"):
+                      files.append(str(p))
+          fails=[]
+          for f in files:
+              try:
+                  py_compile.compile(f, doraise=True)
+              except Exception as e:
+                  fails.append((f,str(e)))
+          print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))
           PY
 
       - name: Smoke test Calibrator API
@@ -241,22 +250,26 @@ jobs:
           print("Calibrator API OK")
           PY
 
-      - name: Run backtest
-        continue-on-error: true
+      - name: Run backtest (robust)
         run: |
-          set -euo pipefail
-          mkdir -p _out_4u/run
-          if [ -f scripts/entrypoint_run.sh ]; then
-            bash scripts/entrypoint_run.sh || echo "::warning::entrypoint failed (continuing)"
-          elif [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
-            bash tmp/trade/scripts/entrypoint_run.sh || echo "::warning::entrypoint failed (continuing)"
-          else
-            echo "::warning::missing entrypoint_run.sh; skipping to post-analyze"
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          CSV_PATH="$(cat scripts/CSV_PATH.txt)"
+          mkdir -p _out_4u/run _out_4u/logs
+          # 1) try entrypoint shell if present
+          if [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
+            ( bash -x tmp/trade/scripts/entrypoint_run.sh ) 2>&1 | tee _out_4u/logs/stdout.log || true
+          elif [ -f scripts/entrypoint_run.sh ]; then
+            ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee _out_4u/logs/stdout.log || true
           fi
-          [ -f _out_4u/run/gating_debug.json ] && cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
-          : > _out_4u/summary.json
-          : > _out_4u/preds_test.csv
-          : > _out_4u/trades.csv
+          # 2) fallback to direct python call if summary still empty
+          if [ ! -s _out_4u/summary.json ] && [ -f tmp/trade/run_4u.py ]; then
+            python -u tmp/trade/run_4u.py --data_path "$CSV_PATH" --config tmp/trade/conf/config.yml 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          fi
+          # 3) ensure minimal artifacts exist
+          [ -f _out_4u/summary.json ]   || : > _out_4u/summary.json
+          [ -f _out_4u/preds_test.csv ] || : > _out_4u/preds_test.csv
+          [ -f _out_4u/trades.csv ]     || : > _out_4u/trades.csv
 
       - name: Post analyze gating
         env:
@@ -285,5 +298,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.1.1_outputs
-          path: _out_4u/**
+          name: backtest_outputs
+          path: |
+            _out_4u/**
+            preflight.json
