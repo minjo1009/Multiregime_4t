@@ -1,4 +1,4 @@
-name: Backtest v1.1.3b (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix + CSV handshake fix)
+name: Backtest v1.1.3c (Checklist2.3a+V1 + Triage + SweepFix + Bootstrap + EngineFix + CSV handshake fix, no heredoc)
 
 on:
   workflow_dispatch:
@@ -148,7 +148,6 @@ jobs:
           chmod +x scripts/*.py 2>/dev/null || true
           echo "Synced scripts:"; ls -al scripts || true
 
-      # === CSV 경로 파일을 항상 생성 (here-doc 불사용) ===
       - name: Write CSV path (preflight)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
@@ -163,25 +162,26 @@ jobs:
           fi
           echo "Resolved CSV: $(cat scripts/CSV_PATH.txt)"
 
-      # === Verify: 작은 파이썬 파일로 저장 후 실행 (YAML 파서 안전) ===
+      # Verify step WITHOUT heredoc: build the python file via printf
       - name: Verify skeleton & import
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           CSV_PATH="$(cat scripts/CSV_PATH.txt)"; export CSV_PATH
-          cat > scripts/_verify_import.py <<'PY'
-import os, importlib, json, sys
-p = os.environ.get("CSV_PATH","").strip()
-out = {"csv_path": p, "csv_exists": os.path.isfile(p)}
-for mod in ("backtest.runner","trend4p.calibration"):
-    try:
-        m = importlib.import_module(mod)
-        out[mod] = getattr(m, "__file__", None)
-    except Exception as e:
-        out[mod] = f"IMPORT_ERROR: {e}"
-print(json.dumps(out, ensure_ascii=False))
-sys.exit(0 if out["csv_exists"] else 3)
-PY
+          {
+            printf '%s\n' "import os, importlib, json, sys" \
+                           "p=os.environ.get('CSV_PATH','').strip()" \
+                           "out={'csv_path':p, 'csv_exists':os.path.isfile(p)}" \
+                           "def imp(m):" \
+                           "    try:" \
+                           "        return importlib.import_module(m).__file__" \
+                           "    except Exception as e:" \
+                           "        return f'IMPORT_ERROR: {e}'" \
+                           "mods=('backtest.runner','trend4p.calibration')" \
+                           "for m in mods: out[m]=imp(m)" \
+                           "print(json.dumps(out, ensure_ascii=False))" \
+                           "sys.exit(0 if out['csv_exists'] else 3)"
+          } > scripts/_verify_import.py
           python scripts/_verify_import.py
 
       - name: Engine compile triage & auto-fix
@@ -354,5 +354,5 @@ PY
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_v1.1.3b_outputs
+          name: backtest_v1.1.3c_outputs
           path: _out_4u/**
