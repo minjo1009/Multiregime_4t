@@ -156,24 +156,20 @@ jobs:
           fi
           echo "Resolved CSV: $(cat scripts/CSV_PATH.txt)"
 
+      # === 변경 2: Verify도 here-doc 제거 ===
       - name: Verify skeleton & import
         run: |
           set -euo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           CSV_PATH="$(cat scripts/CSV_PATH.txt)"; export CSV_PATH
-          python - <<'PY'
-import os, importlib, json
-p = os.environ.get("CSV_PATH","").strip()
-out = {"csv_path": p, "csv_exists": os.path.isfile(p)}
-for mod in ["backtest.runner","trend4p.calibration"]:
+          python -c "import os,importlib,json; p=os.environ.get('CSV_PATH','').strip(); out={'csv_path':p,'csv_exists':os.path.isfile(p)}; mods=['backtest.runner','trend4p.calibration']; 
+for m in mods:
     try:
-        m = importlib.import_module(mod); out[mod] = getattr(m, "__file__", None)
+        mod=importlib.import_module(m); out[m]=getattr(mod,'__file__',None)
     except Exception as e:
-        out[mod] = f"IMPORT_ERROR: {e}"
-print(json.dumps(out, ensure_ascii=False))
-if not out["csv_exists"]:
-    raise SystemExit(3)
-PY
+        out[m]=f'IMPORT_ERROR: {e}'
+print(json.dumps(out, ensure_ascii=False)); 
+import sys; sys.exit(0 if out['csv_exists'] else 3)"
 
       - name: Engine compile triage & auto-fix
         continue-on-error: true
@@ -213,8 +209,9 @@ c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
 x = [0.2,0.5,0.8]
 for fn in ("transform","predict","predict_proba"):
     y = getattr(c, fn)(x)
-    arr = np.asarray(y, float)
-    assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
+    import numpy as _np
+    arr = _np.asarray(y, float)
+    assert arr.shape[0]==3 and _np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
 print("Calibrator API OK")
 PY
 
