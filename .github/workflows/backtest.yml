@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist2.0)
+name: Backtest v1.0.8 (Checklist2.1)
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - name: Validate pinned SHAs (Checklist2.0)
+      - name: Validate pinned SHAs (Checklist2.1)
         run: |
           set -euo pipefail
           verify() {
@@ -34,9 +34,9 @@ jobs:
             code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
             [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
           }
-          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
-          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
+          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
+          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -47,11 +47,14 @@ jobs:
           python-version: '3.11'
 
       - name: Prepare OS deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y unzip tzdata realpath
-          echo "TZ=Asia/Seoul" >> $GITHUB_ENV
+          sudo apt-get install -yq --no-install-recommends unzip tzdata
+          sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+          sudo dpkg-reconfigure -f noninteractive tzdata
 
       - name: Reset workspace folders (clean + precreate logs)
         run: |
@@ -174,7 +177,6 @@ jobs:
           if [ -z "${CSV_PATH:-}" ]; then
             CSV_PATH="$(find "$GITHUB_WORKSPACE/tmp/data" -type f -name "*.csv" | head -n1 || true)"
           fi
-          # ABS canon
           if [ -n "${CSV_PATH:-}" ]; then
             CSV_PATH="$(python - <<'PY'
           import os,sys
@@ -200,7 +202,6 @@ jobs:
             return ${PIPESTATUS[0]}
           }
 
-          # Prefer the interface your run_4u.py expects
           try py run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try py run_4u.py --data_path "$CSV_PATH" --config "$CFG" && exit 0
           try py run_4u.py "$CSV_PATH" && exit 0
@@ -256,7 +257,7 @@ jobs:
           if re.search(r'\bclass\s+Calibrator\b', code):
               print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist2.0) ---
+          # --- Injected Calibrator shim (Checklist2.1) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -329,7 +330,6 @@ jobs:
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
           python - <<'PY'
           import sys, os
-          # Path existence check
           p = open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
           print("CSV_PATH(pre-run):", p, "exists=", os.path.exists(p))
           try:
