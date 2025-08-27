@@ -1,4 +1,4 @@
-name: Backtest v1.0.8 (Checklist1.6)
+name: Backtest v1.0.8 (Checklist1.7)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Validate pinned SHAs (Checklist1.6)
+      - name: Validate pinned SHAs (Checklist1.7)
         run: |
           set -euo pipefail
           verify() {
@@ -31,9 +31,9 @@ jobs:
             code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
             [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
           }
-          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
-          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
-          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
+          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -90,6 +90,17 @@ jobs:
           echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
           echo "Top files:"; ls -al tmp/trade | sed -n '1,120p'
 
+      - name: Sanitize stdlib shadows (importlib/typing/enum/dataclasses)
+        run: |
+          set -euo pipefail
+          cd tmp/trade
+          for f in importlib.py typing.py enum.py dataclasses.py; do
+            if [ -f "$f" ]; then
+              mv "$f" "${f}.shadowed"
+              echo "::warning::Shadowed stdlib detected and renamed: $f -> ${f}.shadowed"
+            fi
+          done
+
       - name: Python deps (with fallback)
         working-directory: tmp/trade
         run: |
@@ -98,6 +109,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
 
+      # ---------- Writers ----------
       - name: Write preflight_csv.py
         run: |
           set -euo pipefail
@@ -126,7 +138,7 @@ jobs:
           PY_A
           chmod +x scripts/preflight_csv.py
 
-      - name: Write make_empty_artifacts.py
+      - name: Write make_empty_artifacts.py (dual gating_debug)
         run: |
           set -euo pipefail
           cat <<'PY_B' > scripts/make_empty_artifacts.py
@@ -134,14 +146,16 @@ jobs:
           import pathlib
           base = pathlib.Path("_out_4u/run"); base.mkdir(parents=True, exist_ok=True)
           (base/"gating_debug.json").write_text("{}", encoding="utf-8")
-          (pathlib.Path("_out_4u")/"summary.json").write_text("{}", encoding="utf-8")
-          (pathlib.Path("_out_4u")/"preds_test.csv").write_text("", encoding="utf-8")
-          (pathlib.Path("_out_4u")/"trades.csv").write_text("", encoding="utf-8")
+          root = pathlib.Path("_out_4u"); root.mkdir(parents=True, exist_ok=True)
+          (root/"gating_debug.json").write_text("{}", encoding="utf-8")
+          (root/"summary.json").write_text("{}", encoding="utf-8")
+          (root/"preds_test.csv").write_text("", encoding="utf-8")
+          (root/"trades.csv").write_text("", encoding="utf-8")
           print("Empty artifacts created")
           PY_B
           chmod +x scripts/make_empty_artifacts.py
 
-      - name: Write entrypoint_run.sh (no importlib, safe env)
+      - name: Write entrypoint_run.sh (safe env)
         run: |
           set -euo pipefail
           cat <<'SH_A' > scripts/entrypoint_run.sh
@@ -169,7 +183,6 @@ jobs:
           CFG="conf/config.yml"
           try() { echo "+ $*"; ( "$@" ) && return 0 || return 1; }
 
-          # prefer package entry
           try python run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --csv "$CSV_PATH" --config "$CFG" && exit 0
           try python run_4u.py --data "$CSV_PATH" -c "$CFG" && exit 0
@@ -177,8 +190,6 @@ jobs:
           if [ -f "backtest/run_4u.py" ]; then
             try python backtest/run_4u.py --data "$CSV_PATH" --config "$CFG" && exit 0
           fi
-
-          # no importlib-based detection (shadow-safe)
           try python -m backtest.runner --data "$CSV_PATH" --config "$CFG" && exit 0 || true
 
           echo "::warning::Entrypoint attempts failed; writing empty artifacts"
@@ -186,6 +197,33 @@ jobs:
           exit 0
           SH_A
           chmod +x scripts/entrypoint_run.sh
+
+      - name: Write shim source (standalone file)
+        run: |
+          set -euo pipefail
+          cat <<'PY_SHIM' > scripts/run_4u_shim.py
+          import os, sys
+          def main():
+              csv = os.environ.get("CSV_PATH") or (sys.argv[1] if len(sys.argv)>1 else None)
+              cfg = "conf/config.yml"
+              if not csv:
+                  print("[shim] CSV_PATH not provided"); return 3
+              try:
+                  from backtest.runner import run_backtest
+              except Exception as e:
+                  print(f"[shim] runner import failed: {e}"); return 2
+              try:
+                  _ = run_backtest(data_path=csv, config_path=cfg)
+              except TypeError:
+                  try:
+                      _ = run_backtest(csv, cfg)
+                  except Exception as e:
+                      print(f"[shim] run_backtest failed: {e}"); return 4
+              return 0
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY_SHIM
+          chmod +x scripts/run_4u_shim.py
 
       - name: Write calibration shim injector
         run: |
@@ -198,10 +236,9 @@ jobs:
               sys.exit(0)
           code = f.read_text(encoding="utf-8")
           if re.search(r'\bclass\s+Calibrator\b', code):
-              print("Calibrator already exists")
-              sys.exit(0)
+              print("Calibrator already exists"); sys.exit(0)
           append = r'''
-          # --- Injected Calibrator shim (Checklist1.6) ---
+          # --- Injected Calibrator shim (Checklist1.7) ---
           try:
               import numpy as np
               from sklearn.isotonic import IsotonicRegression
@@ -211,49 +248,29 @@ jobs:
                   def transform(self, x): return x
               IsotonicRegression = _Identity
           import numpy as _np
-
           class Calibrator:
               def __init__(self, method="isotonic", by_session=False, **kwargs):
-                  self.method = method
-                  self.by_session = by_session
-                  self.kwargs = kwargs
-                  self._models = {}
-
+                  self.method = method; self.by_session = by_session; self.kwargs = kwargs; self._models = {}
               def _fit_one(self, y, p):
-                  y = _np.asarray(y).astype(float)
-                  p = _np.asarray(p).astype(float)
+                  y = _np.asarray(y).astype(float); p = _np.asarray(p).astype(float)
                   p = _np.clip(p, 1e-6, 1-1e-6)
                   try:
-                      ir = IsotonicRegression(out_of_bounds="clip")
-                      ir.fit(p, y)
-                      return ir
+                      ir = IsotonicRegression(out_of_bounds="clip"); ir.fit(p, y); return ir
                   except Exception:
                       return None
-
               def fit(self, y=None, p=None, **kwargs):
-                  if y is None and p is None and "proba" in kwargs and "target" in kwargs:
-                      p, y = kwargs["proba"], kwargs["target"]
-                  if y is not None and p is None and isinstance(y, (tuple, list)) and len(y)==2:
-                      p, y = y
-                  if p is not None and y is None and isinstance(p, (tuple, list)) and len(p)==2:
-                      y, p = p
-                  self._models["global"] = self._fit_one(y, p)
-                  return self
-
+                  if y is None and p is None and "proba" in kwargs and "target" in kwargs: p, y = kwargs["proba"], kwargs["target"]
+                  if y is not None and p is None and isinstance(y, (tuple, list)) and len(y)==2: p, y = y
+                  if p is not None and y is None and isinstance(p, (tuple, list)) and len(p)==2: y, p = p
+                  self._models["global"] = self._fit_one(y, p); return self
               def transform(self, p):
-                  m = self._models.get("global")
+                  m = self._models.get("global"); 
                   if m is None: return p
                   p = _np.asarray(p).astype(float)
-                  try:
-                      return _np.clip(m.transform(p), 1e-6, 1-1e-6)
-                  except Exception:
-                      return p
-
-              def __call__(self, p):
-                  return self.transform(p)
-
-              def fit_transform(self, y, p, **kwargs):
-                  return self.fit(y=y, p=p, **kwargs).transform(p)
+                  try: return _np.clip(m.transform(p), 1e-6, 1-1e-6)
+                  except Exception: return p
+              def __call__(self, p): return self.transform(p)
+              def fit_transform(self, y, p, **kwargs): return self.fit(y=y, p=p, **kwargs).transform(p)
           # --- End shim ---
           '''
           f.write_text(code + "\n" + append, encoding="utf-8")
@@ -277,7 +294,6 @@ jobs:
           else
             echo "Original run_4u.py present; shim not installed."
           fi
-        shell: bash
 
       - name: Preflight data (warn-only)
         env:
@@ -287,12 +303,55 @@ jobs:
           python -u scripts/preflight_csv.py tmp/data | tee preflight.json || true
           [ -f CSV_PATH.txt ] && mv CSV_PATH.txt scripts/CSV_PATH.txt || true
 
+      - name: Verify runner & calibrator before run
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          python - <<'PY'
+          import sys
+          try:
+              from trend4p.calibration import Calibrator
+          except Exception as e:
+              print("!! Calibrator import failed:", e); sys.exit(2)
+          try:
+              from backtest.runner import run_backtest
+          except Exception as e:
+              print("!! backtest.runner import failed:", e); sys.exit(3)
+          print("OK: Calibrator & run_backtest ready")
+          PY
+
       - name: Run backtest
         run: |
           set -euo pipefail
           python -u scripts/make_empty_artifacts.py
           bash scripts/entrypoint_run.sh
+          # keep root copy of gating_debug in sync if run output exists
+          [ -f _out_4u/run/gating_debug.json ] && cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
           echo "Artifacts directory:"; ls -al _out_4u || true; ls -al _out_4u/run || true
+
+      - name: Post-run sanity (warn if empty)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, json, sys
+          paths = [
+              "_out_4u/summary.json",
+              "_out_4u/preds_test.csv",
+              "_out_4u/trades.csv",
+              "_out_4u/gating_debug.json",
+              "_out_4u/run/gating_debug.json",
+          ]
+          for p in paths:
+              if not os.path.exists(p):
+                  print(f"::warning::missing {p}")
+                  continue
+              try:
+                  sz = os.path.getsize(p)
+              except Exception:
+                  sz = -1
+              if sz <= 2:
+                  print(f"::warning::empty artifact: {p} ({sz} bytes)")
+          PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -301,6 +360,7 @@ jobs:
           path: |
             _out_4u/summary.json
             _out_4u/gating_debug.json
+            _out_4u/run/gating_debug.json
             _out_4u/preds_test.csv
             _out_4u/trades.csv
           if-no-files-found: warn
