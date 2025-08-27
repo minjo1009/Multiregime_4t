@@ -1,4 +1,4 @@
-name: Backtest v1.1.0 (Checklist2.3a+V1-fixed2+triage)
+name: Backtest v1.1.0 (Checklist2.3a+V1-fixed2+triage+SweepFix)
 
 on:
   workflow_dispatch:
@@ -213,23 +213,37 @@ jobs:
       - name: Sweep for outputs
         run: |
           set -euo pipefail
-          pick() { name="$1"; out="$2"; f=$(find tmp/trade -maxdepth 6 -type f -name "$name" | head -n1 || true); [ -n "$f" ] && cp -f "$f" "_out_4u/$out" && echo "collected $out from $f"; }
+          pick() {
+            name="$1"; out="$2"
+            f="$(find tmp/trade -maxdepth 6 -type f -name "$name" | head -n1 || true)"
+            if [ -n "$f" ]; then
+              cp -f "$f" "_out_4u/$out"
+              echo "collected $out from $f"
+            else
+              echo "miss $name"
+            fi
+            return 0
+          }
+          # summary/metrics
           for n in summary.json metrics.json; do pick "$n" "$n"; done
-          pick "preds_test.csv" "preds_test.csv" || true
-          [ -f _out_4u/preds_test.csv ] || pick "preds.csv" "preds_test.csv"
-          pick "trades.csv" "trades.csv" || true
-          [ -f _out_4u/trades.csv ] || pick "orders.csv" "trades.csv"
+          # preds (fallbacks incl. csv.gz)
+          pick "preds_test.csv" "preds_test.csv"
+          [ -s _out_4u/preds_test.csv ] || pick "preds.csv" "preds_test.csv"
+          if [ ! -s _out_4u/preds_test.csv ]; then
+            gz="$(find tmp/trade -maxdepth 6 -type f -name 'preds*.csv.gz' | head -n1 || true)"
+            if [ -n "$gz" ]; then gzip -dc "$gz" > _out_4u/preds_test.csv && echo "collected preds_test.csv from $gz (gunzip)"; fi
+          fi
+          # trades (fallbacks)
+          pick "trades.csv" "trades.csv"
+          [ -s _out_4u/trades.csv ] || pick "orders.csv" "trades.csv"
 
-      # >>>>>>>>>>>>>>>>> DEBUG TRIAGE (root-cause for coverage) <<<<<<<<<<<<<<<<<
       - name: Debug triage (coverage root-cause)
         run: |
           set -euo pipefail
           echo "[1] Files under tmp/trade (preds/trades/summary):"
           find tmp/trade -maxdepth 6 -type f \( -name 'preds*.csv' -o -name 'trades*.csv' -o -name 'summary.json' \) | sed -n '1,80p' || true
-
           echo "[2] preds_test.csv columns:"
           (head -n1 _out_4u/preds_test.csv || true) | tr ',' '\n' | nl -ba
-
           echo "[3] summary.splits/test size (if present):"
           python - <<'PY'
           import json, os
@@ -240,7 +254,6 @@ jobs:
           else:
               print("no summary.json")
           PY
-
           echo "[4] Which engine is loaded?"
           python - <<'PY'
           import inspect
@@ -250,7 +263,6 @@ jobs:
           except Exception as e:
               print("ENGINE_IMPORT_ERROR:", e)
           PY
-
           echo "[5] Gate percentiles delta (p99-p01):"
           python - <<'PY'
           import json, os
@@ -262,7 +274,6 @@ jobs:
           else:
               print("no gating_debug.json (yet)")
           PY
-      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
       - name: Post analyze gating
         env:
