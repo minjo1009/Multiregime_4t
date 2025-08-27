@@ -1,4 +1,4 @@
-name: Backtest v1.1.1 (Patched-Minimal: CSVFix + SafeDupCheck + GatingSync)
+name: "Backtest v1.1.1 (Patched-Minimal: CSVFix + SafeDupCheck + GatingSync)"
 
 on:
   workflow_dispatch:
