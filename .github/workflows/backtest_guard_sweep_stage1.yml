@@ -1,0 +1,45 @@
+name: "Backtest Guard Sweep — Stage-1 (7 runs, SHA pinned)"
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP: { description: "Code ZIP", required: true, default: "trade_v1.1.3.3_ev_gate.zip" }
+      DATA_ZIP: { description: "Data ZIP", required: true, default: "ETHUSDT_1min_2020_2025.zip" }
+      CSV_GLOB: { description: "CSV glob", required: true, default: "**/*ETHUSDT*1m*202*.csv" }
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: E1_be_only,    BE_ON: true,  TRAIL_ON: false, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
+          - { id: E2_trail_only, BE_ON: false, TRAIL_ON: true,  COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
+          - { id: E3_be_and_trail, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
+          - { id: GATE1_cov3, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 3, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
+          - { id: GATE2_cov7, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
+          - { id: COST1_fee5, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 0 }
+          - { id: COST2_fee5_slip10, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 10 }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with: { python-version: "3.11" }
+      - name: Prepare
+        run: |
+          set -euo pipefail
+          mkdir -p .github/workflows
+      - name: Run child workflow
+        uses: peter-evans/repository-dispatch@1a1285b2715828f0d5343db87d2e3a5005ef2b8b
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          event-type: bt-stage1
+          client-payload: |
+            {"id": "${{ matrix.id }}",
+             "CODE_ZIP": "${{ github.event.inputs.CODE_ZIP }}",
+             "DATA_ZIP": "${{ github.event.inputs.DATA_ZIP }}",
+             "CSV_GLOB": "${{ github.event.inputs.CSV_GLOB }}",
+             "BE_ON": "${{ matrix.BE_ON }}",
+             "TRAIL_ON": "${{ matrix.TRAIL_ON }}",
+             "COVERAGE_TARGET": "${{ matrix.COVERAGE_TARGET }}",
+             "FEES_BPS_PER_LEG": "${{ matrix.FEES_BPS_PER_LEG }}",
+             "SLIPPAGE_BPS": "${{ matrix.SLIPPAGE_BPS }}"}
