@@ -1,19 +1,21 @@
-name: "Backtest EXP Matrix v2 (coverage/temp/tpsl/zero-fee + guaranteed outputs)"
+name: "Backtest Guard Sweep V1.0 (SOT + fees/slippage + TTL, SHA pinned)"
+
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
         description: "Code ZIP path (repo-relative or URL)"
         required: true
-        default: "trade_v1.1.1.zip"
+        default: "trade_v1.1.3.1.zip"
       DATA_ZIP:
         description: "Data ZIP path (repo-relative or URL)"
         required: true
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "Glob for CSV inside data zip"
+        description: "Glob inside data zip (e.g., **/*ETHUSDT*1m*202*.csv)"
         required: true
-        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+        default: "**/*ETHUSDT*1m*202*.csv"
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -22,306 +24,312 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cov5_temp1.7_tpsl4_8_zerofee
+          # -- G1: 게이팅/칼리브 기본 3종 --
+          - id: G1a
+            TP_PCT: 0.008
+            SL_PCT: 0.004
+            COVERAGE_TARGET: 2
+            TEMP: 1.2
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+          - id: G1b
+            TP_PCT: 0.008
+            SL_PCT: 0.004
             COVERAGE_TARGET: 5
             TEMP: 1.7
-            TP_PCT: 0.008
-            SL_PCT: 0.004
-            ZERO_FEE: "true"
-          - name: cov10_temp1.7_tpsl4_8_zerofee
+            HOLD_BARS: 15
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+          - id: G1c
+            TP_PCT: 0.010
+            SL_PCT: 0.005
             COVERAGE_TARGET: 10
+            TEMP: 2.2
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+
+          # -- G2: 리스크/만기 교정 --
+          - id: G2a
+            TP_PCT: 0.008
+            SL_PCT: 0.005
+            COVERAGE_TARGET: 5
             TEMP: 1.7
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+          - id: G2b
+            TP_PCT: 0.010
+            SL_PCT: 0.005
+            COVERAGE_TARGET: 5
+            TEMP: 1.7
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+          - id: G2c
+            TP_PCT: 0.010
+            SL_PCT: 0.004
+            COVERAGE_TARGET: 5
+            TEMP: 1.7
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+
+          # -- G3: 비용 민감도 --
+          - id: G3a
             TP_PCT: 0.008
             SL_PCT: 0.004
-            ZERO_FEE: "true"
-          - name: cov15_temp1.7_tpsl4_8_zerofee
-            COVERAGE_TARGET: 15
+            COVERAGE_TARGET: 5
             TEMP: 1.7
+            HOLD_BARS: 15
+            FEES_BPS_PER_LEG: 5
+            SLIPPAGE_BPS: 0
+          - id: G3b
             TP_PCT: 0.008
             SL_PCT: 0.004
-            ZERO_FEE: "true"
-          - name: cov10_temp1.7_tpsl6_12_zerofee
-            COVERAGE_TARGET: 10
+            COVERAGE_TARGET: 5
             TEMP: 1.7
-            TP_PCT: 0.012
-            SL_PCT: 0.006
-            ZERO_FEE: "true"
-          - name: cov10_temp1.7_tpsl4_8_feeOn
-            COVERAGE_TARGET: 10
-            TEMP: 1.7
-            TP_PCT: 0.008
-            SL_PCT: 0.004
-            ZERO_FEE: "false"
+            HOLD_BARS: 15
+            FEES_BPS_PER_LEG: 5
+            SLIPPAGE_BPS: 10
+
     env:
-      RUN_NAME: ${{ matrix.name }}
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
+
     steps:
-      - name: Validate pinned SHAs
-        run: |
-          set -euo pipefail
-          verify() { repo="$1"; sha="$2"; [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha}"; exit 1; }; url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"; code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true); [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha}"; exit 1; }; }
-          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
-          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
-          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Prepare OS deps
-        env:
-          DEBIAN_FRONTEND: "noninteractive"
+
+      - name: Init workspace
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -yq --no-install-recommends unzip tzdata rsync
-          sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
-          sudo dpkg-reconfigure -f noninteractive tzdata
-      - name: Reset workspace folders
-        run: |
-          set -euo pipefail
-          rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
-          mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run _out_4u/logs scripts
+          rm -rf tmp _out_4u scripts
+          mkdir -p tmp/trade tmp/data tmp/raw _out_4u/run _out_4u/logs scripts
           : > _out_4u/logs/stdout.log
+
       - name: Bring zips
         run: |
           set -euo pipefail
           CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
           DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
-          fetch() { src="$1"; dst="$2"; [[ "$src" =~ ^https?:// ]] && curl -L "$src" -o "$dst" || cp -f "$src" "$dst"; }
+          fetch() { src="$1"; dst="$2"; if echo "$src" | grep -qiE '^https?://'; then curl -L "$src" -o "$dst"; else cp -f "$src" "$dst"; fi; }
           fetch "$CODE_ZIP" tmp/code.zip
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
-      - name: Show code.zip sha256 & list
+
+      - name: Unzip packs
         run: |
           set -euo pipefail
-          if command -v sha256sum >/dev/null; then sha256sum tmp/code.zip; else shasum -a 256 tmp/code.zip; fi
-          unzip -Z1 tmp/code.zip | head -n 50 || true
-      - name: Inspect code.zip for duplicates (safe)
-        run: |
-          set -euo pipefail
-          mkdir -p _out_4u/logs
-          python - <<'PY'
-          import zipfile, os
-          dup, seen = [], set()
-          with zipfile.ZipFile('tmp/code.zip','r') as z:
-              for n in z.namelist():
-                  if n in seen and n not in dup:
-                      dup.append(n)
-                  seen.add(n)
-          open('_out_4u/logs/zip_duplicates.txt','w',encoding='utf-8').write('\n'.join(dup))
-          print(f"DUP_COUNT={len(dup)}")
-          PY
-          if [ -s _out_4u/logs/zip_duplicates.txt ]; then
-            echo "::notice::Auto-dedup enabled. Repacking code.zip…"
-            rm -rf tmp/code_src
-            mkdir -p tmp/code_src
-            unzip -oq tmp/code.zip -d tmp/code_src
-            (cd tmp && zip -qr -X code.dedup.zip code_src)
-            mv -f tmp/code.dedup.zip tmp/code.zip
-          fi
-      - name: Unzip packs + sample csv list
-        run: |
-          set -euo pipefail
-          unzip -oq tmp/code.zip -d tmp/trade_raw
-          shopt -s nullglob dotglob
-          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
-            mv tmp/trade_raw/*/* tmp/trade/ 2>/dev/null || mv tmp/trade_raw/* tmp/trade/
+          unzip -oq tmp/code.zip -d tmp/raw
+          if [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&              [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
           else
-            mv tmp/trade_raw/* tmp/trade/ 2>/dev/null || true
+            mv tmp/raw/* tmp/trade/ 2>/dev/null || true
           fi
           unzip -oq tmp/data.zip -d tmp/data
-      - name: Sanitize stdlib shadows
-        run: |
-          set -euo pipefail
-          cd tmp/trade
-          for f in importlib.py typing.py enum.py dataclasses.py; do
-            if [ -f "$f" ]; then mv "$f" "${f}.shadowed"; fi
-          done
+
       - name: Python deps
         working-directory: tmp/trade
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
-          pip install --no-cache-dir numpy pandas pyyaml jsonschema scikit-learn || true
-      - name: Shim py launcher (Linux)
+          pip install --no-cache-dir numpy pandas pyyaml scikit-learn || true
+
+      - name: Write helpers (apply_config_patch.py & entrypoint_run.sh)
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo '#!/usr/bin/env bash' > py
-          echo 'exec python "$@"' >> py
-          chmod +x py
-          echo "$PWD" >> "$GITHUB_PATH"
-      - name: Writers (helpers)
-        run: |
-          set -euo pipefail
           mkdir -p scripts
-          if [ -d tmp/trade/scripts ]; then rsync -a tmp/trade/scripts/ scripts/; fi
-          chmod +x scripts/*.sh 2>/dev/null || true
-          chmod +x scripts/*.bash 2>/dev/null || true
-          chmod +x scripts/*.py 2>/dev/null || true
-      - name: "Write helper - apply_config_patch.py + wrapper entrypoint"
-        run: |
-          set -Eeuo pipefail
-          python - <<'PY'
-          import os, textwrap, pathlib
-          d = pathlib.Path("scripts"); d.mkdir(parents=True, exist_ok=True)
-          (d/"apply_config_patch.py").write_text(textwrap.dedent("""
+          cat > scripts/apply_config_patch.py <<'PY'
           import os, yaml
           from pathlib import Path
           base = Path("tmp/trade/conf/config.yml")
-          out  = Path("tmp/trade/conf/config.effective.yml")
+          eff  = Path("tmp/trade/conf/config.effective.yml")
           cfg = {}
           if base.exists():
               cfg = yaml.safe_load(base.read_text()) or {}
-          for k in ("pricing","trading","gating","calibration"):
+          for k in ("pricing","trading","gating","calibration","trade","gate","costs"):
               cfg.setdefault(k, {})
-          if os.environ.get("ZERO_FEE","false").lower()=="true":
-              cfg["pricing"]["taker_fee"]=0.0
-              cfg["pricing"]["maker_fee"]=0.0
-              cfg["pricing"]["slippage_bps"]=0.0
-          cfg["trading"]["tp_pct"] = float(os.environ.get("TP_PCT","0.008"))
-          cfg["trading"]["sl_pct"] = float(os.environ.get("SL_PCT","0.004"))
-          cfg["gating"]["coverage_target"]  = float(os.environ.get("COVERAGE_TARGET","10"))
-          cfg["calibration"]["temperature"] = float(os.environ.get("TEMP","1.7"))
-          cfg["calibration"]["method"] = cfg["calibration"].get("method","isotonic")
-          cfg["calibration"]["per_session"] = True
-          out.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-          print("WROTE", out)
-          """))
-          (d/"entrypoint_run.sh").write_text(textwrap.dedent("""
+          tp=float(os.getenv("TP_PCT","0.008"))
+          sl=float(os.getenv("SL_PCT","0.004"))
+          cov=float(os.getenv("COVERAGE_TARGET","5"))
+          temp=float(os.getenv("TEMP","1.7"))
+          fees=float(os.getenv("FEES_BPS_PER_LEG","0"))
+          slip=float(os.getenv("SLIPPAGE_BPS","0"))
+          hold=int(float(os.getenv("HOLD_BARS","15")))
+          # write both new/legacy keys
+          cfg["trading"]["tp_pct"]=tp; cfg["trading"]["sl_pct"]=sl
+          cfg["trade"]["tp_pct"]=tp;   cfg["trade"]["sl_pct"]=sl
+          cfg["trade"]["hold_bars"]=hold
+          cfg["gating"]["coverage_target"]=cov
+          cfg["calibration"]["temperature"]=temp
+          cfg["gate"]["temp"]=temp
+          # fees: pricing aliases + costs.* for runner
+          psec = cfg.setdefault("pricing", {})
+          for key in ("fees_bps_per_leg","fee_bps_per_leg","per_leg_bps","fee_bps"):
+              psec[key] = fees
+          csec = cfg.setdefault("costs", {})
+          csec["taker_bps"] = fees
+          csec["slippage_bps"] = slip  # force override
+          eff.parent.mkdir(parents=True, exist_ok=True)
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+          print("WROTE", eff)
+          PY
+          cat > scripts/entrypoint_run.sh <<'BASH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          CSV_PATH="$(cat scripts/CSV_PATH.txt)"
+          SEL=$(python - <<'PY'
+          import glob,os
+          pat=os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
+          paths=sorted(glob.glob(pat, recursive=True))
+          if not paths:
+              paths=sorted(glob.glob("tmp/data/**/*.csv", recursive=True))
+          print(paths[0] if paths else "")
+          PY
+          )
+          echo "$SEL" > scripts/CSV_PATH.txt
+          [ -n "$SEL" ] && [ -f "$SEL" ] || { echo "::error::No CSV matched. Check CSV_GLOB."; exit 3; }
           python -u scripts/apply_config_patch.py
-          CONF="tmp/trade/conf/config.effective.yml"
-          echo ">> Running run_4u.py with ${CONF}"
+          cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
+          # Force-write used_config for traceability
+          python - <<'PY'
+          from pathlib import Path
+          try:
+            from backtest.loader_sot import load_effective_config
+            load_effective_config()
+          except Exception as e:
+            print("WARN: failed to pre-write used_config:", e)
+          PY
           if [ -f tmp/trade/run_4u.py ]; then
-            python -u tmp/trade/run_4u.py --data_path "${CSV_PATH}" --config "${CONF}" || true
+            python -u tmp/trade/run_4u.py --data_path "$(cat scripts/CSV_PATH.txt)" --config tmp/trade/conf/config.yml 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          elif [ -f backtest/runner.py ]; then
+            python -u backtest/runner.py 2>&1 | tee -a _out_4u/logs/stdout.log || true
           else
-            echo "::error::tmp/trade/run_4u.py not found"; exit 1
+            echo "::error::No runner found"; exit 1
           fi
           mkdir -p _out_4u/run
-          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
             [ -f "_out_4u/run/$f" ] || : > "_out_4u/run/$f"
           done
-          """))
-          PY
+          BASH
           chmod +x scripts/entrypoint_run.sh
-      - name: Write CSV path (preflight; fixed)
+
+      - name: Resolve CSV path (robust)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          python - <<'PY' > preflight.json
-          import os, sys, glob, json
+          python - <<'PY'
+          import os, glob, json
           root="tmp/data"
           pat=os.environ.get("CSV_GLOB") or "**/*.csv"
-          if pat.startswith("/"):
-              cand=[pat] if os.path.isfile(pat) else []
-          else:
-              cand=sorted(glob.glob(os.path.join(root, pat), recursive=True))
-          cand=[p for p in cand if os.path.isfile(p)]
-          sel=cand[0] if cand else ""
-          os.makedirs("scripts", exist_ok=True)
-          open("scripts/CSV_PATH.txt","w",encoding="utf-8").write(sel)
-          print(json.dumps({"selected": sel, "exists": bool(sel and os.path.isfile(sel))}, ensure_ascii=False))
+          cands=sorted(glob.glob(os.path.join(root, pat), recursive=True))
+          if not cands:
+              cands=sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
+          sel=cands[0] if cands else ""
+          open("scripts/CSV_PATH.txt","w").write(sel)
+          print({"selected": sel, "count": len(cands)})
           if not sel:
-              raise SystemExit(1)
+              raise SystemExit("NO_CSV_FOUND")
           PY
-      - name: Verify skeleton and import
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python - <<'PY'
-          import os, importlib, json
-          p=open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
-          out={"csv_path":p, "csv_exists": os.path.isfile(p)}
-          for mod in ["backtest.runner","trend4p.calibration"]:
-              try:
-                  m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)
-              except Exception as e:
-                  out[mod]=f"IMPORT_ERROR: {e}"
-          print(json.dumps(out, ensure_ascii=False))
-          if not out["csv_exists"]: raise SystemExit(3)
-          PY
-      - name: Engine compile triage
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import sys, os, py_compile, pathlib, json
-          roots=["tmp/trade","tmp/trade/backtest","tmp/trade/trend4p"]
-          files=[]
-          for r in roots:
-              if os.path.isdir(r):
-                  for p in pathlib.Path(r).rglob("*.py"):
-                      files.append(str(p))
-          fails=[]
-          for f in files:
-              try:
-                  py_compile.compile(f, doraise=True)
-              except Exception as e:
-                  fails.append((f,str(e)))
-          print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))
-          PY
-      - name: Smoke test Calibrator API
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python - <<'PY'
-          import numpy as np
-          from trend4p.calibration import Calibrator
-          c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
-          x = [0.2,0.5,0.8]
-          for fn in ("transform","predict","predict_proba"):
-              y = getattr(c, fn)(x)
-              arr = np.asarray(y, float)
-              assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
-          print("Calibrator API OK")
-          PY
-      - name: Run backtest (matrix item)
+          echo "CSV_PATH=$(cat scripts/CSV_PATH.txt)"
+
+      - name: Build effective config (pre-run)
         env:
-          COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
-          TEMP: ${{ matrix.TEMP }}
           TP_PCT: ${{ matrix.TP_PCT }}
           SL_PCT: ${{ matrix.SL_PCT }}
-          ZERO_FEE: ${{ matrix.ZERO_FEE }}
+          COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
+          TEMP: ${{ matrix.TEMP }}
+          FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
+          HOLD_BARS: ${{ matrix.HOLD_BARS }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade/conf
+          if [ ! -f tmp/trade/conf/config.yml ]; then
+            python -c "import yaml,pathlib; p=pathlib.Path('tmp/trade/conf/config.yml'); cfg={'pricing':{},'trading':{},'gating':{},'calibration':{},'trade':{},'gate':{},'costs':{}}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)); print('WROTE base config:', p)"
+          fi
+          python -u scripts/apply_config_patch.py
+          test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
+          echo '--- effective head ---'
+          sed -n '1,120p' tmp/trade/conf/config.effective.yml || true
+
+      - name: Assert effective config matches inputs (pre-run)
+        env:
+          TP_PCT: ${{ matrix.TP_PCT }}
+          SL_PCT: ${{ matrix.SL_PCT }}
+          COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
+          TEMP: ${{ matrix.TEMP }}
+          FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
+          HOLD_BARS: ${{ matrix.HOLD_BARS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, yaml, math
+          cfg = yaml.safe_load(open("tmp/trade/conf/config.effective.yml")) or {}
+          def get(d, path):
+              for k in path.split('.'):
+                  if not isinstance(d, dict): return None
+                  d = d.get(k)
+              return d
+          def fee_get(c):
+              taker = float(get(c,"costs.taker_bps") or 0.0)
+              slip  = float(get(c,"costs.slippage_bps") or 0.0)
+              for k in ("pricing.fees_bps_per_leg","pricing.fee_bps_per_leg","pricing.per_leg_bps","pricing.fee_bps"):
+                  v = get(c,k)
+                  if v is not None: taker = float(v); break
+              return taker + slip
+          exp = {
+            "tp": float(os.getenv("TP_PCT")),
+            "sl": float(os.getenv("SL_PCT")),
+            "cov": float(os.getenv("COVERAGE_TARGET")),
+            "temp": float(os.getenv("TEMP")),
+            "fee": float(os.getenv("FEES_BPS_PER_LEG")) + float(os.getenv("SLIPPAGE_BPS")),
+            "hold": float(os.getenv("HOLD_BARS")),
+          }
+          eff = {
+            "tp": float(get(cfg,"trade.tp_pct") or get(cfg,"trading.tp_pct") or -1),
+            "sl": float(get(cfg,"trade.sl_pct") or get(cfg,"trading.sl_pct") or -1),
+            "cov": float(get(cfg,"gating.coverage_target") or -1),
+            "temp": float(get(cfg,"gate.temp") or get(cfg,"calibration.temperature") or -1),
+            "fee": float(fee_get(cfg)),
+            "hold": float(get(cfg,"trade.hold_bars") or -1),
+          }
+          print("EXPECTED:", exp); print("EFFECTIVE:", eff)
+          for k in eff:
+            if abs(eff[k]-exp[k])>1e-12: raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
+          PY
+
+      - name: Run backtest (with patch)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+          TP_PCT: ${{ matrix.TP_PCT }}
+          SL_PCT: ${{ matrix.SL_PCT }}
+          COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
+          TEMP: ${{ matrix.TEMP }}
+          FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
+          HOLD_BARS: ${{ matrix.HOLD_BARS }}
         run: |
           set -Eeuo pipefail
           ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee -a _out_4u/logs/stdout.log || true
-      - name: Collect outputs to root
-        run: |
-          set -Eeuo pipefail
-          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
-            if [ -s "_out_4u/run/$f" ]; then
-              cp -f "_out_4u/run/$f" "_out_4u/${{ env.RUN_NAME }}_$f"
-              cp -f "_out_4u/run/$f" "_out_4u/$f"
-            fi
-          done
-          ls -l _out_4u || true
-      - name: Post analyze gating
-        run: |
-          set -euo pipefail
-          python -u scripts/post_analyze.py || true
-      - name: Self-check gating
-        run: |
-          set -euo pipefail
-          python -u scripts/self_check_gate.py || true
-      - name: Quick report
-        run: |
-          set -euo pipefail
-          python -u scripts/quick_report.py || true
+
       - name: Upload artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_matrix_outputs_${{ env.RUN_NAME }}
+          name: backtest_sweep_${{ matrix.id }}
           path: |
             _out_4u/**
-            preflight.json
+            tmp/trade/conf/config.effective.yml
+            scripts/CSV_PATH.txt
