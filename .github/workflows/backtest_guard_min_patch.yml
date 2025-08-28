@@ -1,1 +1,277 @@
-# placeholder to ensure file exists; please use prior provided v1.3.5 content
+name: "Backtest Guard Mini Patch v1.3.5 (fees+taker+slippage override, SHA pinned)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: "Code ZIP path (repo-relative or URL)"
+        required: true
+        default: "trade_v1.1.3.1.zip"
+      DATA_ZIP:
+        description: "Data ZIP path (repo-relative or URL)"
+        required: true
+        default: "ETHUSDT_1min_2020_2025.zip"
+      CSV_GLOB:
+        description: "Glob inside data zip (e.g., **/*ETHUSDT*1m*202*.csv)"
+        required: true
+        default: "**/*ETHUSDT*1m*202*.csv"
+      TP_PCT:
+        description: "TP fraction (0.008 = +0.8%)"
+        required: true
+        default: "0.008"
+      SL_PCT:
+        description: "SL fraction (0.004 = -0.4%)"
+        required: true
+        default: "0.004"
+      COVERAGE_TARGET:
+        description: "Coverage target in % (10 = 10%)"
+        required: true
+        default: "10"
+      TEMP:
+        description: "Calibration/Gate temperature"
+        required: true
+        default: "1.7"
+      FEES_BPS_PER_LEG:
+        description: "Taker fees per leg in bps"
+        required: true
+        default: "0"
+      SLIPPAGE_BPS:
+        description: "Slippage in bps (aggregated with fees)"
+        required: true
+        default: "0"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Init workspace
+        run: |
+          set -euo pipefail
+          rm -rf tmp _out_4u scripts
+          mkdir -p tmp/trade tmp/data tmp/raw _out_4u/run _out_4u/logs scripts
+          : > _out_4u/logs/stdout.log
+
+      - name: Bring zips
+        run: |
+          set -euo pipefail
+          CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          fetch() { src="$1"; dst="$2"; if echo "$src" | grep -qiE '^https?://'; then curl -L "$src" -o "$dst"; else cp -f "$src" "$dst"; fi; }
+          fetch "$CODE_ZIP" tmp/code.zip
+          fetch "$DATA_ZIP" tmp/data.zip
+          ls -l tmp/*.zip
+
+      - name: Unzip packs
+        run: |
+          set -euo pipefail
+          unzip -oq tmp/code.zip -d tmp/raw
+          if [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&              [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          else
+            mv tmp/raw/* tmp/trade/ 2>/dev/null || true
+          fi
+          unzip -oq tmp/data.zip -d tmp/data
+
+      - name: Python deps
+        working-directory: tmp/trade
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
+          pip install --no-cache-dir numpy pandas pyyaml scikit-learn || true
+
+      - name: Write helpers (apply_config_patch.py & entrypoint_run.sh)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p scripts
+          cat > scripts/apply_config_patch.py <<'PY'
+          import os, yaml
+          from pathlib import Path
+          base = Path("tmp/trade/conf/config.yml")
+          eff  = Path("tmp/trade/conf/config.effective.yml")
+          cfg = {}
+          if base.exists():
+              cfg = yaml.safe_load(base.read_text()) or {}
+          for k in ("pricing","trading","gating","calibration","trade","gate","costs"):
+              cfg.setdefault(k, {})
+          tp=float(os.getenv("TP_PCT","0.008"))
+          sl=float(os.getenv("SL_PCT","0.004"))
+          cov=float(os.getenv("COVERAGE_TARGET","10"))
+          temp=float(os.getenv("TEMP","1.7"))
+          fees=float(os.getenv("FEES_BPS_PER_LEG","0"))
+          slip=float(os.getenv("SLIPPAGE_BPS","0"))
+          # write both new/legacy keys
+          cfg["trading"]["tp_pct"]=tp; cfg["trading"]["sl_pct"]=sl
+          cfg["trade"]["tp_pct"]=tp;   cfg["trade"]["sl_pct"]=sl
+          cfg["gating"]["coverage_target"]=cov
+          cfg["calibration"]["temperature"]=temp
+          cfg["gate"]["temp"]=temp
+          # fees: pricing aliases + costs.* for runner
+          psec = cfg.setdefault("pricing", {})
+          for key in ("fees_bps_per_leg","fee_bps_per_leg","per_leg_bps","fee_bps"):
+              psec[key] = fees
+          csec = cfg.setdefault("costs", {})
+          csec["taker_bps"] = fees
+          csec["slippage_bps"] = slip  # force override
+          eff.parent.mkdir(parents=True, exist_ok=True)
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+          print("WROTE", eff)
+          PY
+          cat > scripts/entrypoint_run.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          SEL=$(python - <<'PY'
+          import glob,os
+          pat=os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
+          paths=sorted(glob.glob(pat, recursive=True))
+          if not paths:
+              paths=sorted(glob.glob("tmp/data/**/*.csv", recursive=True))
+          print(paths[0] if paths else "")
+          PY
+          )
+          echo "$SEL" > scripts/CSV_PATH.txt
+          [ -n "$SEL" ] && [ -f "$SEL" ] || { echo "::error::No CSV matched. Check CSV_GLOB."; exit 3; }
+          python -u scripts/apply_config_patch.py
+          cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
+          if [ -f tmp/trade/run_4u.py ]; then
+            python -u tmp/trade/run_4u.py --data_path "$(cat scripts/CSV_PATH.txt)" --config tmp/trade/conf/config.yml 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          elif [ -f backtest/runner.py ]; then
+            python -u backtest/runner.py 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          else
+            echo "::error::No runner found"; exit 1
+          fi
+          mkdir -p _out_4u/run
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
+            [ -f "_out_4u/run/$f" ] || : > "_out_4u/run/$f"
+          done
+          BASH
+          chmod +x scripts/entrypoint_run.sh
+
+      - name: Resolve CSV path (robust)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, glob, json
+          root="tmp/data"
+          pat=os.environ.get("CSV_GLOB") or "**/*.csv"
+          cands=sorted(glob.glob(os.path.join(root, pat), recursive=True))
+          if not cands:
+              cands=sorted(glob.glob(os.path.join(root, "**/*.csv"), recursive=True))
+          sel=cands[0] if cands else ""
+          open("scripts/CSV_PATH.txt","w").write(sel)
+          print({"selected": sel, "count": len(cands)})
+          if not sel:
+              raise SystemExit("NO_CSV_FOUND")
+          PY
+          echo "CSV_PATH=$(cat scripts/CSV_PATH.txt)"
+
+      - name: Build effective config (pre-run)
+        env:
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ github.event.inputs.SLIPPAGE_BPS }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade/conf
+          if [ ! -f tmp/trade/conf/config.yml ]; then
+            python -c "import yaml,pathlib; p=pathlib.Path('tmp/trade/conf/config.yml'); cfg={'pricing':{},'trading':{},'gating':{},'calibration':{},'trade':{},'gate':{},'costs':{}}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)); print('WROTE base config:', p)"
+          fi
+          python -u scripts/apply_config_patch.py
+          test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
+          echo '--- effective head ---'
+          sed -n '1,160p' tmp/trade/conf/config.effective.yml || true
+
+      - name: Assert effective config matches inputs (pre-run)
+        env:
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ github.event.inputs.SLIPPAGE_BPS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, yaml, math
+          cfg = yaml.safe_load(open("tmp/trade/conf/config.effective.yml")) or {}
+          def get(d, path):
+              for k in path.split('.'):
+                  if not isinstance(d, dict): return None
+                  d = d.get(k)
+              return d
+          def fee_get(c):
+              taker = float(get(c,"costs.taker_bps") or 0.0)
+              slip  = float(get(c,"costs.slippage_bps") or 0.0)
+              for k in ("pricing.fees_bps_per_leg","pricing.fee_bps_per_leg","pricing.per_leg_bps","pricing.fee_bps"):
+                  v = get(c,k)
+                  if v is not None:
+                      taker = float(v); break
+              return taker, slip, taker + slip
+          tp = float(os.getenv("TP_PCT")); sl = float(os.getenv("SL_PCT"))
+          cov = float(os.getenv("COVERAGE_TARGET")); temp = float(os.getenv("TEMP"))
+          fee = float(os.getenv("FEES_BPS_PER_LEG")); slip_exp = float(os.getenv("SLIPPAGE_BPS"))
+          taker, slip, total = fee_get(cfg)
+          eff = {"tp":float(get(cfg,"trade.tp_pct") or get(cfg,"trading.tp_pct") or -1),
+                 "sl":float(get(cfg,"trade.sl_pct") or get(cfg,"trading.sl_pct") or -1),
+                 "cov":float(get(cfg,"gating.coverage_target") or -1),
+                 "temp":float(get(cfg,"gate.temp") or get(cfg,"calibration.temperature") or -1),
+                 "fee":total}
+          exp = {"tp":tp,"sl":sl,"cov":cov,"temp":temp,"fee":fee+slip_exp}
+          print("EFFECTIVE:", eff); print("EXPECTED:", exp, "  (taker,slip)=", (taker, slip))
+          for k in eff:
+              if not (abs(eff[k]-exp[k])<=1e-12):
+                  raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
+          PY
+
+      - name: Run backtest (with patch)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ github.event.inputs.SLIPPAGE_BPS }}
+        run: |
+          set -Eeuo pipefail
+          ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee -a _out_4u/logs/stdout.log || true
+
+      - name: Collect outputs to root
+        run: |
+          set -Eeuo pipefail
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
+            if [ -s "_out_4u/run/$f" ]; then
+              cp -f "_out_4u/run/$f" "_out_4u/$f"
+            fi
+          done
+          ls -l _out_4u || true
+
+      - name: Upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backtest_guard_outputs
+          path: |
+            _out_4u/**
+            tmp/trade/conf/config.effective.yml
+            scripts/CSV_PATH.txt
