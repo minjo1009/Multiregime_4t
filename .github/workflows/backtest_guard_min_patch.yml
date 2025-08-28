@@ -1,4 +1,4 @@
-name: "Backtest Guard Mini Patch v1.3 (SHA pinned, robust CSV)"
+name: "Backtest Guard Mini Patch v1.3.1 (SHA pinned, robust CSV, prebuild config)"
 
 on:
   workflow_dispatch:
@@ -173,6 +173,31 @@ jobs:
           PY
           echo "CSV_PATH=$(cat scripts/CSV_PATH.txt)"
           find tmp/data -type f -name "*.csv" | head -n 30 || true
+
+      - name: Build effective config (pre-run)
+        env:
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade/conf
+          if [ ! -f tmp/trade/conf/config.yml ]; then
+            python - <<'PY'
+            import yaml, pathlib
+            p=pathlib.Path("tmp/trade/conf/config.yml")
+            cfg={"pricing":{},"trading":{},"gating":{},"calibration":{}}
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+            print("WROTE base config:", p)
+            PY
+          fi
+          python -u scripts/apply_config_patch.py
+          test -f tmp/trade/conf/config.effective.yml || { echo "::error::Failed to produce config.effective.yml"; exit 2; }
+          echo "--- effective (head) ---"
+          sed -n '1,120p' tmp/trade/conf/config.effective.yml || true
 
       - name: Assert effective config matches inputs (pre-run)
         env:
