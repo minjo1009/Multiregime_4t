@@ -1,11 +1,11 @@
-name: "Exit/TTL Wiring AB Test (runnerless) v3"
+name: "Exit/TTL Wiring AB Test (robust collect) v5"
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
         description: "Code ZIP"
         required: true
-        default: "trade_v1.1.3.3_ev_gate_exitfix.zip"
+        default: "trade_v1.1.3.3_ev_gate_exitfix_runner.zip"
       DATA_ZIP:
         description: "Data ZIP"
         required: true
@@ -32,54 +32,90 @@ jobs:
           fetch "${{ github.event.inputs.CODE_ZIP }}" tmp/code.zip
           fetch "${{ github.event.inputs.DATA_ZIP }}" tmp/data.zip
           unzip -oq tmp/code.zip -d tmp/raw
-          mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          if [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          else
+            mv tmp/raw/* tmp/trade/ 2>/dev/null || true
+          fi
           unzip -oq tmp/data.zip -d tmp/data
           python -m pip install --upgrade pip
           if [ -f tmp/trade/requirements.txt ]; then pip install -r tmp/trade/requirements.txt || true; fi
           pip install numpy pandas pyyaml || true
 
-      - name: Common helpers
+      - name: Create run_engine.py (collect trades.csv robustly)
         run: |
-          set -euo pipefail
           cat > run_engine.py <<'PY'
-          import os, glob, sys, json
+          import os, glob, sys, json, runpy, time
           from pathlib import Path
-          # build data path selection
-          pat = os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
-          paths = sorted(glob.glob(pat, recursive=True))
-          if not paths:
-              print("::error::No CSV matched:", pat); sys.exit(3)
-          data_path = paths[0]
-          (Path("_out_4u")/"CSV_PATH.txt").write_text(data_path)
-          # ensure conf exists
-          Path("tmp/trade/conf").mkdir(parents=True, exist_ok=True)
-          # run exit_bridge if present
-          try:
-              sys.path[:0] = ["tmp/trade","tmp/trade/backtest"]
-              from backtest.exit_bridge import main as exit_bridge
-              exit_bridge()
-          except Exception as e:
-              print("WARN: exit_bridge not applied:", e)
-          # choose runner
-          cand = [
-              Path("tmp/trade/run_4u.py"),
-              Path("tmp/trade/backtest/runner.py"),
-              Path("backtest/runner.py"),
-          ]
-          runner = next((p for p in cand if p.exists()), None)
-          if not runner:
-              print("::error::No runner found in", [str(c) for c in cand]); sys.exit(4)
-          # args
-          args = []
-          if "run_4u.py" in str(runner):
-              args = ["--data_path", data_path, "--config", "tmp/trade/conf/config.yml"]
-          # execute
-          import runpy
-          os.environ["PYTHONPATH"] = "tmp/trade:tmp/trade/backtest:" + os.environ.get("PYTHONPATH","")
-          # Some runners use argparse; emulate CLI by injecting sys.argv
-          sys.argv = [str(runner)] + args
-          print("[RUN]", runner, "args=", args)
-          runpy.run_path(str(runner), run_name="__main__")
+
+          def find_trades():
+              # priority list of locations
+              prefs = [
+                  Path("_out_4u/trades.csv"),
+                  Path("_out_4u/run/trades.csv"),
+              ]
+              for p in prefs:
+                  if p.exists(): return p
+              # fallback: latest trades.csv anywhere inside tmp/trade or workdir
+              cands = []
+              for pat in ["tmp/trade/**/trades.csv", "tmp/**/trades.csv", "**/trades.csv"]:
+                  for p in Path(".").glob(pat):
+                      if "data" in str(p).lower(): # avoid dataset CSVs
+                          continue
+                      try:
+                          cands.append((p.stat().st_mtime, p))
+                      except Exception:
+                          pass
+              if cands:
+                  cands.sort(reverse=True)
+                  return cands[0][1]
+              return None
+
+          def run_once():
+              # build data path selection
+              pat = os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
+              paths = sorted(glob.glob(pat, recursive=True))
+              if not paths:
+                  print("::error::No CSV matched:", pat); sys.exit(3)
+              data_path = paths[0]
+              Path("_out_4u").mkdir(exist_ok=True, parents=True)
+              (Path("_out_4u")/"CSV_PATH.txt").write_text(data_path)
+              # ensure conf exists
+              Path("tmp/trade/conf").mkdir(parents=True, exist_ok=True)
+              # run exit_bridge if present
+              try:
+                  sys.path[:0] = ["tmp/trade","tmp/trade/backtest"]
+                  from backtest.exit_bridge import main as exit_bridge
+                  exit_bridge()
+              except Exception as e:
+                  print("WARN: exit_bridge not applied:", e)
+              # choose runner (use our bundled runner as default)
+              runner = Path("tmp/trade/runner.py")
+              if not runner.exists():
+                  # try other known paths
+                  for p in [Path("tmp/trade/run_4u.py"), Path("tmp/trade/backtest/runner.py"), Path("backtest/runner.py")]:
+                      if p.exists():
+                          runner = p; break
+              os.environ["PYTHONPATH"] = "tmp/trade:tmp/trade/backtest:" + os.environ.get("PYTHONPATH","")
+              args = []
+              if runner.name == "run_4u.py":
+                  args = ["--data_path", data_path, "--config", "tmp/trade/conf/config.yml"]
+              sys.argv = [str(runner)] + args
+              print("[RUN]", runner, "args=", args)
+              runpy.run_path(str(runner), run_name="__main__")
+              # collect trades
+              t = find_trades()
+              if not t:
+                  print("WARN: trades.csv not found after run.")
+                  return False
+              Path("_out_4u").mkdir(exist_ok=True, parents=True)
+              Path("_out_4u/trades.csv").write_bytes(Path(t).read_bytes())
+              print("[COLLECT] trades.csv <-", t)
+              return True
+
+          if __name__ == "__main__":
+              ok = run_once()
+              sys.exit(0 if ok else 2)
           PY
 
       - name: Run A (ttl=1)
