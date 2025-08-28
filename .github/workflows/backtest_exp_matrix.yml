@@ -1,5 +1,4 @@
-name: "Backtest EXP Matrix v1 (coverage/temp/tpsl/zero-fee + guaranteed outputs)"
-
+name: "Backtest EXP Matrix v2 (coverage/temp/tpsl/zero-fee + guaranteed outputs)"
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +14,6 @@ on:
         description: "Glob for CSV inside data zip"
         required: true
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
-
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -24,7 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 3개: 커버리지 스윕 + zero-fee + tp/sl 0.004/0.008 + temp 1.7
           - name: cov5_temp1.7_tpsl4_8_zerofee
             COVERAGE_TARGET: 5
             TEMP: 1.7
@@ -43,49 +40,36 @@ jobs:
             TP_PCT: 0.008
             SL_PCT: 0.004
             ZERO_FEE: "true"
-          # 2개: tp/sl 0.006/0.012 비교
           - name: cov10_temp1.7_tpsl6_12_zerofee
             COVERAGE_TARGET: 10
             TEMP: 1.7
             TP_PCT: 0.012
             SL_PCT: 0.006
             ZERO_FEE: "true"
-          # 1개: baseline (fee on) for isolation check
           - name: cov10_temp1.7_tpsl4_8_feeOn
             COVERAGE_TARGET: 10
             TEMP: 1.7
             TP_PCT: 0.008
             SL_PCT: 0.004
             ZERO_FEE: "false"
-
     env:
       RUN_NAME: ${{ matrix.name }}
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-
     steps:
       - name: Validate pinned SHAs
         run: |
           set -euo pipefail
-          verify() {
-            repo="$1"; sha="$2"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha} not 40-hex"; exit 1; }
-            url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"
-            code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
-            [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
-          }
+          verify() { repo="$1"; sha="$2"; [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha}"; exit 1; }; url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"; code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true); [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha}"; exit 1; }; }
           verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
           verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
           verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
-
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
       - name: Setup Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-
       - name: Prepare OS deps
         env:
           DEBIAN_FRONTEND: "noninteractive"
@@ -95,14 +79,12 @@ jobs:
           sudo apt-get install -yq --no-install-recommends unzip tzdata rsync
           sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
           sudo dpkg-reconfigure -f noninteractive tzdata
-
       - name: Reset workspace folders
         run: |
           set -euo pipefail
           rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
           mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run _out_4u/logs scripts
           : > _out_4u/logs/stdout.log
-
       - name: Bring zips
         run: |
           set -euo pipefail
@@ -112,13 +94,11 @@ jobs:
           fetch "$CODE_ZIP" tmp/code.zip
           fetch "$DATA_ZIP" tmp/data.zip
           ls -l tmp/*.zip
-
       - name: Show code.zip sha256 & list
         run: |
           set -euo pipefail
           if command -v sha256sum >/dev/null; then sha256sum tmp/code.zip; else shasum -a 256 tmp/code.zip; fi
           unzip -Z1 tmp/code.zip | head -n 50 || true
-
       - name: Inspect code.zip for duplicates (safe)
         run: |
           set -euo pipefail
@@ -135,8 +115,6 @@ jobs:
           print(f"DUP_COUNT={len(dup)}")
           PY
           if [ -s _out_4u/logs/zip_duplicates.txt ]; then
-            echo "Duplicate paths detected in code.zip:"
-            head -n 20 _out_4u/logs/zip_duplicates.txt || true
             echo "::notice::Auto-dedup enabled. Repacking code.zip…"
             rm -rf tmp/code_src
             mkdir -p tmp/code_src
@@ -144,29 +122,24 @@ jobs:
             (cd tmp && zip -qr -X code.dedup.zip code_src)
             mv -f tmp/code.dedup.zip tmp/code.zip
           fi
-
       - name: Unzip packs + sample csv list
         run: |
           set -euo pipefail
           unzip -oq tmp/code.zip -d tmp/trade_raw
           shopt -s nullglob dotglob
-          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&              [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
             mv tmp/trade_raw/*/* tmp/trade/ 2>/dev/null || mv tmp/trade_raw/* tmp/trade/
           else
             mv tmp/trade_raw/* tmp/trade/ 2>/dev/null || true
           fi
           unzip -oq tmp/data.zip -d tmp/data
-          echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
-          echo "CSV sample (max 10):"; find tmp/data -type f -name "*.csv" | head -n 10 || true
-
       - name: Sanitize stdlib shadows
         run: |
           set -euo pipefail
           cd tmp/trade
           for f in importlib.py typing.py enum.py dataclasses.py; do
-            if [ -f "$f" ]; then mv "$f" "${f}.shadowed"; echo "::warning::Shadowed stdlib: $f -> ${f}.shadowed"; fi
+            if [ -f "$f" ]; then mv "$f" "${f}.shadowed"; fi
           done
-
       - name: Python deps
         working-directory: tmp/trade
         run: |
@@ -174,7 +147,6 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
           pip install --no-cache-dir numpy pandas pyyaml jsonschema scikit-learn || true
-
       - name: Shim py launcher (Linux)
         shell: bash
         run: |
@@ -183,58 +155,44 @@ jobs:
           echo 'exec python "$@"' >> py
           chmod +x py
           echo "$PWD" >> "$GITHUB_PATH"
-
       - name: Writers (helpers)
         run: |
           set -euo pipefail
           mkdir -p scripts
-          if [ -d tmp/trade/scripts ]; then
-            rsync -a tmp/trade/scripts/ scripts/
-          fi
+          if [ -d tmp/trade/scripts ]; then rsync -a tmp/trade/scripts/ scripts/; fi
           chmod +x scripts/*.sh 2>/dev/null || true
           chmod +x scripts/*.bash 2>/dev/null || true
           chmod +x scripts/*.py 2>/dev/null || true
-          echo "Synced scripts:"; ls -al scripts || true
-
-      - name: Write helper: apply_config_patch.py + wrapper entrypoint
+      - name: "Write helper - apply_config_patch.py + wrapper entrypoint"
         run: |
           set -Eeuo pipefail
-          mkdir -p scripts
-          cat > scripts/apply_config_patch.py << 'PY'
-          import sys, os, yaml
+          python - <<'PY'
+          import os, textwrap, pathlib
+          d = pathlib.Path("scripts"); d.mkdir(parents=True, exist_ok=True)
+          (d/"apply_config_patch.py").write_text(textwrap.dedent("""
+          import os, yaml
           from pathlib import Path
           base = Path("tmp/trade/conf/config.yml")
           out  = Path("tmp/trade/conf/config.effective.yml")
           cfg = {}
           if base.exists():
-            cfg = yaml.safe_load(base.read_text()) or {}
-          # ensure sections
+              cfg = yaml.safe_load(base.read_text()) or {}
           for k in ("pricing","trading","gating","calibration"):
-            cfg.setdefault(k, {})
-          # overrides from env
-          zero_fee = os.environ.get("ZERO_FEE","false").lower()=="true"
-          if zero_fee:
-            cfg["pricing"]["taker_fee"] = 0.0
-            cfg["pricing"]["maker_fee"] = 0.0
-            cfg["pricing"]["slippage_bps"] = 0.0
-          # TP/SL
-          tp = float(os.environ.get("TP_PCT","0.008"))
-          sl = float(os.environ.get("SL_PCT","0.004"))
-          cfg["trading"]["tp_pct"] = tp
-          cfg["trading"]["sl_pct"] = sl
-          # Gating & calibration
-          cov = float(os.environ.get("COVERAGE_TARGET","10"))
-          cfg["gating"]["coverage_target"] = cov
-          temp = float(os.environ.get("TEMP","1.7"))
-          cfg["calibration"]["temperature"] = temp
+              cfg.setdefault(k, {})
+          if os.environ.get("ZERO_FEE","false").lower()=="true":
+              cfg["pricing"]["taker_fee"]=0.0
+              cfg["pricing"]["maker_fee"]=0.0
+              cfg["pricing"]["slippage_bps"]=0.0
+          cfg["trading"]["tp_pct"] = float(os.environ.get("TP_PCT","0.008"))
+          cfg["trading"]["sl_pct"] = float(os.environ.get("SL_PCT","0.004"))
+          cfg["gating"]["coverage_target"]  = float(os.environ.get("COVERAGE_TARGET","10"))
+          cfg["calibration"]["temperature"] = float(os.environ.get("TEMP","1.7"))
           cfg["calibration"]["method"] = cfg["calibration"].get("method","isotonic")
           cfg["calibration"]["per_session"] = True
           out.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-          print("WROTE", out, "with overrides:", {"zero_fee":zero_fee,"tp":tp,"sl":sl,"cov":cov,"temp":temp})
-          PY
-          chmod +x scripts/apply_config_patch.py
-          # wrapper entrypoint
-          cat > scripts/entrypoint_run.sh << 'BASH'
+          print("WROTE", out)
+          """))
+          (d/"entrypoint_run.sh").write_text(textwrap.dedent("""
           #!/usr/bin/env bash
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
@@ -247,15 +205,13 @@ jobs:
           else
             echo "::error::tmp/trade/run_4u.py not found"; exit 1
           fi
-          # guarantee outputs
           mkdir -p _out_4u/run
           for f in summary.json preds_test.csv trades.csv gating_debug.json; do
             [ -f "_out_4u/run/$f" ] || : > "_out_4u/run/$f"
           done
-          BASH
+          """))
+          PY
           chmod +x scripts/entrypoint_run.sh
-          echo "helpers ready."
-
       - name: Write CSV path (preflight; fixed)
         env:
           CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
@@ -277,8 +233,6 @@ jobs:
           if not sel:
               raise SystemExit(1)
           PY
-          echo "Preflight path:"; cat scripts/CSV_PATH.txt
-
       - name: Verify skeleton and import
         continue-on-error: true
         run: |
@@ -296,7 +250,6 @@ jobs:
           print(json.dumps(out, ensure_ascii=False))
           if not out["csv_exists"]: raise SystemExit(3)
           PY
-
       - name: Engine compile triage
         continue-on-error: true
         run: |
@@ -317,7 +270,6 @@ jobs:
                   fails.append((f,str(e)))
           print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))
           PY
-
       - name: Smoke test Calibrator API
         run: |
           set -euo pipefail
@@ -333,7 +285,6 @@ jobs:
               assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
           print("Calibrator API OK")
           PY
-
       - name: Run backtest (matrix item)
         env:
           COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
@@ -344,7 +295,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee -a _out_4u/logs/stdout.log || true
-
       - name: Collect outputs to root
         run: |
           set -Eeuo pipefail
@@ -355,22 +305,18 @@ jobs:
             fi
           done
           ls -l _out_4u || true
-
       - name: Post analyze gating
         run: |
           set -euo pipefail
           python -u scripts/post_analyze.py || true
-
       - name: Self-check gating
         run: |
           set -euo pipefail
           python -u scripts/self_check_gate.py || true
-
       - name: Quick report
         run: |
           set -euo pipefail
           python -u scripts/quick_report.py || true
-
       - name: Upload artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
