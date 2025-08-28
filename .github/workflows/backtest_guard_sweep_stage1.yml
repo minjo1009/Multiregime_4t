@@ -1,4 +1,4 @@
-name: "Backtest Guard Sweep — Stage-1 (7 runs, SHA pinned)"
+name: "Backtest Guard Sweep — Stage-1 (7 runs, direct matrix, SHA pinned)"
 on:
   workflow_dispatch:
     inputs:
@@ -8,38 +8,127 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { id: E1_be_only,    BE_ON: true,  TRAIL_ON: false, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
-          - { id: E2_trail_only, BE_ON: false, TRAIL_ON: true,  COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
-          - { id: E3_be_and_trail, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
-          - { id: GATE1_cov3, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 3, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
-          - { id: GATE2_cov7, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0 }
-          - { id: COST1_fee5, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 0 }
-          - { id: COST2_fee5_slip10, BE_ON: true, TRAIL_ON: true, COVERAGE_TARGET: 5, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 10 }
+          - { id: E1_be_only,    TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true,  BE_TRIGGER_PCT: 0.0025, TRAIL_ON: false, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 5, TEMP: 1.7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: E2_trail_only, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: false, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true,  TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 5, TEMP: 1.7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: E3_be_and_trail, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 5, TEMP: 1.7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: GATE1_cov3, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 3, TEMP: 1.7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: GATE2_cov7, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 7, TEMP: 1.7, FEES_BPS_PER_LEG: 0, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: COST1_fee5, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 5, TEMP: 1.7, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 0, ATR_ON: false }
+          - { id: COST2_fee5_slip10, TP_PCT: 0.010, SL_PCT: 0.005, HOLD_BARS: 30, BE_ON: true, BE_TRIGGER_PCT: 0.0025, TRAIL_ON: true, TRAIL_START_PCT: 0.007, TRAIL_GAP_PCT: 0.003, COVERAGE_TARGET: 5, TEMP: 1.7, FEES_BPS_PER_LEG: 5, SLIPPAGE_BPS: 10, ATR_ON: false }
+
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with: { python-version: "3.11" }
-      - name: Prepare
+      - name: Init workspace
         run: |
           set -euo pipefail
-          mkdir -p .github/workflows
-      - name: Run child workflow
-        uses: peter-evans/repository-dispatch@1a1285b2715828f0d5343db87d2e3a5005ef2b8b
+          rm -rf tmp _out_4u scripts
+          mkdir -p tmp/trade tmp/data tmp/raw _out_4u/run _out_4u/logs scripts
+      - name: Bring zips
+        run: |
+          set -euo pipefail
+          CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          fetch() { src="$1"; dst="$2"; if echo "$src" | grep -qiE '^https?://'; then curl -L "$src" -o "$dst"; else cp -f "$src" "$dst"; fi; }
+          fetch "$CODE_ZIP" tmp/code.zip
+          fetch "$DATA_ZIP" tmp/data.zip
+          unzip -oq tmp/code.zip -d tmp/raw
+          if [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          else
+            mv tmp/raw/* tmp/trade/ 2>/dev/null || true
+          fi
+          unzip -oq tmp/data.zip -d tmp/data
+      - name: Deps
+        working-directory: tmp/trade
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          pip install numpy pandas pyyaml scikit-learn || true
+      - name: Write helper apply_config_patch
+        run: |
+          cat > scripts/apply_config_patch.py <<'PY'
+          import os, yaml
+          from pathlib import Path
+          eff  = Path("tmp/trade/conf/config.effective.yml"); eff.parent.mkdir(parents=True, exist_ok=True)
+          cfg = {"pricing":{},"trading":{},"gating":{},"calibration":{},"trade":{},"gate":{},"costs":{}}
+          cfg["trading"]["tp_pct"]=float(os.environ["TP_PCT"])
+          cfg["trading"]["sl_pct"]=float(os.environ["SL_PCT"])
+          cfg["trade"].update({
+            "tp_pct":float(os.environ["TP_PCT"]), "sl_pct":float(os.environ["SL_PCT"]),
+            "hold_bars":int(float(os.environ["HOLD_BARS"])),
+            "be_on":os.environ["BE_ON"].lower()=="true",
+            "be_trigger_pct":float(os.environ["BE_TRIGGER_PCT"]),
+            "trail_on":os.environ["TRAIL_ON"].lower()=="true",
+            "trail_start_pct":float(os.environ["TRAIL_START_PCT"]),
+            "trail_gap_pct":float(os.environ["TRAIL_GAP_PCT"]),
+            "atr_on":os.environ["ATR_ON"].lower()=="true"
+          })
+          cfg["gating"]["coverage_target"]=float(os.environ["COVERAGE_TARGET"])
+          cfg["calibration"]["temperature"]=float(os.environ["TEMP"])
+          cfg["gate"]["temp"]=float(os.environ["TEMP"])
+          fees=float(os.environ["FEES_BPS_PER_LEG"]); slip=float(os.environ["SLIPPAGE_BPS"])
+          cfg["pricing"]["fees_bps_per_leg"]=fees
+          cfg["costs"]["taker_bps"]=fees; cfg["costs"]["slippage_bps"]=slip
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+          print("OK", eff)
+          PY
+      - name: Build effective config
+        env:
+          TP_PCT: ${{ matrix.TP_PCT }}
+          SL_PCT: ${{ matrix.SL_PCT }}
+          COVERAGE_TARGET: ${{ matrix.COVERAGE_TARGET }}
+          TEMP: ${{ matrix.TEMP }}
+          FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
+          SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
+          HOLD_BARS: ${{ matrix.HOLD_BARS }}
+          BE_ON: ${{ matrix.BE_ON }}
+          BE_TRIGGER_PCT: ${{ matrix.BE_TRIGGER_PCT }}
+          TRAIL_ON: ${{ matrix.TRAIL_ON }}
+          TRAIL_START_PCT: ${{ matrix.TRAIL_START_PCT }}
+          TRAIL_GAP_PCT: ${{ matrix.TRAIL_GAP_PCT }}
+          ATR_ON: ${{ matrix.ATR_ON }}
+        run: python -u scripts/apply_config_patch.py
+      - name: Run backtest
+        env: { CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }} }
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          SEL=$(python - <<'PY'
+          import glob,os
+          pat=os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
+          paths=sorted(glob.glob(pat, recursive=True)); print(paths[0] if paths else "")
+          PY
+          )
+          echo "$SEL" > _out_4u/CSV_PATH.txt
+          cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
+          python - <<'PY'
+          try:
+            from backtest.loader_sot import load_effective_config; load_effective_config()
+          except Exception as e: print("WARN:", e)
+          PY
+          if [ -f tmp/trade/run_4u.py ]; then
+            python -u tmp/trade/run_4u.py --data_path "$(cat _out_4u/CSV_PATH.txt)" --config tmp/trade/conf/config.yml || true
+          elif [ -f backtest/runner.py ]; then
+            python -u backtest/runner.py || true
+          else
+            echo "::error::No runner found"; exit 1
+          fi
+          mkdir -p _out_4u/run
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
+            [ -f "_out_4u/run/$f" ] && cp -f "_out_4u/run/$f" "_out_4u/${{ matrix.id }}_$f" || : > "_out_4u/${{ matrix.id }}_$f"
+          done
+      - name: Upload artifacts (per-run tagged)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          event-type: bt-stage1
-          client-payload: |
-            {"id": "${{ matrix.id }}",
-             "CODE_ZIP": "${{ github.event.inputs.CODE_ZIP }}",
-             "DATA_ZIP": "${{ github.event.inputs.DATA_ZIP }}",
-             "CSV_GLOB": "${{ github.event.inputs.CSV_GLOB }}",
-             "BE_ON": "${{ matrix.BE_ON }}",
-             "TRAIL_ON": "${{ matrix.TRAIL_ON }}",
-             "COVERAGE_TARGET": "${{ matrix.COVERAGE_TARGET }}",
-             "FEES_BPS_PER_LEG": "${{ matrix.FEES_BPS_PER_LEG }}",
-             "SLIPPAGE_BPS": "${{ matrix.SLIPPAGE_BPS }}"}
+          name: backtest_stage1_${{ matrix.id }}
+          path: |
+            _out_4u/${{ matrix.id }}_*
+            tmp/trade/conf/config.effective.yml
