@@ -1,4 +1,4 @@
-name: "Backtest Guard Mini Patch v1.3.2 (SHA pinned, robust CSV, heredoc-safe)"
+name: "Backtest Guard Mini Patch v1.3.3 (SHA pinned, robust CSV, fee-key tolerant)"
 
 on:
   workflow_dispatch:
@@ -115,7 +115,10 @@ jobs:
           cfg["trading"]["sl_pct"]=sl
           cfg["gating"]["coverage_target"]=cov
           cfg["calibration"]["temperature"]=temp
-          cfg.setdefault("pricing",{})["fees_bps_per_leg"]=fees
+          psec = cfg.setdefault("pricing", {})
+          # write fee under multiple synonyms so downstream code sees it
+          for key in ("fees_bps_per_leg","fee_bps_per_leg","per_leg_bps","fee_bps"):
+              psec[key] = fees
           eff.parent.mkdir(parents=True, exist_ok=True)
           eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
           print("WROTE", eff)
@@ -189,8 +192,8 @@ jobs:
           fi
           python -u scripts/apply_config_patch.py
           test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
-          echo '--- effective (head) ---'
-          sed -n '1,120p' tmp/trade/conf/config.effective.yml || true
+          echo '--- effective (pricing head) ---'
+          awk '/^pricing:/,/^\w/' tmp/trade/conf/config.effective.yml | sed -n '1,40p' || true
 
       - name: Assert effective config matches inputs (pre-run)
         env:
@@ -204,16 +207,24 @@ jobs:
           python - <<'PY'
           import os, yaml, math
           cfg = yaml.safe_load(open("tmp/trade/conf/config.effective.yml")) or {}
-          def get(d, path, default=None):
+          def pathget(d, path):
               for k in path.split('.'):
-                  d = d.get(k, {})
-              return d or default
+                  if not isinstance(d, dict): return None
+                  d = d.get(k, None)
+              return d
+          def fee_get(cfg):
+              for k in ("pricing.fees_bps_per_leg","pricing.fee_bps_per_leg","pricing.per_leg_bps","pricing.fee_bps"):
+                  v = pathget(cfg, k)
+                  if v is not None:
+                      try: return float(v)
+                      except: pass
+              return None
           eff = {
-            "tp": float(get(cfg,"trading.tp_pct",-1)),
-            "sl": float(get(cfg,"trading.sl_pct",-1)),
-            "cov": float(get(cfg,"gating.coverage_target",-1)),
-            "temp": float(get(cfg,"calibration.temperature",-1)),
-            "fee": float(get(cfg,"pricing.fees_bps_per_leg",-1)),
+            "tp": float(pathget(cfg,"trading.tp_pct") or -1),
+            "sl": float(pathget(cfg,"trading.sl_pct") or -1),
+            "cov": float(pathget(cfg,"gating.coverage_target") or -1),
+            "temp": float(pathget(cfg,"calibration.temperature") or -1),
+            "fee": float(fee_get(cfg) if fee_get(cfg) is not None else -1),
           }
           exp = {
             "tp": float(os.getenv("TP_PCT")),
