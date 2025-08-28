@@ -1,0 +1,268 @@
+name: "Backtest Guard Mini Patch v1"
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: "Code ZIP path (repo-relative or URL)"
+        required: true
+        default: "trade_v1.1.3.1.zip"
+      DATA_ZIP:
+        description: "Data ZIP path (repo-relative or URL)"
+        required: true
+        default: "ETHUSDT_1min_2020_2025.zip"
+      CSV_GLOB:
+        description: "Glob for CSV inside data zip"
+        required: true
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      TP_PCT:
+        description: "TP in fraction (e.g., 0.008 for +0.8%)"
+        required: true
+        default: "0.008"
+      SL_PCT:
+        description: "SL in fraction (e.g., 0.004 for -0.4%)"
+        required: true
+        default: "0.004"
+      COVERAGE_TARGET:
+        description: "Gating coverage target in % (e.g., 10 for 10%)"
+        required: true
+        default: "10"
+      TEMP:
+        description: "Calibration temperature (e.g., 1.7)"
+        required: true
+        default: "1.7"
+      FEES_BPS_PER_LEG:
+        description: "Fees per leg in bps (e.g., 3 => 0.03%)"
+        required: true
+        default: "0"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Prepare OS deps
+        env:
+          DEBIAN_FRONTEND: "noninteractive"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -yq --no-install-recommends unzip rsync tzdata
+          sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+          sudo dpkg-reconfigure -f noninteractive tzdata
+
+      - name: Init workspace
+        run: |
+          set -euo pipefail
+          rm -rf tmp _out_4u scripts
+          mkdir -p tmp/trade tmp/data tmp/raw _out_4u/run _out_4u/logs scripts
+          : > _out_4u/logs/stdout.log
+
+      - name: Bring zips
+        run: |
+          set -euo pipefail
+          CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          fetch() { src="$1"; dst="$2"; [[ "$src" =~ ^https?:// ]] && curl -L "$src" -o "$dst" || cp -f "$src" "$dst"; }
+          fetch "$CODE_ZIP" tmp/code.zip
+          fetch "$DATA_ZIP" tmp/data.zip
+          ls -l tmp/*.zip
+
+      - name: Unzip packs
+        run: |
+          set -euo pipefail
+          unzip -oq tmp/code.zip -d tmp/raw
+          # flatten single top-level folder if present
+          if [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&              [ "$(find tmp/raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+            mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          else
+            mv tmp/raw/* tmp/trade/ 2>/dev/null || true
+          fi
+          unzip -oq tmp/data.zip -d tmp/data
+          echo "Tree:"; find tmp/trade -maxdepth 2 -type d -print
+
+      - name: Python deps
+        working-directory: tmp/trade
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
+          pip install --no-cache-dir numpy pandas pyyaml scikit-learn || true
+
+      - name: Write helpers (apply_config_patch.py & entrypoint_run.sh)
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import textwrap, pathlib
+          d = pathlib.Path("scripts"); d.mkdir(parents=True, exist_ok=True)
+          (d/"apply_config_patch.py").write_text(textwrap.dedent("""
+          import os, yaml
+          from pathlib import Path
+          base = Path("tmp/trade/conf/config.yml")
+          eff  = Path("tmp/trade/conf/config.effective.yml")
+          cfg = {}
+          if base.exists():
+              cfg = yaml.safe_load(base.read_text()) or {}
+          for k in ("pricing","trading","gating","calibration"):
+              cfg.setdefault(k, {})
+          # inputs
+          tp   = float(os.getenv("TP_PCT","0.008"))
+          sl   = float(os.getenv("SL_PCT","0.004"))
+          covp = float(os.getenv("COVERAGE_TARGET","10"))
+          temp = float(os.getenv("TEMP","1.7"))
+          fees = float(os.getenv("FEES_BPS_PER_LEG","0"))
+          # apply
+          cfg["trading"]["tp_pct"] = tp
+          cfg["trading"]["sl_pct"] = sl
+          cfg["gating"]["coverage_target"] = covp
+          cfg["calibration"]["temperature"] = temp
+          cfg.setdefault("pricing",{})["fees_bps_per_leg"] = fees
+          eff.parent.mkdir(parents=True, exist_ok=True)
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+          print("WROTE", eff)
+          """))
+          (d/"entrypoint_run.sh").write_text(textwrap.dedent("""
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          CSV_PATH="${{ github.event.inputs.CSV_GLOB }}"
+          # Select CSV
+          SEL=$(python - <<'PY'
+          import glob,sys,os,json
+          pat=os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
+          paths=sorted(glob.glob(pat, recursive=True))
+          print(paths[0] if paths else "")
+          PY
+          )
+          echo "$SEL" > scripts/CSV_PATH.txt
+          python -u scripts/apply_config_patch.py
+          cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
+          if [ -f tmp/trade/run_4u.py ]; then
+            python -u tmp/trade/run_4u.py --data_path "$(cat scripts/CSV_PATH.txt)" --config tmp/trade/conf/config.yml 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          elif [ -f trade/backtest/runner.py ]; then
+            python -u trade/backtest/runner.py 2>&1 | tee -a _out_4u/logs/stdout.log || true
+          else
+            echo "::error::No runner found"; exit 1
+          fi
+          mkdir -p _out_4u/run
+          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+            [ -f "_out_4u/run/$f" ] || : > "_out_4u/run/$f"
+          done
+          """))
+          PY
+          chmod +x scripts/entrypoint_run.sh
+
+      - name: Assert effective config matches inputs (pre-run)
+        env:
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, yaml, json, sys, pathlib, math
+          from pathlib import Path
+          # build effective first time
+          assert Path("scripts/apply_config_patch.py").exists()
+          os.system("python scripts/apply_config_patch.py >/dev/null 2>&1")
+          path = Path("tmp/trade/conf/config.effective.yml")
+          cfg = yaml.safe_load(path.read_text()) or {}
+          def get(d, path, default=None):
+              for k in path.split('.'):
+                  d = d.get(k, {})
+              return d or default
+          eff = {
+              "tp": float(get(cfg,"trading.tp_pct",-1)),
+              "sl": float(get(cfg,"trading.sl_pct",-1)),
+              "cov": float(get(cfg,"gating.coverage_target",-1)),
+              "temp": float(get(cfg,"calibration.temperature",-1)),
+              "fee": float(get(cfg,"pricing.fees_bps_per_leg", -1)),
+          }
+          exp = {
+              "tp": float(os.getenv("TP_PCT")),
+              "sl": float(os.getenv("SL_PCT")),
+              "cov": float(os.getenv("COVERAGE_TARGET")),
+              "temp": float(os.getenv("TEMP")),
+              "fee": float(os.getenv("FEES_BPS_PER_LEG")),
+          }
+          print("EFFECTIVE:", eff); print("EXPECTED:", exp)
+          for k in eff:
+              if not math.isfinite(eff[k]) or abs(eff[k]-exp[k])>1e-12:
+                  raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
+          PY
+
+      - name: Run backtest (with patch)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+          TP_PCT: ${{ github.event.inputs.TP_PCT }}
+          SL_PCT: ${{ github.event.inputs.SL_PCT }}
+          COVERAGE_TARGET: ${{ github.event.inputs.COVERAGE_TARGET }}
+          TEMP: ${{ github.event.inputs.TEMP }}
+          FEES_BPS_PER_LEG: ${{ github.event.inputs.FEES_BPS_PER_LEG }}
+        run: |
+          set -Eeuo pipefail
+          ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee -a _out_4u/logs/stdout.log || true
+
+      - name: Collect outputs to root
+        run: |
+          set -Eeuo pipefail
+          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+            if [ -s "_out_4u/run/$f" ]; then
+              cp -f "_out_4u/run/$f" "_out_4u/$f"
+            fi
+          done
+          ls -l _out_4u || true
+
+      - name: Sanity check outputs (post-run)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, pandas as pd, numpy as np, json, os, sys
+          # preds
+          p = glob.glob("_out_4u/**/preds_test.csv", recursive=True)
+          assert p, "MISSING_preds_test.csv"
+          preds = pd.read_csv(p[0])
+          score = None
+          for c in ["p_cal","prob","score","pred","y_prob"]:
+              if c in preds.columns: score = preds[c]; break
+          assert score is not None, "NO_SCORE_COL"
+          assert float(np.nanstd(pd.to_numeric(score, errors='coerce'))) > 1e-6, "PRED_CONST_OR_DEGEN"
+          # trades
+          t = glob.glob("_out_4u/**/trades.csv", recursive=True)
+          assert t, "MISSING_trades.csv"
+          trades = pd.read_csv(t[0])
+          assert trades["pnl"].abs().sum() != 0, "TRADES_DEAD_OR_CONST"
+          # summary coverage
+          s = glob.glob("_out_4u/**/summary.json", recursive=True)
+          if s:
+              summ = json.load(open(s[0]))
+              cov = summ.get("coverage") or summ.get("coverage_overall")
+              if cov is not None:
+                  cov = float(cov)
+                  assert 0.0 < cov < 50.0, "COVERAGE_OUT_OF_RANGE"
+          print("OUTPUTS_OK")
+          PY
+
+      - name: Upload artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backtest_guard_outputs
+          path: |
+            _out_4u/**
+            tmp/trade/conf/config.effective.yml
+            scripts/CSV_PATH.txt
