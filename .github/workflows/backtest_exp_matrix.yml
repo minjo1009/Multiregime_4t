@@ -1,4 +1,4 @@
-name: "Backtest Guard Sweep V1.0 (SOT + fees/slippage + TTL, SHA pinned)"
+name: "Backtest Guard Sweep V1.1 — G2b Baseline + 7 Runs (SHA pinned)"
 
 on:
   workflow_dispatch:
@@ -19,80 +19,107 @@ on:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
         include:
-          # -- G1: 게이팅/칼리브 기본 3종 --
-          - id: G1a
-            TP_PCT: 0.008
-            SL_PCT: 0.004
-            COVERAGE_TARGET: 2
-            TEMP: 1.2
-            HOLD_BARS: 30
-            FEES_BPS_PER_LEG: 0
-            SLIPPAGE_BPS: 0
-          - id: G1b
-            TP_PCT: 0.008
-            SL_PCT: 0.004
-            COVERAGE_TARGET: 5
-            TEMP: 1.7
-            HOLD_BARS: 15
-            FEES_BPS_PER_LEG: 0
-            SLIPPAGE_BPS: 0
-          - id: G1c
+          # --- Exit 강화(3) ---
+          - id: E1_be_only
             TP_PCT: 0.010
             SL_PCT: 0.005
-            COVERAGE_TARGET: 10
-            TEMP: 2.2
+            COVERAGE_TARGET: 5
+            TEMP: 1.7
             HOLD_BARS: 30
             FEES_BPS_PER_LEG: 0
             SLIPPAGE_BPS: 0
+            BE_ON: true
+            BE_TRIGGER_PCT: 0.003   # +0.30%에서 BE
+            TRAIL_ON: false
+            TRAIL_START_PCT: 0.005  # +0.50%부터 트레일
+            TRAIL_GAP_PCT: 0.0025   # 0.25% 트레일 간격
+          - id: E2_trail_only
+            TP_PCT: 0.010
+            SL_PCT: 0.005
+            COVERAGE_TARGET: 5
+            TEMP: 1.7
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+            BE_ON: false
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: true
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
+          - id: E3_be_and_trail
+            TP_PCT: 0.010
+            SL_PCT: 0.005
+            COVERAGE_TARGET: 5
+            TEMP: 1.7
+            HOLD_BARS: 30
+            FEES_BPS_PER_LEG: 0
+            SLIPPAGE_BPS: 0
+            BE_ON: true
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: true
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
 
-          # -- G2: 리스크/만기 교정 --
-          - id: G2a
-            TP_PCT: 0.008
-            SL_PCT: 0.005
-            COVERAGE_TARGET: 5
-            TEMP: 1.7
-            HOLD_BARS: 30
-            FEES_BPS_PER_LEG: 0
-            SLIPPAGE_BPS: 0
-          - id: G2b
+          # --- Gate 미세조정(2) ---
+          - id: GATE1_cov3
             TP_PCT: 0.010
             SL_PCT: 0.005
-            COVERAGE_TARGET: 5
+            COVERAGE_TARGET: 3
             TEMP: 1.7
             HOLD_BARS: 30
             FEES_BPS_PER_LEG: 0
             SLIPPAGE_BPS: 0
-          - id: G2c
+            BE_ON: false
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: false
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
+          - id: GATE2_cov7
             TP_PCT: 0.010
-            SL_PCT: 0.004
-            COVERAGE_TARGET: 5
+            SL_PCT: 0.005
+            COVERAGE_TARGET: 7
             TEMP: 1.7
             HOLD_BARS: 30
             FEES_BPS_PER_LEG: 0
             SLIPPAGE_BPS: 0
+            BE_ON: false
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: false
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
 
-          # -- G3: 비용 민감도 --
-          - id: G3a
-            TP_PCT: 0.008
-            SL_PCT: 0.004
+          # --- 비용 스트레스(2) ---
+          - id: COST1_fee5
+            TP_PCT: 0.010
+            SL_PCT: 0.005
             COVERAGE_TARGET: 5
             TEMP: 1.7
-            HOLD_BARS: 15
+            HOLD_BARS: 30
             FEES_BPS_PER_LEG: 5
             SLIPPAGE_BPS: 0
-          - id: G3b
-            TP_PCT: 0.008
-            SL_PCT: 0.004
+            BE_ON: false
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: false
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
+          - id: COST2_fee5_slip10
+            TP_PCT: 0.010
+            SL_PCT: 0.005
             COVERAGE_TARGET: 5
             TEMP: 1.7
-            HOLD_BARS: 15
+            HOLD_BARS: 30
             FEES_BPS_PER_LEG: 5
             SLIPPAGE_BPS: 10
+            BE_ON: false
+            BE_TRIGGER_PCT: 0.003
+            TRAIL_ON: false
+            TRAIL_START_PCT: 0.005
+            TRAIL_GAP_PCT: 0.0025
 
     env:
       PYTHONUNBUFFERED: "1"
@@ -158,27 +185,37 @@ jobs:
               cfg = yaml.safe_load(base.read_text()) or {}
           for k in ("pricing","trading","gating","calibration","trade","gate","costs"):
               cfg.setdefault(k, {})
-          tp=float(os.getenv("TP_PCT","0.008"))
-          sl=float(os.getenv("SL_PCT","0.004"))
+          tp=float(os.getenv("TP_PCT","0.010"))
+          sl=float(os.getenv("SL_PCT","0.005"))
           cov=float(os.getenv("COVERAGE_TARGET","5"))
           temp=float(os.getenv("TEMP","1.7"))
           fees=float(os.getenv("FEES_BPS_PER_LEG","0"))
           slip=float(os.getenv("SLIPPAGE_BPS","0"))
-          hold=int(float(os.getenv("HOLD_BARS","15")))
+          hold=int(float(os.getenv("HOLD_BARS","30")))
+          be_on=os.getenv("BE_ON","false").lower()=="true"
+          be_tr=float(os.getenv("BE_TRIGGER_PCT","0.003"))
+          tr_on=os.getenv("TRAIL_ON","false").lower()=="true"
+          tr_st=float(os.getenv("TRAIL_START_PCT","0.005"))
+          tr_gp=float(os.getenv("TRAIL_GAP_PCT","0.0025"))
           # write both new/legacy keys
           cfg["trading"]["tp_pct"]=tp; cfg["trading"]["sl_pct"]=sl
           cfg["trade"]["tp_pct"]=tp;   cfg["trade"]["sl_pct"]=sl
           cfg["trade"]["hold_bars"]=hold
+          cfg["trade"]["be_on"]=be_on
+          cfg["trade"]["be_trigger_pct"]=be_tr
+          cfg["trade"]["trail_on"]=tr_on
+          cfg["trade"]["trail_start_pct"]=tr_st
+          cfg["trade"]["trail_gap_pct"]=tr_gp
           cfg["gating"]["coverage_target"]=cov
           cfg["calibration"]["temperature"]=temp
           cfg["gate"]["temp"]=temp
-          # fees: pricing aliases + costs.* for runner
+          # fees
           psec = cfg.setdefault("pricing", {})
           for key in ("fees_bps_per_leg","fee_bps_per_leg","per_leg_bps","fee_bps"):
               psec[key] = fees
           csec = cfg.setdefault("costs", {})
           csec["taker_bps"] = fees
-          csec["slippage_bps"] = slip  # force override
+          csec["slippage_bps"] = slip
           eff.parent.mkdir(parents=True, exist_ok=True)
           eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
           print("WROTE", eff)
@@ -200,7 +237,7 @@ jobs:
           [ -n "$SEL" ] && [ -f "$SEL" ] || { echo "::error::No CSV matched. Check CSV_GLOB."; exit 3; }
           python -u scripts/apply_config_patch.py
           cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
-          # Force-write used_config for traceability
+          # pre-write used_config for traceability
           python - <<'PY'
           from pathlib import Path
           try:
@@ -252,6 +289,11 @@ jobs:
           FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
           SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
           HOLD_BARS: ${{ matrix.HOLD_BARS }}
+          BE_ON: ${{ matrix.BE_ON }}
+          BE_TRIGGER_PCT: ${{ matrix.BE_TRIGGER_PCT }}
+          TRAIL_ON: ${{ matrix.TRAIL_ON }}
+          TRAIL_START_PCT: ${{ matrix.TRAIL_START_PCT }}
+          TRAIL_GAP_PCT: ${{ matrix.TRAIL_GAP_PCT }}
         run: |
           set -euo pipefail
           mkdir -p tmp/trade/conf
@@ -261,7 +303,7 @@ jobs:
           python -u scripts/apply_config_patch.py
           test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
           echo '--- effective head ---'
-          sed -n '1,120p' tmp/trade/conf/config.effective.yml || true
+          sed -n '1,200p' tmp/trade/conf/config.effective.yml || true
 
       - name: Assert effective config matches inputs (pre-run)
         env:
@@ -272,6 +314,11 @@ jobs:
           FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
           SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
           HOLD_BARS: ${{ matrix.HOLD_BARS }}
+          BE_ON: ${{ matrix.BE_ON }}
+          BE_TRIGGER_PCT: ${{ matrix.BE_TRIGGER_PCT }}
+          TRAIL_ON: ${{ matrix.TRAIL_ON }}
+          TRAIL_START_PCT: ${{ matrix.TRAIL_START_PCT }}
+          TRAIL_GAP_PCT: ${{ matrix.TRAIL_GAP_PCT }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -282,7 +329,7 @@ jobs:
                   if not isinstance(d, dict): return None
                   d = d.get(k)
               return d
-          def fee_get(c):
+          def fee_total(c):
               taker = float(get(c,"costs.taker_bps") or 0.0)
               slip  = float(get(c,"costs.slippage_bps") or 0.0)
               for k in ("pricing.fees_bps_per_leg","pricing.fee_bps_per_leg","pricing.per_leg_bps","pricing.fee_bps"):
@@ -296,18 +343,29 @@ jobs:
             "temp": float(os.getenv("TEMP")),
             "fee": float(os.getenv("FEES_BPS_PER_LEG")) + float(os.getenv("SLIPPAGE_BPS")),
             "hold": float(os.getenv("HOLD_BARS")),
+            "be_on": os.getenv("BE_ON","false").lower()=="true",
+            "be_tr": float(os.getenv("BE_TRIGGER_PCT")),
+            "tr_on": os.getenv("TRAIL_ON","false").lower()=="true",
+            "tr_st": float(os.getenv("TRAIL_START_PCT")),
+            "tr_gp": float(os.getenv("TRAIL_GAP_PCT")),
           }
           eff = {
             "tp": float(get(cfg,"trade.tp_pct") or get(cfg,"trading.tp_pct") or -1),
             "sl": float(get(cfg,"trade.sl_pct") or get(cfg,"trading.sl_pct") or -1),
             "cov": float(get(cfg,"gating.coverage_target") or -1),
             "temp": float(get(cfg,"gate.temp") or get(cfg,"calibration.temperature") or -1),
-            "fee": float(fee_get(cfg)),
+            "fee": float(fee_total(cfg)),
             "hold": float(get(cfg,"trade.hold_bars") or -1),
+            "be_on": bool(get(cfg,"trade.be_on")),
+            "be_tr": float(get(cfg,"trade.be_trigger_pct") or -1),
+            "tr_on": bool(get(cfg,"trade.trail_on")),
+            "tr_st": float(get(cfg,"trade.trail_start_pct") or -1),
+            "tr_gp": float(get(cfg,"trade.trail_gap_pct") or -1),
           }
           print("EXPECTED:", exp); print("EFFECTIVE:", eff)
           for k in eff:
-            if abs(eff[k]-exp[k])>1e-12: raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
+            if eff[k] != exp[k]:
+              raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
           PY
 
       - name: Run backtest (with patch)
@@ -320,6 +378,11 @@ jobs:
           FEES_BPS_PER_LEG: ${{ matrix.FEES_BPS_PER_LEG }}
           SLIPPAGE_BPS: ${{ matrix.SLIPPAGE_BPS }}
           HOLD_BARS: ${{ matrix.HOLD_BARS }}
+          BE_ON: ${{ matrix.BE_ON }}
+          BE_TRIGGER_PCT: ${{ matrix.BE_TRIGGER_PCT }}
+          TRAIL_ON: ${{ matrix.TRAIL_ON }}
+          TRAIL_START_PCT: ${{ matrix.TRAIL_START_PCT }}
+          TRAIL_GAP_PCT: ${{ matrix.TRAIL_GAP_PCT }}
         run: |
           set -Eeuo pipefail
           ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee -a _out_4u/logs/stdout.log || true
