@@ -269,6 +269,17 @@ jobs:
           [ -f _out_4u/preds_test.csv ] || : > _out_4u/preds_test.csv
           [ -f _out_4u/trades.csv ]     || : > _out_4u/trades.csv
 
+      - name: Collect outputs to root
+        run: |
+          set -Eeuo pipefail
+          mkdir -p _out_4u
+          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+            if [ -s "_out_4u/run/$f" ]; then
+              cp -f "_out_4u/run/$f" "_out_4u/$f"
+            fi
+          done
+          ls -l _out_4u || true
+
       - name: Post analyze gating
         env:
           COVERAGE_GUARD: ${{ github.event.inputs.COVERAGE_GUARD }}
