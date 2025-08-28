@@ -1,4 +1,4 @@
-name: "Backtest Guard Mini Patch v1.3.1 (SHA pinned, robust CSV, prebuild config)"
+name: "Backtest Guard Mini Patch v1.3.2 (SHA pinned, robust CSV, heredoc-safe)"
 
 on:
   workflow_dispatch:
@@ -185,18 +185,11 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/trade/conf
           if [ ! -f tmp/trade/conf/config.yml ]; then
-            python - <<'PY'
-            import yaml, pathlib
-            p=pathlib.Path("tmp/trade/conf/config.yml")
-            cfg={"pricing":{},"trading":{},"gating":{},"calibration":{}}
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-            print("WROTE base config:", p)
-            PY
+            python -c "import yaml,pathlib; p=pathlib.Path('tmp/trade/conf/config.yml'); cfg={'pricing':{},'trading':{},'gating':{},'calibration':{}}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)); print('WROTE base config:', p)"
           fi
           python -u scripts/apply_config_patch.py
-          test -f tmp/trade/conf/config.effective.yml || { echo "::error::Failed to produce config.effective.yml"; exit 2; }
-          echo "--- effective (head) ---"
+          test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
+          echo '--- effective (head) ---'
           sed -n '1,120p' tmp/trade/conf/config.effective.yml || true
 
       - name: Assert effective config matches inputs (pre-run)
@@ -232,7 +225,7 @@ jobs:
           print("EFFECTIVE:", eff); print("EXPECTED:", exp)
           for k in eff:
               if not math.isfinite(eff[k]) or abs(eff[k]-exp[k])>1e-12:
-                  raise SystemExit(f"PARAM_MISMATCH:{{k}}:{{eff[k]}}!={{exp[k]}}")
+                  raise SystemExit(f"PARAM_MISMATCH:{k}:{eff[k]}!={exp[k]}")
           PY
 
       - name: Run backtest (with patch)
@@ -269,11 +262,12 @@ jobs:
           for c in ["p_cal","prob","score","pred","y_prob"]:
               if c in preds.columns: score = preds[c]; break
           assert score is not None, "NO_SCORE_COL"
-          assert float(np.nanstd(pd.to_numeric(score, errors='coerce'))) > 1e-6, "PRED_CONST_OR_DEGEN"
+          assert float(pd.to_numeric(score, errors='coerce').std(skipna=True)) > 1e-6, "PRED_CONST_OR_DEGEN"
           t = glob.glob("_out_4u/**/trades.csv", recursive=True)
           assert t, "MISSING_trades.csv"
-          trades = pd.read_csv(t[0])
-          assert trades["pnl"].abs().sum() != 0, "TRADES_DEAD_OR_CONST"
+          import pandas as _pd
+          trades = _pd.read_csv(t[0])
+          assert trades.get("pnl", _pd.Series([0])).abs().sum() != 0, "TRADES_DEAD_OR_CONST"
           s = glob.glob("_out_4u/**/summary.json", recursive=True)
           if s:
               summ = json.load(open(s[0]))
