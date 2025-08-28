@@ -1,4 +1,4 @@
-name: "Exit/TTL Wiring AB Test (must differ)"
+name: "Exit/TTL Wiring AB Test (must differ) v2"
 on:
   workflow_dispatch:
     inputs:
@@ -44,7 +44,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          # build config A
+          mkdir -p tmp/trade/conf
           cat > tmp/trade/conf/config.yml <<'YML'
           trade:
             tp_pct: 0.010
@@ -53,7 +53,8 @@ jobs:
             be_on: false
             trail_on: false
           YML
-          bash tmp/trade/scripts/entrypoint_run.sh
+          EP="tmp/trade/scripts/entrypoint_run.sh"; [ -x "$EP" ] || EP="scripts/entrypoint_run.sh"
+          bash "$EP"
           cp -f _out_4u/trades.csv _out_4u/trades_A.csv || true
 
       - name: Run B (ttl=5000)
@@ -62,7 +63,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          # build config B
+          mkdir -p tmp/trade/conf
           cat > tmp/trade/conf/config.yml <<'YML'
           trade:
             tp_pct: 0.010
@@ -71,7 +72,8 @@ jobs:
             be_on: false
             trail_on: false
           YML
-          bash tmp/trade/scripts/entrypoint_run.sh
+          EP="tmp/trade/scripts/entrypoint_run.sh"; [ -x "$EP" ] || EP="scripts/entrypoint_run.sh"
+          bash "$EP"
           cp -f _out_4u/trades.csv _out_4u/trades_B.csv || true
 
       - name: Assert A != B
@@ -88,6 +90,7 @@ jobs:
               print("::error::Exit/TTL not applied (A==B)")
               sys.exit(3)
           PY
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() }}
         with:
