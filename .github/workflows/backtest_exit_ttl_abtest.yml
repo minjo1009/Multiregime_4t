@@ -1,0 +1,95 @@
+name: "Exit/TTL Wiring AB Test (must differ)"
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: "Code ZIP"
+        required: true
+        default: "trade_v1.1.3.3_ev_gate_exitfix.zip"
+      DATA_ZIP:
+        description: "Data ZIP"
+        required: true
+        default: "ETHUSDT_1min_2020_2025.zip"
+      CSV_GLOB:
+        description: "CSV glob"
+        required: true
+        default: "**/*ETHUSDT*1m*202*.csv"
+
+jobs:
+  abtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Prepare
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade tmp/data tmp/raw _out_4u/logs _out_4u/run scripts
+          fetch() { src="$1"; dst="$2"; if echo "$src" | grep -qiE '^https?://'; then curl -L "$src" -o "$dst"; else cp -f "$src" "$dst"; fi; }
+          fetch "${{ github.event.inputs.CODE_ZIP }}" tmp/code.zip
+          fetch "${{ github.event.inputs.DATA_ZIP }}" tmp/data.zip
+          unzip -oq tmp/code.zip -d tmp/raw
+          mv tmp/raw/*/* tmp/trade/ 2>/dev/null || mv tmp/raw/* tmp/trade/
+          unzip -oq tmp/data.zip -d tmp/data
+          python -m pip install --upgrade pip
+          if [ -f tmp/trade/requirements.txt ]; then pip install -r tmp/trade/requirements.txt || true; fi
+          pip install numpy pandas pyyaml || true
+
+      - name: Run A (ttl=1)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          # build config A
+          cat > tmp/trade/conf/config.yml <<'YML'
+          trade:
+            tp_pct: 0.010
+            sl_pct: 0.005
+            hold_bars: 1
+            be_on: false
+            trail_on: false
+          YML
+          bash tmp/trade/scripts/entrypoint_run.sh
+          cp -f _out_4u/trades.csv _out_4u/trades_A.csv || true
+
+      - name: Run B (ttl=5000)
+        env:
+          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
+          # build config B
+          cat > tmp/trade/conf/config.yml <<'YML'
+          trade:
+            tp_pct: 0.010
+            sl_pct: 0.005
+            hold_bars: 5000
+            be_on: false
+            trail_on: false
+          YML
+          bash tmp/trade/scripts/entrypoint_run.sh
+          cp -f _out_4u/trades.csv _out_4u/trades_B.csv || true
+
+      - name: Assert A != B
+        run: |
+          python - <<'PY'
+          import hashlib, sys, pathlib
+          def h(p):
+            p = pathlib.Path(p)
+            if not p.exists(): print("MISSING", p); sys.exit(2)
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+          hA, hB = h("_out_4u/trades_A.csv"), h("_out_4u/trades_B.csv")
+          print("SHA_A", hA); print("SHA_B", hB)
+          if hA == hB:
+              print("::error::Exit/TTL not applied (A==B)")
+              sys.exit(3)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: exit_ttl_abtest_outputs
+          path: _out_4u/**
