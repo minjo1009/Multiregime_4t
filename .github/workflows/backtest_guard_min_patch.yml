@@ -1,4 +1,4 @@
-name: "Backtest Guard Mini Patch v1.3.3 (SHA pinned, robust CSV, fee-key tolerant)"
+name: "Backtest Guard Mini Patch v1.3.4 (SOT keys, SHA pinned)"
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ on:
         required: true
         default: "10"
       TEMP:
-        description: "Calibration temperature"
+        description: "Calibration/Gate temperature"
         required: true
         default: "1.7"
       FEES_BPS_PER_LEG:
@@ -104,21 +104,26 @@ jobs:
           cfg = {}
           if base.exists():
               cfg = yaml.safe_load(base.read_text()) or {}
-          for k in ("pricing","trading","gating","calibration"):
+          for k in ("pricing","trading","gating","calibration","trade","gate","costs"):
               cfg.setdefault(k, {})
           tp=float(os.getenv("TP_PCT","0.008"))
           sl=float(os.getenv("SL_PCT","0.004"))
           cov=float(os.getenv("COVERAGE_TARGET","10"))
           temp=float(os.getenv("TEMP","1.7"))
           fees=float(os.getenv("FEES_BPS_PER_LEG","0"))
-          cfg["trading"]["tp_pct"]=tp
-          cfg["trading"]["sl_pct"]=sl
+          # write both new/legacy keys
+          cfg["trading"]["tp_pct"]=tp; cfg["trading"]["sl_pct"]=sl
+          cfg["trade"]["tp_pct"]=tp;   cfg["trade"]["sl_pct"]=sl
           cfg["gating"]["coverage_target"]=cov
           cfg["calibration"]["temperature"]=temp
+          cfg["gate"]["temp"]=temp
+          # fees: pricing aliases + costs.* for runner
           psec = cfg.setdefault("pricing", {})
-          # write fee under multiple synonyms so downstream code sees it
           for key in ("fees_bps_per_leg","fee_bps_per_leg","per_leg_bps","fee_bps"):
               psec[key] = fees
+          csec = cfg.setdefault("costs", {})
+          csec["taker_bps"] = fees
+          csec["slippage_bps"] = float(csec.get("slippage_bps", 0.0))
           eff.parent.mkdir(parents=True, exist_ok=True)
           eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
           print("WROTE", eff)
@@ -149,7 +154,7 @@ jobs:
             echo "::error::No runner found"; exit 1
           fi
           mkdir -p _out_4u/run
-          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
             [ -f "_out_4u/run/$f" ] || : > "_out_4u/run/$f"
           done
           BASH
@@ -188,12 +193,12 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/trade/conf
           if [ ! -f tmp/trade/conf/config.yml ]; then
-            python -c "import yaml,pathlib; p=pathlib.Path('tmp/trade/conf/config.yml'); cfg={'pricing':{},'trading':{},'gating':{},'calibration':{}}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)); print('WROTE base config:', p)"
+            python -c "import yaml,pathlib; p=pathlib.Path('tmp/trade/conf/config.yml'); cfg={'pricing':{},'trading':{},'gating':{},'calibration':{},'trade':{},'gate':{},'costs':{}}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)); print('WROTE base config:', p)"
           fi
           python -u scripts/apply_config_patch.py
           test -f tmp/trade/conf/config.effective.yml || { echo '::error::Failed to produce config.effective.yml'; exit 2; }
-          echo '--- effective (pricing head) ---'
-          awk '/^pricing:/,/^\w/' tmp/trade/conf/config.effective.yml | sed -n '1,40p' || true
+          echo '--- effective head ---'
+          sed -n '1,160p' tmp/trade/conf/config.effective.yml || true
 
       - name: Assert effective config matches inputs (pre-run)
         env:
@@ -207,23 +212,25 @@ jobs:
           python - <<'PY'
           import os, yaml, math
           cfg = yaml.safe_load(open("tmp/trade/conf/config.effective.yml")) or {}
-          def pathget(d, path):
+          def get(d, path):
               for k in path.split('.'):
                   if not isinstance(d, dict): return None
-                  d = d.get(k, None)
+                  d = d.get(k)
               return d
-          def fee_get(cfg):
+          def fee_get(c):
+              # prefer costs sum, else pricing aliases
+              t = get(c,"costs.taker_bps") or 0.0
+              s = get(c,"costs.slippage_bps") or 0.0
+              if t or s: return float(t)+float(s)
               for k in ("pricing.fees_bps_per_leg","pricing.fee_bps_per_leg","pricing.per_leg_bps","pricing.fee_bps"):
-                  v = pathget(cfg, k)
-                  if v is not None:
-                      try: return float(v)
-                      except: pass
+                  v = get(c,k)
+                  if v is not None: return float(v)
               return None
           eff = {
-            "tp": float(pathget(cfg,"trading.tp_pct") or -1),
-            "sl": float(pathget(cfg,"trading.sl_pct") or -1),
-            "cov": float(pathget(cfg,"gating.coverage_target") or -1),
-            "temp": float(pathget(cfg,"calibration.temperature") or -1),
+            "tp": float(get(cfg,"trade.tp_pct") or get(cfg,"trading.tp_pct") or -1),
+            "sl": float(get(cfg,"trade.sl_pct") or get(cfg,"trading.sl_pct") or -1),
+            "cov": float(get(cfg,"gating.coverage_target") or -1),
+            "temp": float(get(cfg,"gate.temp") or get(cfg,"calibration.temperature") or -1),
             "fee": float(fee_get(cfg) if fee_get(cfg) is not None else -1),
           }
           exp = {
@@ -254,7 +261,7 @@ jobs:
       - name: Collect outputs to root
         run: |
           set -Eeuo pipefail
-          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
+          for f in summary.json preds_test.csv trades.csv gating_debug.json used_config.json; do
             if [ -s "_out_4u/run/$f" ]; then
               cp -f "_out_4u/run/$f" "_out_4u/$f"
             fi
@@ -276,9 +283,8 @@ jobs:
           assert float(pd.to_numeric(score, errors='coerce').std(skipna=True)) > 1e-6, "PRED_CONST_OR_DEGEN"
           t = glob.glob("_out_4u/**/trades.csv", recursive=True)
           assert t, "MISSING_trades.csv"
-          import pandas as _pd
-          trades = _pd.read_csv(t[0])
-          assert trades.get("pnl", _pd.Series([0])).abs().sum() != 0, "TRADES_DEAD_OR_CONST"
+          trades = pd.read_csv(t[0])
+          assert trades.get("pnl", pd.Series([0])).abs().sum() != 0, "TRADES_DEAD_OR_CONST"
           s = glob.glob("_out_4u/**/summary.json", recursive=True)
           if s:
               summ = json.load(open(s[0]))
