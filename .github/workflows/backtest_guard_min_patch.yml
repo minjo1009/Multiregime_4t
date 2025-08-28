@@ -1,4 +1,4 @@
-name: "Backtest Guard Mini Patch v1.1"
+name: "Backtest Guard Mini Patch v1.2 (robust CSV resolve)"
 
 on:
   workflow_dispatch:
@@ -12,9 +12,9 @@ on:
         required: true
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "Glob for CSV inside data zip"
+        description: "Glob for CSV inside data zip (e.g., **/*ETHUSDT*1m*202*.csv)"
         required: true
-        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+        default: "**/*ETHUSDT*1m*202*.csv"
       TP_PCT:
         description: "TP in fraction (0.008 = +0.8%)"
         required: true
@@ -46,10 +46,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@v4
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -80,7 +80,8 @@ jobs:
             mv tmp/raw/* tmp/trade/ 2>/dev/null || true
           fi
           unzip -oq tmp/data.zip -d tmp/data
-          echo "Tree:"; find tmp/trade -maxdepth 2 -type d -print
+          echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print | sed -n '1,30p'
+          echo "CSV sample:"; find tmp/data -type f -name "*.csv" | head -n 20 || true
 
       - name: Python deps
         working-directory: tmp/trade
@@ -123,15 +124,18 @@ jobs:
           #!/usr/bin/env bash
           set -Eeuo pipefail
           export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          # Select first CSV matching CSV_GLOB under tmp/data
+          # Select CSV robustly
           SEL=$(python - <<'PY'
-          import glob,os
+          import glob,os,json
           pat=os.environ.get("CSV_ROOT","tmp/data")+"/"+os.environ.get("CSV_GLOB","**/*.csv")
           paths=sorted(glob.glob(pat, recursive=True))
+          if not paths:
+              paths=sorted(glob.glob("tmp/data/**/*.csv", recursive=True))
           print(paths[0] if paths else "")
           PY
           )
           echo "$SEL" > scripts/CSV_PATH.txt
+          [ -n "$SEL" ] && [ -f "$SEL" ] || { echo "::error::No CSV matched. Check CSV_GLOB."; exit 3; }
           python -u scripts/apply_config_patch.py
           cp -f tmp/trade/conf/config.effective.yml tmp/trade/conf/config.yml || true
           if [ -f tmp/trade/run_4u.py ]; then
@@ -235,7 +239,7 @@ jobs:
 
       - name: Upload artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v4
         with:
           name: backtest_guard_outputs
           path: |
