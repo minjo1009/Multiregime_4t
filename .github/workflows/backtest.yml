@@ -3,22 +3,23 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'Repo path to code zip'
+        description: Repo path to code zip
         required: true
-        default: trade_v1.1.7.zip
+        default: zips/trade_v1.1.7.zip
       DATA_ZIP:
-        description: 'Repo path to data zip'
+        description: Repo path to data zip
         required: true
-        default: ETHUSDT_1min_2020_2025.zip
+        default: zips/ETHUSDT_1min_2020_2025.zip
       CSV_FILE:
-        description: 'Exact CSV after unzip'
+        description: Exact CSV after unzip
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions: { contents: read }
+    permissions:
+      contents: read
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
@@ -26,21 +27,24 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Assert ZIPs exist (repo)
+      - name: Assert ZIPs exist (repo path only)
         shell: bash
         run: |
           set -euo pipefail
           CODE="${{ github.event.inputs.CODE_ZIP }}"
           DATA="${{ github.event.inputs.DATA_ZIP }}"
-          ls -la || true
-          [ -f "${CODE}" ] || { echo "::error::CODE_ZIP not found: ${CODE}"; exit 66; }
-          [ -f "${DATA}" ] || { echo "::error::DATA_ZIP not found: ${DATA}"; exit 66; }
-          echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${CODE}" >> $GITHUB_ENV
-          echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${DATA}" >> $GITHUB_ENV
+          echo "[debug] workspace top:"; ls -la || true
+          echo "[debug] search zips/:"; find zips -maxdepth 2 -type f -print 2>/dev/null || true
+          if [ ! -f "${CODE}" ]; then echo "::error::CODE_ZIP not found: ${CODE}"; exit 66; fi
+          if [ ! -f "${DATA}" ]; then echo "::error::DATA_ZIP not found: ${DATA}"; exit 66; fi
+          echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${CODE}" >> "$GITHUB_ENV"
+          echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${DATA}" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
@@ -55,7 +59,7 @@ jobs:
           echo "[debug] conf:"; ls -la "${RUN_DIR}/conf" || true
           echo "[debug] data:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
 
-      # ★ effective config 외부 보장 (ZIP 버전 상관없이)
+      # effective config 사전 보장(엔트리 호출 전)
       - name: Ensure effective config (outside ZIP)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -65,7 +69,7 @@ jobs:
           if [ -f conf/config.yml ]; then
             cp -f conf/config.yml conf/config.effective.yml
           else
-            cat > conf/config.effective.yml <<'YAML'
+            cat > conf/config.effective.yml <<'CFG'
 calibration:
   method: isotonic
 coverage_target_min: 0.03
@@ -83,10 +87,9 @@ trade:
 policy:
   allow_long: true
   allow_short: true
-YAML
+CFG
           fi
           echo "[debug] effective cfg ready:"; ls -la conf/config.effective.yml
-          # 가드: 내용 앞 10줄 노출
           head -n 10 conf/config.effective.yml || true
 
       - name: Install deps
@@ -95,7 +98,11 @@ YAML
         run: |
           set -euo pipefail
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy scikit-learn pyyaml; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy scikit-learn pyyaml
+          fi
 
       - name: Detect CSV and preflight (ABS)
         shell: bash
@@ -104,21 +111,24 @@ YAML
           CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
           if [ ! -f "${CSV_ABS}" ]; then
             FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" | head -n 1 || true)"
-            [ -n "${FOUND}" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            if [ -z "${FOUND}" ]; then
+              echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"
+              echo "[hint] available CSVs:"; find "${{ env.DATA_DIR }}" -type f -name '*.csv' -print || true
+              exit 64
+            fi
             CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
           echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
           python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "${CSV_ABS}"
 
-      - name: Run backtest (v1.1.7)
+      - name: Run backtest (v1.1.7 unified entry)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           export PYTHONPATH="${PWD}"
-          # run_4u.py 내부에서도 한번 더 보장하니, 이중 안전
-          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
-          echo "[debug] out list:"; ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
+          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          echo "[debug] out list:"; ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
