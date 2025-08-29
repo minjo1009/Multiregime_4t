@@ -1,0 +1,225 @@
+name: diagnose-multigrid-v1.1.9
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: Repo path to code zip
+        required: true
+        default: trade_v1.1.9.zip
+      DATA_ZIP:
+        description: Repo path to data zip
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_FILE:
+        description: CSV filename after unzip
+        required: true
+        default: ETHUSDT_1min_2020_2025.csv
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        THR:   [3.2, 3.8]
+        TP:    [0.0038]
+        SL:    [0.0022]
+        HOLD:  [6, 8]
+        FILTER: [ema, none]
+        BE:    [0, 5]
+    env:
+      RUN_DIR: tmp/trade
+      DATA_DIR: tmp/data
+      OUT_DIR: _out_4u/run
+      PYVER: '3.11'
+
+    steps:
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+
+      - name: Resolve ZIPs (root or nested)
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve() {
+            local in="$1" outvar="$2" path=""
+            if [[ -f "$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
+            elif [[ -f "${GITHUB_WORKSPACE}/$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
+            else
+              local base="$(basename "$in")"
+              if [[ -f "${GITHUB_WORKSPACE}/$base" ]]; then path="${GITHUB_WORKSPACE}/$base"
+              else
+                path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
+              fi
+            fi
+            [[ -n "$path" && -f "$path" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
+            echo "${outvar}=${path}" >> "$GITHUB_ENV"
+            echo "[resolved] $in -> $path"
+          }
+          resolve "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
+          resolve "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
+
+      - name: Unpack code and data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
+          unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
+          # run_4u.py 위치 보정(하위폴더 한 겹 대비)
+          if [ ! -f "${RUN_DIR}/run_4u.py" ]; then
+            CAND="$(find "${RUN_DIR}" -maxdepth 2 -type f -name 'run_4u.py' -print -quit || true)"
+            [ -n "$CAND" ] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
+            echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"
+            echo "[debug] RUN_DIR corrected -> $(dirname "$CAND")"
+          fi
+          echo "[debug] data files:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
+
+      - name: Install deps
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy pyyaml; fi
+
+      - name: Detect CSV (ABS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
+          if [ ! -f "$CSV" ]; then
+            F="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
+            [ -n "$F" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${F}"
+          fi
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+
+      # (1) effective.yml 오버라이드 + 해시/프리뷰 출력
+      - name: Override effective config (assertable)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python - "${{ matrix.THR }}" "${{ matrix.HOLD }}" "${{ matrix.TP }}" "${{ matrix.SL }}" "${{ matrix.FILTER }}" "${{ matrix.BE }}" <<'PY'
+          import os, sys, pathlib, yaml, hashlib
+          thr=float(sys.argv[1]); hold=int(sys.argv[2]); tp=float(sys.argv[3]); sl=float(sys.argv[4]); flt=sys.argv[5]; be=int(sys.argv[6])
+          RUN=pathlib.Path(os.environ['RUN_DIR']); CONF=RUN/'conf'; CONF.mkdir(parents=True, exist_ok=True)
+          eff=CONF/'config.effective.yml'
+          # ★ 엔진이 읽는 최상위 키 스키마로 기록
+          cfg={
+            'beta': 1.6, 'temp': 6.0,
+            'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr},
+            'tp_pct': tp, 'sl_pct': sl, 'hold_bars': hold,
+            'allow_long': True, 'allow_short': True,
+            'fees_bps_per_leg': 3.0, 'calibration': 'isotonic',
+            '__debug_tag__': f"thr{thr}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
+          }
+          if flt=='ema': cfg['filter_ema_50_200']=True
+          if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
+          text=yaml.safe_dump(cfg, sort_keys=False).encode()
+          h=hashlib.sha256(text).hexdigest()
+          eff.write_bytes(text)
+          print("[override] wrote", eff)
+          print("[override] sha256:", h)
+          print("[override] preview:\\n", text.decode()[:400])
+          PY
+
+      # exit_bridge 무력화 + run_4u.py가 skip-bridge 경로를 갖는지 확인
+      - name: Lock bridge & assert skip-bridge path
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          test -f VERSION.txt && { echo "[version]"; head -n 1 VERSION.txt; } || true
+          if [ -f backtest/exit_bridge.py ]; then rm -f backtest/exit_bridge.py; echo "[bridge] exit_bridge.py removed"; fi
+          grep -q "pre-existing config.effective.yml" run_4u.py && echo "[check] run_4u.py has skip-bridge logic" || { echo "::error::run_4u.py skip-bridge string not found"; exit 68; }
+
+      # 실행 + 로그 캡쳐 + 'skip bridge' 문구 강제 검증
+      - name: Run backtest (tee log and verify skip-bridge)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${PWD}"
+          TAG="thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}"
+          mkdir -p "${GITHUB_WORKSPACE}/_diag"
+          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" 2>&1 | tee "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log"
+          grep -q "pre-existing config.effective.yml found → skip bridge" "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log" \
+            && echo "[verify] skip-bridge message found" \
+            || { echo "::error::skip-bridge message NOT found in log"; exit 69; }
+          ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+
+      # (2) 실행 후 기대치와 실제치 비교: 다르면 OK, 다르면 OK / 같으면 실패
+      - name: Post-run verify and print table
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUM="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/summary.json"
+          GATE="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/gating_debug.json"
+          echo "===== EFFECTIVE KEYS (ACTUAL) ====="
+          echo "[gating]"; jq -r '.thr_by_session, .beta, .temp' "$GATE" || true
+          echo "[summary]"; jq -r '.tp_pct, .sl_pct, .n_trades, .hit_rate, .profit_factor' "$SUM" || true
+          THR_EXPECT="${{ matrix.THR }}"; TP_EXPECT="${{ matrix.TP }}"; SL_EXPECT="${{ matrix.SL }}"
+          THR_JSON="$(jq -r '.thr_by_session.US' "$GATE" 2>/dev/null || echo "")"
+          TP_JSON="$(jq -r '.tp_pct' "$SUM" 2>/dev/null || echo "")"
+          SL_JSON="$(jq -r '.sl_pct' "$SUM" 2>/dev/null || echo "")"
+          printf "\n[expected] thr=%s  tp=%s  sl=%s\n" "$THR_EXPECT" "$TP_EXPECT" "$SL_EXPECT"
+          printf "[actual  ] thr=%s  tp=%s  sl=%s\n" "$THR_JSON" "$TP_JSON" "$SL_JSON"
+          if [ "$THR_JSON" != "$THR_EXPECT" ] || [ "$TP_JSON" != "$TP_EXPECT" ] || [ "$SL_JSON" != "$SL_EXPECT" ]; then
+            echo "::error::override NOT applied or engine ignored keys (schema/overwrite/dir)."; exit 65
+          fi
+          # 집계 Job에서 비교할 시그니처 저장
+          SIGDIR="${GITHUB_WORKSPACE}/_sig"; mkdir -p "$SIGDIR"
+          echo "{\"thr\":$THR_JSON,\"tp\":$TP_JSON,\"sl\":$SL_JSON}" > "$SIGDIR/${{ matrix.THR }}_${{ matrix.HOLD }}_${{ matrix.TP }}_${{ matrix.SL }}_${{ matrix.FILTER }}_${{ matrix.BE }}.json"
+          echo "[signature] $(cat "$SIGDIR"/*.json | tr -d '\n')"
+
+      - name: Upload diagnostics/artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: out_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}
+          path: |
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/gating_debug.json
+            ${{ env.OUT_DIR }}/preds_test.csv
+            ${{ env.OUT_DIR }}/trades.csv
+            ${{ env.OUT_DIR }}/preflight.json
+            _diag/run_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}.log
+            _sig/*.json
+
+  aggregate:
+    needs: [grid]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all run artifacts
+        uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          path: all_runs
+
+      - name: Summarize thr/tp/sl across runs and assert diversity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[list]"; find all_runs -type f -name '*.json' -maxdepth 3 | sed 's/^/ - /'
+          # 모든 시그니처 모으기
+          jq -s '[.[] | select(has("thr") and has("tp") and has("sl"))]' $(find all_runs -type f -name '*.json' -maxdepth 3) > sig_all.json || echo "[]"
+          echo "[sig_all]"; cat sig_all.json
+          # 유니크 조합 개수 체크
+          UNIQUE=$(jq -r 'map([.thr,.tp,.sl]|join(",")) | unique | length' sig_all.json)
+          echo "[unique combos] $UNIQUE"
+          # 표 형태로 출력
+          echo -e "\n=== Table (thr,tp,sl) per run ==="
+          jq -r '.[] | @tsv "\(.thr)\t\(.tp)\t\(.sl)"' sig_all.json | awk 'BEGIN{print "thr\ttp\tsl"}{print}'
+          # 전부 동일하면 실패 (요구사항 2/3)
+          if [ "$UNIQUE" -le 1 ]; then
+            echo "::error::All runs ended with identical (thr,tp,sl). Likely cause: (1) overwrite order (bridge/other step), (2) wrong schema (top-level vs nested), (3) wrong working directory (different conf used)."; exit 70
+          else
+            echo "[ok] Overrides diversified across grid."
+          fi
