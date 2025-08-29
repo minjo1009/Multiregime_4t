@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       CODEPACK_ZIP:
-        description: "Path to code pack zip (in repo root, e.g. trade_v1.1.4.zip)"
+        description: "Path to code pack zip (repo-root path)"
         required: true
         default: "trade_v1.1.4.zip"
       CSV_GLOB:
-        description: "Glob for CSV under data/ or tmp/data (e.g. **/*ETHUSDT*1min*2020*2025*.csv)"
+        description: "Glob for CSV under data/ or tmp/data/"
         required: true
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       TTL_A:
@@ -20,9 +20,6 @@ on:
         required: true
         default: "5000"
 
-permissions:
-  contents: read
-
 jobs:
   abtest:
     runs-on: ubuntu-latest
@@ -33,7 +30,7 @@ jobs:
       - name: Setup Python 3.11 (pinned)
         uses: actions/setup-python@a26af69be951a213e376a39fc6824e9f5b089bc5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -47,118 +44,87 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u
-          echo "[prep] unzip ${CODEPACK_ZIP} -> tmp/trade"
-          unzip -o "${CODEPACK_ZIP}" -d tmp/trade >/dev/null
-          echo "[prep] search CSV with glob: ${CSV_GLOB}"
-          SEL=$(python -c "import glob,os,sys,pathlib; pat=os.environ.get('CSV_GLOB','**/*.csv'); p=pathlib.Path; c=sorted(glob.glob(str(p('tmp/data')/pat), recursive=True)); d=sorted(glob.glob(str(p('data')/pat), recursive=True)); print((c or d or [''])[0])")
-          if [ -z "${SEL}" ]; then
-            echo "No CSV found under tmp/data or data"
-            exit 1
+          unzip -o "$CODEPACK_ZIP" -d tmp/trade >/dev/null
+          if compgen -G "tmp/trade/data/*" > /dev/null; then
+            mv -f tmp/trade/data/* tmp/data/ || true
           fi
-          echo "${SEL}" > _out_4u/CSV_PATH.txt
-          echo "[prep] CSV selected: ${SEL}"
-
-      - name: Create run_engine.py (bridge & normalizer)
-        run: |
-          set -euo pipefail
-          cat > run_engine.py <<'PY'
-import os, sys, glob, shutil, inspect, argparse
-from pathlib import Path
-import yaml
-
-def load_csv_path():
-    p = Path("_out_4u/CSV_PATH.txt")
-    if not p.exists():
-        raise FileNotFoundError("CSV_PATH.txt missing")
-    return p.read_text().strip()
-
-def ensure_config_with_ttl(ttl:int)->Path:
-    eff = Path("tmp/trade/conf/config.effective.yml")
-    eff.parent.mkdir(parents=True, exist_ok=True)
-    cfg = {}
-    if eff.exists():
-        try:
-            cfg = yaml.safe_load(eff.read_text()) or {}
-        except Exception:
-            cfg = {}
-    cfg.setdefault("exit", {})["ttl"] = int(ttl)
-    eff.write_text(yaml.safe_dump(cfg, sort_keys=False))
-    print(f"[bridge] wrote {eff} with exit.ttl={ttl}")
-    return eff
-
-def resolve_engine():
-    sys.path.insert(0, "tmp/trade")
-    candidates = [
-        ("backtest.engine", "run_backtest"),
-        ("backtest.engine", "main"),
-        ("backtest.engine", "run"),
-        ("backtest.runner", "main"),
-    ]
-    for mod, attr in candidates:
-        try:
-            m = __import__(mod, fromlist=[attr])
-            fn = getattr(m, attr)
-            print(f"[engine] using {mod}.{attr}")
-            return fn
-        except Exception:
-            continue
-    raise FileNotFoundError("No engine entry found (run_4u.py or backtest/engine.py)")
-
-def invoke(fn, data_path:str, config_path:str, out_dir:str):
-    try:
-        import inspect
-        sig = inspect.signature(fn)
-        params = set(sig.parameters.keys())
-        kwargs = {}
-        if "data_path" in params: kwargs["data_path"] = data_path
-        if "config" in params: kwargs["config"] = config_path
-        if "config_path" in params: kwargs["config_path"] = config_path
-        if "out_dir" in params: kwargs["out_dir"] = out_dir
-        if kwargs:
-            return fn(**kwargs)
-        else:
-            return fn(data_path, config_path, out_dir)
-    except TypeError:
-        return fn(data_path, config_path, out_dir)
-
-def normalize_trades(out_path:Path):
-    if out_path.exists():
-        return True
-    cands = sorted(glob.glob("tmp/trade/**/trades*.csv", recursive=True))
-    if cands:
-        Path(out_path.parent).mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cands[0], out_path)
-        print(f"[bridge] copied {cands[0]} -> {out_path}")
-        return True
-    return False
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ttl", type=int, required=True)
-    ap.add_argument("--out", type=str, required=True)
-    args = ap.parse_args()
-
-    data_path = load_csv_path()
-    eff = ensure_config_with_ttl(args.ttl)
-    out_dir = str(Path("_out_4u"))
-
-    fn = resolve_engine()
-    invoke(fn, data_path=data_path, config_path=str(eff), out_dir=out_dir)
-
-    out_csv = Path(args.out)
-    if not normalize_trades(out_csv):
-        raise FileNotFoundError("trades.csv not produced by engine")
-
-if __name__ == "__main__":
-    main()
-PY
+          SEL=$(python -c "import glob,os;pat=os.environ.get('CSV_GLOB','**/*.csv');c=sorted(glob.glob('tmp/data/'+pat,recursive=True));print(c[0] if c else '')")
+          [ -n "$SEL" ] || { echo 'No CSV found under tmp/data'; exit 1; }
+          echo "$SEL" > _out_4u/CSV_PATH.txt
+          echo "[prep] using CSV: $SEL"
 
       - name: Run A (TTL=${{ github.event.inputs.TTL_A }})
         env:
           TTL: ${{ github.event.inputs.TTL_A }}
         run: |
           set -euo pipefail
-          python run_engine.py --ttl "${TTL}" --out "_out_4u/trades_A.csv"
+          python - <<'PY'
+          import os, sys, glob, shutil, importlib
+          from pathlib import Path
+          import yaml
+          data_path = Path(Path('_out_4u/CSV_PATH.txt').read_text().strip())
+          eff = Path('tmp/trade/conf/config.effective.yml')
+          eff.parent.mkdir(parents=True, exist_ok=True)
+          cfg = {}
+          if eff.exists():
+            try:
+              cfg = yaml.safe_load(eff.read_text()) or {}
+            except Exception:
+              cfg = {}
+          cfg.setdefault('exit', {})['ttl'] = int(os.environ.get('TTL','0'))
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          sys.path[:0] = ['tmp/trade','tmp/trade/backtest']
+          candidates = [
+            ('run_4u', 'tmp/trade/run_4u.py', 'main'),
+            ('backtest.runner', 'tmp/trade/backtest/runner.py', 'main'),
+            ('backtest.engine', 'tmp/trade/backtest/engine.py', None),
+          ]
+          fn = None
+          for modname, path, preferred in candidates:
+            if Path(path).exists():
+              mod = importlib.import_module(modname.replace('/','.'))
+              if preferred and hasattr(mod, preferred):
+                fn = getattr(mod, preferred)
+                break
+              for name in ('run_backtest','main'):
+                if hasattr(mod, name):
+                  fn = getattr(mod, name)
+                  break
+              if fn: break
+          if not fn:
+            raise SystemExit("No engine entry found (run_4u.py or backtest/runner.py or backtest/engine.py)")
+          called = False
+          for kw in [
+            dict(data_path=str(data_path), config_path=str(eff), out_dir='_out_4u'),
+            dict(data_path=str(data_path), config=str(eff), out_dir='_out_4u'),
+          ]:
+            try:
+              fn(**kw); called=True; break
+            except TypeError:
+              pass
+          if not called:
+            try:
+              fn(str(data_path), str(eff), '_out_4u'); called=True
+            except TypeError:
+              pass
+          if not called:
+            try:
+              fn(str(data_path), str(eff)); called=True
+            except TypeError:
+              pass
+          out = None
+          for g in ('_out_4u/trades.csv','tmp/trade/out/trades.csv','tmp/trade/backtest/trades.csv','trades.csv'):
+            p=Path(g)
+            if p.exists(): out=p; break
+          if not out:
+            c = glob.glob('**/trades*.csv', recursive=True)
+            out = Path(sorted(c)[0]) if c else None
+          if not out:
+            raise SystemExit('trades.csv not produced')
+          Path('_out_4u').mkdir(exist_ok=True)
+          shutil.copyfile(out, '_out_4u/trades_A.csv')
+          print('[A] wrote _out_4u/trades_A.csv')
+          PY
 
       - name: Clean BETWEEN runs
         run: |
@@ -169,30 +135,90 @@ PY
           TTL: ${{ github.event.inputs.TTL_B }}
         run: |
           set -euo pipefail
-          python run_engine.py --ttl "${TTL}" --out "_out_4u/trades_B.csv"
+          python - <<'PY'
+          import os, sys, glob, shutil, importlib
+          from pathlib import Path
+          import yaml
+          data_path = Path(Path('_out_4u/CSV_PATH.txt').read_text().strip())
+          eff = Path('tmp/trade/conf/config.effective.yml')
+          eff.parent.mkdir(parents=True, exist_ok=True)
+          cfg = {}
+          if eff.exists():
+            try:
+              cfg = yaml.safe_load(eff.read_text()) or {}
+            except Exception:
+              cfg = {}
+          cfg.setdefault('exit', {})['ttl'] = int(os.environ.get('TTL','0'))
+          eff.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          sys.path[:0] = ['tmp/trade','tmp/trade/backtest']
+          candidates = [
+            ('run_4u', 'tmp/trade/run_4u.py', 'main'),
+            ('backtest.runner', 'tmp/trade/backtest/runner.py', 'main'),
+            ('backtest.engine', 'tmp/trade/backtest/engine.py', None),
+          ]
+          fn = None
+          for modname, path, preferred in candidates:
+            if Path(path).exists():
+              mod = importlib.import_module(modname.replace('/','.'))
+              if preferred and hasattr(mod, preferred):
+                fn = getattr(mod, preferred)
+                break
+              for name in ('run_backtest','main'):
+                if hasattr(mod, name):
+                  fn = getattr(mod, name)
+                  break
+              if fn: break
+          if not fn:
+            raise SystemExit('No engine entry found')
+          called = False
+          for kw in [
+            dict(data_path=str(data_path), config_path=str(eff), out_dir='_out_4u'),
+            dict(data_path=str(data_path), config=str(eff), out_dir='_out_4u'),
+          ]:
+            try:
+              fn(**kw); called=True; break
+            except TypeError:
+              pass
+          if not called:
+            try:
+              fn(str(data_path), str(eff), '_out_4u'); called=True
+            except TypeError:
+              pass
+          if not called:
+            try:
+              fn(str(data_path), str(eff)); called=True
+            except TypeError:
+              pass
+          out = None
+          for g in ('_out_4u/trades.csv','tmp/trade/out/trades.csv','tmp/trade/backtest/trades.csv','trades.csv'):
+            p=Path(g)
+            if p.exists(): out=p; break
+          if not out:
+            c = glob.glob('**/trades*.csv', recursive=True)
+            out = Path(sorted(c)[0]) if c else None
+          if not out:
+            raise SystemExit('trades.csv not produced')
+          Path('_out_4u').mkdir(exist_ok=True)
+          shutil.copyfile(out, '_out_4u/trades_B.csv')
+          print('[B] wrote _out_4u/trades_B.csv')
+          PY
 
       - name: Assert A != B (TTL effect)
         run: |
           python - <<'PY'
-import hashlib, pathlib, sys
-def sha(p):
-    d=hashlib.sha256(); d.update(pathlib.Path(p).read_bytes()); return d.hexdigest()
-A="_out_4u/trades_A.csv"; B="_out_4u/trades_B.csv"
-try:
-    sa, sb = sha(A), sha(B)
-    print("SHA_A", sa); print("SHA_B", sb)
-    if sa == sb:
-        print("Error: Exit/TTL not applied (A==B)"); raise SystemExit(3)
-except FileNotFoundError as e:
-    print("MISSING", str(e).split("'")[1]); raise SystemExit(2)
-PY
+          from pathlib import Path
+          import hashlib, sys
+          def sha(p):
+            h=hashlib.sha256(); h.update(Path(p).read_bytes()); return h.hexdigest()
+          a=sha('_out_4u/trades_A.csv'); b=sha('_out_4u/trades_B.csv')
+          print('SHA_A',a); print('SHA_B',b)
+          if a==b:
+            print('Error: Exit/TTL not applied (A==B)')
+            sys.exit(3)
+          PY
 
       - name: Upload artifacts (pinned SHA)
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: exit_ttl_abtest_outputs
-          path: |
-            _out_4u/**
-            run_engine.py
-            _out_4u/CSV_PATH.txt
+          path: _out_4u/*
