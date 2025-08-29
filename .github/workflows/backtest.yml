@@ -1,25 +1,24 @@
-name: backtest (strict v1.1.7, path-or-url only)
+name: backtest (strict v1.1.7, repo-path only)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Code zip (repo path OR https URL)
+        description: 'Repo path to code zip'
         required: true
-        default: trade_v1.1.7.zip
+        default: zips/trade_v1.1.7.zip
       DATA_ZIP:
-        description: Data zip (repo path OR https URL)
+        description: 'Repo path to data zip'
         required: true
-        default: ETHUSDT_1min_2020_2025.zip
-      CSV_GLOB:
-        description: CSV file name (exact or glob)
+        default: zips/ETHUSDT_1min_2020_2025.zip
+      CSV_FILE:
+        description: 'Exact CSV file name after unzip'
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    permissions: { contents: read }
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
@@ -27,6 +26,7 @@ jobs:
       PYVER: '3.11'
 
     steps:
+      # Pinned SHAs (보안 고정)
       - name: Validate pinned SHAs
         shell: bash
         run: |
@@ -34,53 +34,28 @@ jobs:
           curl -sSfL -I https://api.github.com/repos/actions/checkout/tarball/08c6903cd8c0fde910a37f88322edcfb5dd907a8 >/dev/null
           curl -sSfL -I https://api.github.com/repos/actions/setup-python/tarball/a26af69be951a213d495a4c3e4e4022e16d87065 >/dev/null
           curl -sSfL -I https://api.github.com/repos/actions/upload-artifact/tarball/ea165f8d65b6e75b540449e92b4886f43607fa02 >/dev/null
-          echo "Pinned SHAs OK"
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      # ---- CODE_ZIP: repo path or URL only ----
-      - name: Fetch code zip (path or URL)
+      # 경로 진단 + 존재 확인
+      - name: Assert ZIPs exist (repo path only)
         shell: bash
-        env:
-          INPUT_CODE_ZIP: ${{ github.event.inputs.CODE_ZIP }}
         run: |
           set -euo pipefail
-          mkdir -p tmp/fetch
-          TARGET="tmp/fetch/code.zip"
-          if [[ "${INPUT_CODE_ZIP}" =~ ^https?:// ]]; then
-            echo "[fetch] URL: ${INPUT_CODE_ZIP}"
-            curl -sSfL -o "${TARGET}" "${INPUT_CODE_ZIP}"
-          elif [[ -f "${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}" ]]; then
-            echo "[fetch] repo file: ${INPUT_CODE_ZIP}"
-            cp -f "${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}" "${TARGET}"
-          else
-            echo "::error::CODE_ZIP not found in repo and not a URL. Commit it to the repo or provide a URL."
+          echo "[debug] workspace tree (top level)"; ls -la
+          echo "[debug] zips tree (2 levels)"; find zips -maxdepth 2 -type f -print 2>/dev/null || true
+          CODE="${{ github.event.inputs.CODE_ZIP }}"
+          DATA="${{ github.event.inputs.DATA_ZIP }}"
+          if [ ! -f "${CODE}" ]; then
+            echo "::error::CODE_ZIP not found at repo path: ${CODE}"
             exit 66
           fi
-          test -s "${TARGET}" || { echo "::error::empty code zip"; exit 66; }
-          echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${TARGET}" >> "$GITHUB_ENV"
-
-      # ---- DATA_ZIP: repo path or URL only ----
-      - name: Fetch data zip (path or URL)
-        shell: bash
-        env:
-          INPUT_DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
-        run: |
-          set -euo pipefail
-          mkdir -p tmp/fetch
-          TARGET="tmp/fetch/data.zip"
-          if [[ "${INPUT_DATA_ZIP}" =~ ^https?:// ]]; then
-            echo "[fetch] URL: ${INPUT_DATA_ZIP}"
-            curl -sSfL -o "${TARGET}" "${INPUT_DATA_ZIP}"
-          elif [[ -f "${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}" ]]; then
-            echo "[fetch] repo file: ${INPUT_DATA_ZIP}"
-            cp -f "${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}" "${TARGET}"
-          else
-            echo "::error::DATA_ZIP not found in repo and not a URL. Commit it to the repo or provide a URL."
+          if [ ! -f "${DATA}" ]; then
+            echo "::error::DATA_ZIP not found at repo path: ${DATA}"
             exit 66
           fi
-          test -s "${TARGET}" || { echo "::error::empty data zip"; exit 66; }
-          echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${TARGET}" >> "$GITHUB_ENV"
+          echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${CODE}" >> $GITHUB_ENV
+          echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${DATA}" >> $GITHUB_ENV
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -93,8 +68,7 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
-          echo "[debug] data listing:"
-          find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" -print || true
+          echo "[debug] data listing:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
 
       - name: Install deps
         shell: bash
@@ -112,17 +86,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_GLOB }}" | head -n 1 || true)"
-          if [ -z "$FOUND" ]; then
-            echo "::error::CSV not found: ${{ github.event.inputs.CSV_GLOB }}"
-            exit 64
+          CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
+          if [ ! -f "${CSV_ABS}" ]; then
+            # 하위 폴더에 풀렸을 가능성: find로 보정
+            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" | head -n 1 || true)"
+            if [ -z "${FOUND}" ]; then
+              echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"
+              echo "[hint] Available CSVs:"; find "${{ env.DATA_DIR }}" -type f -name '*.csv' -print || true
+              exit 64
+            fi
+            CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
-          CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
-          echo "[debug] CSV_PATH=$CSV_ABS"
-          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "$CSV_ABS"
+          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "${CSV_ABS}"
 
-      - name: Run backtest (unified entry)
+      - name: Run backtest (unified entry; v1.1.7 ensures effective config)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
