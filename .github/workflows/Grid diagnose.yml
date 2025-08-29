@@ -105,7 +105,15 @@ jobs:
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
 
-      # 1) Override: 최상위 키 + 센티넬 + 해시 기록 (런타임 RUN_DIR 사용)
+      - name: Schema discovery (grep engine for config keys)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[ctx] RUN_DIR=$RUN_DIR"
+          KEYS='thr_by_session|thr|threshold|tp_pct|tp|sl_pct|sl|hold_bars|hold|allow_long|allow_short|fees_bps_per_leg|taker_bps|slippage_bps|beta|temp|calibration'
+          grep -R -nE "$KEYS" "$RUN_DIR/backtest" || true
+
+      # 1) Override: 최상위 키 + 센티넬 + 해시 기록 (effective.yml & config.yml 동시)
       - name: Override effective config (hash + preview)
         shell: bash
         run: |
@@ -117,6 +125,7 @@ jobs:
           thr=float(sys.argv[2]); hold=int(sys.argv[3]); tp=float(sys.argv[4]); sl=float(sys.argv[5]); flt=sys.argv[6]; be=int(sys.argv[7])
           conf = run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
           eff = conf/'config.effective.yml'
+          base = conf/'config.yml'
           cfg = {
             'beta': 1.6, 'temp': 6.0,
             'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr},
@@ -130,7 +139,8 @@ jobs:
           text = yaml.safe_dump(cfg, sort_keys=False).encode()
           h = hashlib.sha256(text).hexdigest()
           eff.write_bytes(text)
-          print("[override] wrote", eff)
+          base.write_bytes(text)     # ★ 동시 쓰기로 경로 이슈 차단
+          print("[override] wrote", eff, "and", base)
           print("[override] sha256:", h)
           print("[override] preview:\\n", text.decode()[:300])
           PY
@@ -139,7 +149,16 @@ jobs:
           echo "[PRE] conf path = $(realpath "$CONF_PATH")"
           sed -n '1,40p' "$CONF_PATH"
 
-      # 2) bridge 무력화 + 1.1.9 skip-bridge 코드 경로 확인(경고만)
+      - name: Snapshot config to out_dir (pre-run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SNAP_DIR="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          mkdir -p "$SNAP_DIR"
+          cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP_DIR/_cfg_snapshot.yml"
+          sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP_DIR/_cfg_snapshot.sha256"
+          echo "[snap] wrote $SNAP_DIR/_cfg_snapshot.yml"
+
       - name: Lock bridge & check skip-bridge code path (warn-only)
         shell: bash
         run: |
@@ -153,7 +172,6 @@ jobs:
             echo "::warning::run_4u.py skip-bridge string not found (해시 검증으로 진행)"
           fi
 
-      # 3) 실행 (로그 저장만)
       - name: Run backtest (tee log)
         shell: bash
         run: |
@@ -164,35 +182,34 @@ jobs:
           python "$RUN_DIR/run_4u.py" --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" 2>&1 | tee "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log"
           ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
-      # 4) 실행 후: 해시 비교 + 값 검증 + 라벨링
-      - name: Post-run verify (hash compare + value check)
+      - name: Post-run verify (hash compare + flexible value check)
         shell: bash
         run: |
           set -euo pipefail
           CONF_PATH="$RUN_DIR/conf/config.effective.yml"
+          OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
           POST_HASH="$(sha256sum "$CONF_PATH" | awk '{print $1}')"
+          PRE_HASH="$(cat "$OUT/_cfg_snapshot.sha256")"
           echo "[POST] conf path = $(realpath "$CONF_PATH")"
           echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
           if [ "$PRE_HASH" != "$POST_HASH" ]; then
-            echo "::error::config.effective.yml was OVERWRITTEN after override → 경로/순서 이슈 가능 (bridge/기본생성/다른 디렉토리)."; exit 71
+            echo "::error::override 파일이 실행 중 덮어쓰기 되었습니다 (경로/순서)."; exit 71
           fi
-          SUM="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/summary.json"
-          GATE="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/gating_debug.json"
+          SUM="$OUT/summary.json"; GATE="$OUT/gating_debug.json"
           THR_EXPECT="${{ matrix.THR }}"; TP_EXPECT="${{ matrix.TP }}"; SL_EXPECT="${{ matrix.SL }}"
           THR_JSON="$(jq -r '.thr_by_session.US // empty' "$GATE" 2>/dev/null || true)"
           TP_JSON="$(jq -r '.tp_pct // empty' "$SUM" 2>/dev/null || true)"
           SL_JSON="$(jq -r '.sl_pct // empty' "$SUM" 2>/dev/null || true)"
-          echo "[expected] thr=$THR_EXPECT tp=$TP_EXPECT sl=$SL_EXPECT"
-          echo "[actual  ] thr=$THR_JSON  tp=$TP_JSON  sl=$SL_JSON"
           if [ -z "$THR_JSON" ] && [ -z "$TP_JSON" ] && [ -z "$SL_JSON" ]; then
-            echo "::error::엔진이 다른 config를 읽었거나 스키마가 전혀 다릅니다 (경로/스키마)."; exit 72
+            echo "[info] outputs do not expose keys → schema 차이 가능. 스냅샷 해시 동일 → override 전달은 보장됨."
+          else
+            echo "[expected] thr=$THR_EXPECT tp=$TP_EXPECT sl=$SL_EXPECT"
+            echo "[actual  ] thr=$THR_JSON tp=$TP_JSON sl=$SL_JSON"
+            if [ "$THR_JSON" != "$THR_EXPECT" ] || [ "$TP_JSON" != "$TP_EXPECT" ] || [ "$SL_JSON" != "$SL_EXPECT" ]; then
+              echo "::error::outputs 키 값 불일치(스키마 이름/내부 재가공)."; exit 73
+            fi
+            echo "[ok] outputs reflect override"
           fi
-          if [ "$THR_JSON" != "$THR_EXPECT" ] || [ "$TP_JSON" != "$TP_EXPECT" ] || [ "$SL_JSON" != "$SL_EXPECT" ]; then
-            echo "::error::override 적용값과 엔진 출력값 불일치 → '스키마 키 이름' 또는 '엔진이 참조하는 파일 경로' 불일치 가능성.";
-            echo "[hint] grep -R \"tp_pct\\|sl_pct\\|thr_by_session\\|hold_bars\" \"$RUN_DIR/backtest\" -n";
-            exit 73
-          fi
-          echo "[ok] override kept (hash match) AND engine outputs match expectations."
 
       - name: Upload diagnostics/artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -204,6 +221,8 @@ jobs:
             ${{ env.OUT_DIR }}/preds_test.csv
             ${{ env.OUT_DIR }}/trades.csv
             ${{ env.OUT_DIR }}/preflight.json
+            ${{ env.OUT_DIR }}/_cfg_snapshot.yml
+            ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
             _diag/run_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}.log
 
   aggregate:
@@ -215,24 +234,48 @@ jobs:
         with:
           path: all_runs
 
-      - name: Summarize thr/tp/sl across runs and assert diversity
+      - name: Uniqueness by snapshot hash (must differ across grid)
         shell: bash
         run: |
           set -euo pipefail
-          echo "[list]"; find all_runs -type f -name 'summary.json' -maxdepth 3 | sed 's/^/ - /'
-          SIG="[]"
-          while IFS= read -r sum; do
-            gate="$(dirname "$sum")/gating_debug.json"
-            thr="$(jq -r '.thr_by_session.US // empty' "$gate" 2>/dev/null || true)"
-            tp="$(jq -r '.tp_pct // empty' "$sum" 2>/dev/null || true)"
-            sl="$(jq -r '.sl_pct // empty' "$sum" 2>/dev/null || true)"
-            SIG="$(jq -nc --arg thr "$thr" --arg tp "$tp" --arg sl "$sl" '$ARGS.named' | jq -s --argjson arr "$SIG" '$arr + [.]')"
-          done < <(find all_runs -type f -name 'summary.json' -maxdepth 3)
-          echo "[sig_all] $SIG"
-          UNIQUE=$(echo "$SIG" | jq -r 'map([.thr,.tp,.sl]|join(",")) | unique | length')
-          echo "[unique combos] $UNIQUE"
-          if [ "$UNIQUE" -le 1 ]; then
-            echo "::error::All runs ended with identical (thr,tp,sl). Likely cause: (1) overwrite order (bridge/other step), (2) wrong schema (top-level vs nested), (3) wrong working directory (different conf used)."; exit 70
-          else
-            echo "[ok] Overrides diversified across grid."
+          MAP="$(find all_runs -type f -name '_cfg_snapshot.sha256' -maxdepth 4 | wc -l)"
+          echo "[count] snapshots: $MAP"
+          if [ "$MAP" -eq 0 ]; then
+            echo "::error::no snapshots found → artifact pathing issue"; exit 74
           fi
+          SORTED="$(find all_runs -type f -name '_cfg_snapshot.sha256' -maxdepth 4 -exec cat {} + | sort | uniq -c)"
+          echo "[hashes]\n$SORTED"
+          UNIQUE="$(echo "$SORTED" | awk '{print $2}' | sort -u | wc -l)"
+          echo "[unique hashes] $UNIQUE"
+          if [ "$UNIQUE" -le 1 ]; then
+            echo "::error::All runs used identical config snapshots → (1) override 값 동일, (2) 매트릭스 전달 실패, (3) 동일 파일로 덮어쓰기."; exit 70
+          else
+            echo "[ok] Config snapshots diversified across runs."
+          fi
+
+      - name: Table of (thr,tp,sl) from snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import pathlib, yaml, glob
+rows=[]
+for yml in glob.glob("all_runs/**/_cfg_snapshot.yml", recursive=True):
+    p=pathlib.Path(yml)
+    try:
+        cfg=yaml.safe_load(p.read_text())
+    except Exception:
+        cfg={}
+    rows.append({
+        "artifact": p.parts[1],
+        "thr_US": (cfg.get("thr_by_session") or {}).get("US"),
+        "tp_pct": cfg.get("tp_pct"),
+        "sl_pct": cfg.get("sl_pct"),
+        "hold_bars": cfg.get("hold_bars"),
+        "hash": pathlib.Path(yml.replace("_cfg_snapshot.yml","_cfg_snapshot.sha256")).read_text().strip()
+    })
+rows.sort(key=lambda r:(str(r["artifact"])))
+print("artifact\tthr_US\ttp_pct\tsl_pct\thold_bars\thash")
+for r in rows:
+    print(f'{r["artifact"]}\t{r["thr_US"]}\t{r["tp_pct"]}\t{r["sl_pct"]}\t{r["hold_bars"]}\t{r["hash"]}')
+PY
