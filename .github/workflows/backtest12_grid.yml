@@ -186,7 +186,7 @@ jobs:
             sudo apt-get install -y jq
           fi
 
-      - name: Leaderboard (PF/Win/MCC) — robust (jq + python fallback)
+      - name: Leaderboard (PF/Win/MCC) — robust (jq + awk fallback)
         shell: bash
         run: |
           set -euo pipefail
@@ -211,29 +211,32 @@ jobs:
 
             if [[ -z "$hit" || -z "$pf" || -z "$nt" ]]; then
               if [[ -f "$dir/trades.csv" ]]; then
-                python - <<'PY'
-import pandas as pd, numpy as np, sys, json, pathlib
-d=pathlib.Path(sys.argv[1])
-t=d/"trades.csv"
-res={"hit":None,"pf":None,"nt":None}
-try:
-    df=pd.read_csv(t)
-    for col in ["pnl","ret","pnl_pct","PnL"]:
-        if col in df.columns:
-            v=pd.to_numeric(df[col], errors="coerce")
-            v=v[np.isfinite(v)]
-            if len(v)>0:
-                res["nt"]=int(len(v))
-                res["hit"]=float((v>0).mean())
-                pos=v[v>0].sum()
-                neg=(-v[v<0].sum())
-                res["pf"]=float(pos/neg) if neg>0 else (float('inf') if pos>0 else 0.0)
-                break
-except Exception:
-    pass
-print(json.dumps(res))
-PY
-                FALLBACK="$(python - "$dir")"
+                FALLBACK="$(awk -F, '
+                  NR==1{
+                    col=0;
+                    for(i=1;i<=NF;i++){
+                      h=$i; gsub(/\"/,"",h);
+                      if(h==\"pnl\" || h==\"ret\" || h==\"pnl_pct\" || h==\"PnL\"){ col=i }
+                    }
+                    next
+                  }
+                  {
+                    if(col){
+                      x=$col+0;
+                      if($col!=\"\"){
+                        n++;
+                        if(x>0){ win++; pos+=x } else if(x<0){ neg+=-x }
+                      }
+                    }
+                  }
+                  END{
+                    if(n>0){
+                      if(neg>0){ pf=pos/neg } else { pf=(pos>0? \"inf\" : 0) }
+                      printf(\"{\\\"hit\\\":%.8f,\\\"pf\\\":%s,\\\"nt\\\":%d}\", (win/n), pf, n)
+                    } else {
+                      printf(\"{\\\"hit\\\":null,\\\"pf\\\":null,\\\"nt\\\":null}\")
+                    }
+                  }' "$dir/trades.csv")"
                 f_hit="$(echo "$FALLBACK" | jq -r '.hit // empty')"
                 f_pf="$(echo "$FALLBACK" | jq -r '.pf // empty')"
                 f_nt="$(echo "$FALLBACK" | jq -r '.nt // empty')"
