@@ -135,43 +135,55 @@ jobs:
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
-      # ✅ here-doc로 변경 — 다줄 파이썬 안전 주입
-      - name: Enrich summary (compute PF/Win/N from trades.csv)
+      # ✅ Python 제거 — 순수 bash+awk+jq로 summary 보강(PF/Win/N)
+      - name: Enrich summary (compute PF/Win/N via awk+jq)
         shell: bash
         run: |
           set -euo pipefail
           OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          python - "$OUT" <<'PY'
-import json, pandas as pd, numpy as np, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-sjp = out / "summary.json"
-tsp = out / "trades.csv"
-# load summary
-try:
-    sj = json.loads(sjp.read_text(encoding="utf-8"))
-except Exception:
-    sj = {}
-pf = hit = nt = None
-if tsp.exists():
-    df = pd.read_csv(tsp)
-    for cand in ["pnl","ret","pnl_pct","PnL","pl","profit","strategy_return"]:
-        if cand in df.columns:
-            v = pd.to_numeric(df[cand], errors="coerce").dropna()
-            n = len(v)
-            if n > 0:
-                nt  = int(n)
-                hit = float((v > 0).mean())
-                pos = float(v[v>0].sum())
-                neg = float((-v[v<0]).sum())
-                pf  = (pos/neg) if neg > 0 else (1e9 if pos > 0 else 0.0)
-            break
-if hit is not None: sj.setdefault("hit_rate", hit)
-if pf  is not None: sj.setdefault("profit_factor", pf)
-if nt  is not None: sj.setdefault("n_trades", nt)
-sj.setdefault("metrics_schema_version", 1)
-sjp.write_text(json.dumps(sj, ensure_ascii=False, indent=2), encoding="utf-8")
-print("[enrich]", {"hit_rate": hit, "profit_factor": pf, "n_trades": nt})
-PY
+          SJ="$OUT/summary.json"; TS="$OUT/trades.csv"
+          [[ -f "$SJ" ]] || echo '{}' > "$SJ"
+          if [[ -f "$TS" ]]; then
+            FALLBACK="$(awk -F, '
+              NR==1{
+                col=0;
+                for(i=1;i<=NF;i++){
+                  h=$i; gsub(/"/,"",h);
+                  if(h=="pnl" || h=="ret" || h=="pnl_pct" || h=="PnL" || h=="pl" || h=="profit" || h=="strategy_return"){ col=i }
+                }
+                next
+              }
+              col>0{
+                v=$col;
+                if(v!=""){
+                  x=v+0;
+                  n++;
+                  if(x>0){ win++; pos+=x } else if(x<0){ neg+=-x }
+                }
+              }
+              END{
+                if(n>0){
+                  if(neg>0){ pf=pos/neg } else { pf=(pos>0? 1000000000 : 0) }
+                  printf("{\"hit\":%.8f,\"pf\":%.8f,\"nt\":%d}", (win/n), pf, n)
+                } else {
+                  printf("{\"hit\":null,\"pf\":null,\"nt\":null}")
+                }
+              }' "$TS")"
+            HIT="$(echo "$FALLBACK" | jq -r '.hit // empty')"
+            PF="$(echo "$FALLBACK" | jq -r '.pf // empty')"
+            NT="$(echo "$FALLBACK" | jq -r '.nt // empty')"
+            a="${HIT:-null}"; b="${PF:-null}"; c="${NT:-null}"
+            TMP="$(mktemp)"
+            jq --argjson a "$a" --argjson b "$b" --argjson c "$c" '
+              (.hit_rate //= $a) |
+              (.profit_factor //= $b) |
+              (.n_trades //= $c) |
+              (.metrics_schema_version //= 1)
+            ' "$SJ" > "$TMP" && mv "$TMP" "$SJ"
+            echo "[enrich] hit_rate=$HIT pf=$PF n_trades=$NT"
+          else
+            echo "[enrich] no trades.csv — skipped"
+          fi
 
       - name: Inject APPLIED_CONFIG to outputs
         shell: bash
@@ -264,7 +276,7 @@ PY
                     col=0;
                     for(i=1;i<=NF;i++){
                       h=$i; gsub(/"/,"",h);
-                      if(h=="pnl" || h=="ret" || h=="pnl_pct" || h=="PnL"){ col=i }
+                      if(h=="pnl" || h=="ret" || h=="pnl_pct" || h=="PnL" || h=="pl" || h=="profit" || h=="strategy_return"){ col=i }
                     }
                     next
                   }
