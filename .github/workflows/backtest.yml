@@ -1,4 +1,4 @@
-name: backtest (strict v1.1.5)
+name: backtest (strict v1.1.5, no-cache-warn)
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +23,9 @@ jobs:
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
       PYVER: '3.11'
+
     steps:
+      # 0) 핀 SHA 유효성(조직 정책 준수)
       - name: Validate pinned SHAs
         shell: bash
         run: |
@@ -33,13 +35,10 @@ jobs:
           curl -sSfL -I https://api.github.com/repos/actions/upload-artifact/tarball/ea165f8d65b6e75b540449e92b4886f43607fa02 >/dev/null
           echo "Pinned SHAs OK"
 
+      # 1) 리포지토리 체크아웃(필수)
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
-          cache: pip
-
+      # 2) 코드/데이터 언집(먼저 풀어야 함!)
       - name: Unpack code and data
         shell: bash
         run: |
@@ -47,26 +46,43 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" -d "${RUN_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
+          ls -la "${RUN_DIR}" || true
 
+      # 3) 파이썬 셋업(캐시 옵션 제거로 경고/오류 소멸)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+
+      # 4) 의존성 설치(요구사항 없으면 기본 패키지 설치)
       - name: Install deps
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
+          python -V
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy scikit-learn pyyaml; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy scikit-learn pyyaml
+          fi
 
-      - name: Detect CSV and preflight (from code zip)
+      # 5) CSV 탐지 + 프리플라이트(코드 ZIP 내 스크립트 사용)
+      - name: Detect CSV and preflight
         shell: bash
         run: |
           set -euo pipefail
           shopt -s globstar nullglob
           GLOB="${{ github.event.inputs.CSV_GLOB }}"
           CAND=( ${DATA_DIR}/**/${GLOB} )
-          if [ ${#CAND[@]} -eq 0 ]; then echo "::error::No CSV matched ${GLOB}"; exit 64; fi
+          if [ ${#CAND[@]} -eq 0 ]; then
+            echo "::error::No CSV matched ${GLOB}"
+            exit 64
+          fi
           echo "CSV_PATH=${CAND[0]}" >> "$GITHUB_ENV"
           python "${RUN_DIR}/scripts/preflight_strict.py" "${CAND[0]}"
 
+      # 6) 본 실행(통합 엔트리: 프리플라이트→효과설정→엔진→폴백→아티팩트보장)
       - name: Run backtest (unified entry)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
@@ -76,6 +92,7 @@ jobs:
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
           ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
 
+      # 7) 아티팩트 업로드
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
