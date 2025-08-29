@@ -244,7 +244,8 @@ jobs:
             echo "::error::no snapshots found → artifact pathing issue"; exit 74
           fi
           SORTED="$(find all_runs -type f -name '_cfg_snapshot.sha256' -maxdepth 4 -exec cat {} + | sort | uniq -c)"
-          echo "[hashes]\n$SORTED"
+          echo "[hashes]"
+          echo "$SORTED"
           UNIQUE="$(echo "$SORTED" | awk '{print $2}' | sort -u | wc -l)"
           echo "[unique hashes] $UNIQUE"
           if [ "$UNIQUE" -le 1 ]; then
@@ -253,29 +254,21 @@ jobs:
             echo "[ok] Config snapshots diversified across runs."
           fi
 
+      # heredoc 대신 yq 사용(heredoc 들여쓰기 이슈 방지)
       - name: Table of (thr,tp,sl) from snapshots
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-import pathlib, yaml, glob
-rows=[]
-for yml in glob.glob("all_runs/**/_cfg_snapshot.yml", recursive=True):
-    p=pathlib.Path(yml)
-    try:
-        cfg=yaml.safe_load(p.read_text())
-    except Exception:
-        cfg={}
-    rows.append({
-        "artifact": p.parts[1],
-        "thr_US": (cfg.get("thr_by_session") or {}).get("US"),
-        "tp_pct": cfg.get("tp_pct"),
-        "sl_pct": cfg.get("sl_pct"),
-        "hold_bars": cfg.get("hold_bars"),
-        "hash": pathlib.Path(yml.replace("_cfg_snapshot.yml","_cfg_snapshot.sha256")).read_text().strip()
-    })
-rows.sort(key=lambda r:(str(r["artifact"])))
-print("artifact\tthr_US\ttp_pct\tsl_pct\thold_bars\thash")
-for r in rows:
-    print(f'{r["artifact"]}\t{r["thr_US"]}\t{r["tp_pct"]}\t{r["sl_pct"]}\t{r["hold_bars"]}\t{r["hash"]}')
-PY
+          python -m pip install -U pip >/dev/null
+          pip install yq >/dev/null
+          echo -e "artifact\tthr_US\ttp_pct\tsl_pct\thold_bars\thash"
+          while IFS= read -r yml; do
+            hfile="${yml%_cfg_snapshot.yml}_cfg_snapshot.sha256"
+            artifact="$(echo "$yml" | awk -F/ '{for(i=1;i<=NF;i++){ if($i ~ /^out_thr/){print $i; exit} }}')"
+            thr="$(yq -r '.thr_by_session.US // ""' "$yml")"
+            tp="$(yq -r '.tp_pct // ""' "$yml")"
+            sl="$(yq -r '.sl_pct // ""' "$yml")"
+            hb="$(yq -r '.hold_bars // ""' "$yml")"
+            hash="$(cat "$hfile" 2>/dev/null || echo "")"
+            printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$artifact" "$thr" "$tp" "$sl" "$hb" "$hash"
+          done < <(find all_runs -type f -name '_cfg_snapshot.yml' -maxdepth 4)
