@@ -135,33 +135,43 @@ jobs:
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
-      # ✅ 런 직후 summary 보강 (PF/Win/N 계산 주입) — pandas 사용
+      # ✅ here-doc로 변경 — 다줄 파이썬 안전 주입
       - name: Enrich summary (compute PF/Win/N from trades.csv)
         shell: bash
         run: |
           set -euo pipefail
           OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          python -c "import json,pandas as pd,numpy as np,sys,pathlib; out=pathlib.Path(sys.argv[1]); sjp=out/'summary.json'; tsp=out/'trades.csv'; import os; sj={}; 
+          python - "$OUT" <<'PY'
+import json, pandas as pd, numpy as np, pathlib, sys
+out = pathlib.Path(sys.argv[1])
+sjp = out / "summary.json"
+tsp = out / "trades.csv"
+# load summary
 try:
- sj=json.loads(sjp.read_text())
+    sj = json.loads(sjp.read_text(encoding="utf-8"))
 except Exception:
- pass
-pf=hit=nt=None
+    sj = {}
+pf = hit = nt = None
 if tsp.exists():
- df=pd.read_csv(tsp)
- for cand in ['pnl','ret','pnl_pct','PnL','pl','profit','strategy_return']:
-  if cand in df.columns:
-   v=pd.to_numeric(df[cand], errors='coerce').dropna()
-   n=len(v)
-   if n>0:
-    nt=int(n); hit=float((v>0).mean()); pos=float(v[v>0].sum()); neg=float((-v[v<0]).sum()); pf=(pos/neg) if neg>0 else (1e9 if pos>0 else 0.0)
-   break
-if hit is not None: sj.setdefault('hit_rate', hit)
-if pf  is not None: sj.setdefault('profit_factor', pf)
-if nt  is not None: sj.setdefault('n_trades', nt)
-sj.setdefault('metrics_schema_version', 1)
-sjp.write_text(json.dumps(sj, ensure_ascii=False, indent=2))
-print('[enrich]', {'hit_rate':hit, 'profit_factor':pf, 'n_trades':nt})" "${OUT}"
+    df = pd.read_csv(tsp)
+    for cand in ["pnl","ret","pnl_pct","PnL","pl","profit","strategy_return"]:
+        if cand in df.columns:
+            v = pd.to_numeric(df[cand], errors="coerce").dropna()
+            n = len(v)
+            if n > 0:
+                nt  = int(n)
+                hit = float((v > 0).mean())
+                pos = float(v[v>0].sum())
+                neg = float((-v[v<0]).sum())
+                pf  = (pos/neg) if neg > 0 else (1e9 if pos > 0 else 0.0)
+            break
+if hit is not None: sj.setdefault("hit_rate", hit)
+if pf  is not None: sj.setdefault("profit_factor", pf)
+if nt  is not None: sj.setdefault("n_trades", nt)
+sj.setdefault("metrics_schema_version", 1)
+sjp.write_text(json.dumps(sj, ensure_ascii=False, indent=2), encoding="utf-8")
+print("[enrich]", {"hit_rate": hit, "profit_factor": pf, "n_trades": nt})
+PY
 
       - name: Inject APPLIED_CONFIG to outputs
         shell: bash
@@ -214,7 +224,7 @@ print('[enrich]', {'hit_rate':hit, 'profit_factor':pf, 'n_trades':nt})" "${OUT}"
             sudo apt-get install -y jq
           fi
 
-      # ✅ 예상 런 수 가드(없으면 실패)
+      # ✅ 예상 런 수 가드
       - name: Guard: expected run count
         shell: bash
         run: |
