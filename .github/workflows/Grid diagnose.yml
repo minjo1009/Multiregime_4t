@@ -113,8 +113,8 @@ jobs:
           KEYS='thr_by_session|thr|threshold|tp_pct|tp|sl_pct|sl|hold_bars|hold|allow_long|allow_short|fees_bps_per_leg|taker_bps|slippage_bps|beta|temp|calibration'
           grep -R -nE "$KEYS" "$RUN_DIR/backtest" || true
 
-      # 1) Override: 최상위 키 + 센티넬 + 해시 기록 (effective.yml & config.yml 동시)
-      - name: Override effective config (hash + preview)
+      # 1) Override: polyfill keys (effective.yml & config.yml 동시)
+      - name: Override effective config (polyfill keys)
         shell: bash
         run: |
           set -euo pipefail
@@ -126,28 +126,35 @@ jobs:
           conf = run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
           eff = conf/'config.effective.yml'
           base = conf/'config.yml'
+          # 폴리필: 엔진이 어떤 이름을 쓰든 잡히도록 동의어 키 동시 기록
           cfg = {
-            'beta': 1.6, 'temp': 6.0,
+            # threshold 계열
             'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr},
-            'tp_pct': tp, 'sl_pct': sl, 'hold_bars': hold,
+            'thr': thr, 'threshold': thr,
+            # take-profit / stop-loss
+            'tp_pct': tp, 'tp': tp, 'take_profit': tp,
+            'sl_pct': sl, 'sl': sl, 'stop_loss': sl,
+            # hold 계열
+            'hold_bars': hold, 'hold': hold, 'holding_period': hold,
+            # 방향/수수료/보정
             'allow_long': True, 'allow_short': True,
-            'fees_bps_per_leg': 3.0, 'calibration': 'isotonic',
+            'fees_bps_per_leg': 3.0, 'taker_bps': 3.0, 'slippage_bps': 0.0,
+            'calibration': 'isotonic',
+            # 게이팅/온도
+            'beta': 1.6, 'temp': 6.0,
+            # 디버그 태그
             '__debug_tag__': f"thr{thr}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
           }
           if flt=='ema': cfg['filter_ema_50_200']=True
           if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
           text = yaml.safe_dump(cfg, sort_keys=False).encode()
-          h = hashlib.sha256(text).hexdigest()
-          eff.write_bytes(text)
-          base.write_bytes(text)     # ★ 동시 쓰기로 경로 이슈 차단
-          print("[override] wrote", eff, "and", base)
-          print("[override] sha256:", h)
-          print("[override] preview:\\n", text.decode()[:300])
+          for p in (eff, base): p.write_bytes(text)
+          print("[override] wrote", eff, "and", base, "sha256:", hashlib.sha256(text).hexdigest())
           PY
           CONF_PATH="$RUN_DIR/conf/config.effective.yml"
           echo "PRE_HASH=$(sha256sum "$CONF_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
           echo "[PRE] conf path = $(realpath "$CONF_PATH")"
-          sed -n '1,40p' "$CONF_PATH"
+          sed -n '1,60p' "$CONF_PATH"
 
       - name: Snapshot config to out_dir (pre-run)
         shell: bash
@@ -254,8 +261,7 @@ jobs:
             echo "[ok] Config snapshots diversified across runs."
           fi
 
-      # heredoc 대신 yq 사용(heredoc 들여쓰기 이슈 방지)
-      - name: Table of (thr,tp,sl) from snapshots
+      - name: Table of (thr,tp,sl) from snapshots  # heredoc 대신 yq 사용
         shell: bash
         run: |
           set -euo pipefail
