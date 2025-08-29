@@ -1,17 +1,17 @@
-name: backtest (strict v1.1.7, repo-path only)
+name: backtest (v1.1.7 hard-safe)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
         description: 'Repo path to code zip'
         required: true
-        default: zips/trade_v1.1.7.zip
+        default: trade_v1.1.7.zip
       DATA_ZIP:
         description: 'Repo path to data zip'
         required: true
-        default: zips/ETHUSDT_1min_2020_2025.zip
+        default: ETHUSDT_1min_2020_2025.zip
       CSV_FILE:
-        description: 'Exact CSV file name after unzip'
+        description: 'Exact CSV after unzip'
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
@@ -26,34 +26,17 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      # Pinned SHAs (보안 고정)
-      - name: Validate pinned SHAs
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -sSfL -I https://api.github.com/repos/actions/checkout/tarball/08c6903cd8c0fde910a37f88322edcfb5dd907a8 >/dev/null
-          curl -sSfL -I https://api.github.com/repos/actions/setup-python/tarball/a26af69be951a213d495a4c3e4e4022e16d87065 >/dev/null
-          curl -sSfL -I https://api.github.com/repos/actions/upload-artifact/tarball/ea165f8d65b6e75b540449e92b4886f43607fa02 >/dev/null
-
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      # 경로 진단 + 존재 확인
-      - name: Assert ZIPs exist (repo path only)
+      - name: Assert ZIPs exist (repo)
         shell: bash
         run: |
           set -euo pipefail
-          echo "[debug] workspace tree (top level)"; ls -la
-          echo "[debug] zips tree (2 levels)"; find zips -maxdepth 2 -type f -print 2>/dev/null || true
           CODE="${{ github.event.inputs.CODE_ZIP }}"
           DATA="${{ github.event.inputs.DATA_ZIP }}"
-          if [ ! -f "${CODE}" ]; then
-            echo "::error::CODE_ZIP not found at repo path: ${CODE}"
-            exit 66
-          fi
-          if [ ! -f "${DATA}" ]; then
-            echo "::error::DATA_ZIP not found at repo path: ${DATA}"
-            exit 66
-          fi
+          ls -la || true
+          [ -f "${CODE}" ] || { echo "::error::CODE_ZIP not found: ${CODE}"; exit 66; }
+          [ -f "${DATA}" ] || { echo "::error::DATA_ZIP not found: ${DATA}"; exit 66; }
           echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${CODE}" >> $GITHUB_ENV
           echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${DATA}" >> $GITHUB_ENV
 
@@ -68,7 +51,43 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
-          echo "[debug] data listing:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
+          echo "[debug] code top:"; ls -la "${RUN_DIR}" || true
+          echo "[debug] conf:"; ls -la "${RUN_DIR}/conf" || true
+          echo "[debug] data:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
+
+      # ★ effective config 외부 보장 (ZIP 버전 상관없이)
+      - name: Ensure effective config (outside ZIP)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p conf
+          if [ -f conf/config.yml ]; then
+            cp -f conf/config.yml conf/config.effective.yml
+          else
+            cat > conf/config.effective.yml <<'YAML'
+calibration:
+  method: isotonic
+coverage_target_min: 0.03
+coverage_target_max: 0.08
+gate:
+  beta: 1.2
+  temp: 10.0
+costs:
+  taker_bps: 7
+  slippage_bps: 0
+trade:
+  hold_bars: 5
+  tp_pct: 0.004
+  sl_pct: 0.003
+policy:
+  allow_long: true
+  allow_short: true
+YAML
+          fi
+          echo "[debug] effective cfg ready:"; ls -la conf/config.effective.yml
+          # 가드: 내용 앞 10줄 노출
+          head -n 10 conf/config.effective.yml || true
 
       - name: Install deps
         shell: bash
@@ -76,11 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas numpy scikit-learn pyyaml
-          fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy scikit-learn pyyaml; fi
 
       - name: Detect CSV and preflight (ABS)
         shell: bash
@@ -88,26 +103,22 @@ jobs:
           set -euo pipefail
           CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
           if [ ! -f "${CSV_ABS}" ]; then
-            # 하위 폴더에 풀렸을 가능성: find로 보정
             FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" | head -n 1 || true)"
-            if [ -z "${FOUND}" ]; then
-              echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"
-              echo "[hint] Available CSVs:"; find "${{ env.DATA_DIR }}" -type f -name '*.csv' -print || true
-              exit 64
-            fi
+            [ -n "${FOUND}" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
             CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
           echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
           python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "${CSV_ABS}"
 
-      - name: Run backtest (unified entry; v1.1.7 ensures effective config)
+      - name: Run backtest (v1.1.7)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           export PYTHONPATH="${PWD}"
+          # run_4u.py 내부에서도 한번 더 보장하니, 이중 안전
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
-          ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
+          echo "[debug] out list:"; ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
