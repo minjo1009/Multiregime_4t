@@ -1,242 +1,206 @@
-name: Exit/TTL A-B (param v2)
+name: Exit/TTL A-B (param v2, pinned)
 
 on:
   workflow_dispatch:
     inputs:
       CODE_PACK:
-        description: "Root code zip in repo (e.g., trade_v1.1.4.zip)"
+        description: "Root code pack zip in repo (e.g., trade_v1.1.4.zip)"
         required: true
         default: "trade_v1.1.4.zip"
       DATA_ZIP:
-        description: "Optional data zip to unzip into tmp/data (e.g., ETHUSDT_1min_2020_2025.zip)"
-        required: false
-        default: ""
-      DATA_CSV:
-        description: "Optional direct CSV path (repo-relative). If empty, CSV_GLOB is used."
+        description: "Optional data zip path in repo (unzips to tmp/data)"
         required: false
         default: ""
       CSV_GLOB:
-        description: "Fallback glob for CSV search if DATA_CSV is empty."
-        required: true
-        default: "**/*ETHUSDT*1min*2020*2025*.csv"
-      TTL_A:
-        description: "TTL for run A"
-        required: true
-        default: "1"
-      TTL_B:
-        description: "TTL for run B"
-        required: true
-        default: "5000"
+        description: "CSV glob under tmp/data (leave empty to auto-pick 1st CSV)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
 
 jobs:
   abtest:
+    name: abtest
     runs-on: ubuntu-latest
     steps:
-      # ---- Pinned actions (replace with your org-approved SHAs if different) ----
-      - name: Checkout (pinned SHA)
+      - name: Checkout (pinned)
         uses: actions/checkout@11bd71901bbe5b1630b4b23b5b2ac60a8a6e3f2
-      # --------------------------------------------------------------------------
+
+      - name: Setup Python 3.11 (pinned)
+        uses: actions/setup-python@a26af69be951a213e376a39fc6824e9f5b089bc5
+        with:
+          python-version: '3.11'
 
       - name: Prepare workspace
+        shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf _out_4u tmp || true
-          mkdir -p _out_4u tmp/trade tmp/data
-
-      - name: Bring code pack
-        run: |
-          set -Eeuo pipefail
-          test -f "${{ github.event.inputs.CODE_PACK }}"
-          unzip -oq "${{ github.event.inputs.CODE_PACK }}" -d tmp/trade
-          echo "CODE_SHA256=$(sha256sum '${{ github.event.inputs.CODE_PACK }}' | awk '{print $1}')" >> $GITHUB_ENV
-
-      - name: Bring dataset (zip / file / glob)
-        env:
-          DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
-          DATA_CSV: ${{ github.event.inputs.DATA_CSV }}
-          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
-        run: |
-          set -Eeuo pipefail
-          shopt -s nullglob globstar
-          mkdir -p tmp/data
-          if [ -n "${DATA_ZIP}" ] && [ -f "${DATA_ZIP}" ]; then
-            unzip -oq "${DATA_ZIP}" -d tmp/data || true
-          fi
-          if [ -n "${DATA_CSV}" ] && [ -f "${DATA_CSV}" ]; then
-            cp -f "${DATA_CSV}" tmp/data/
-          fi
-          # If still no CSV, try glob across repo
-          if ! compgen -G "tmp/data/*.csv" > /dev/null; then
-            for p in ${CSV_GLOB}; do
-              if [ -f "${p}" ]; then
-                cp -f "${p}" tmp/data/
-                break
-              fi
-            done
-          fi
-          echo "CSV found under tmp/data:"
-          ls -al tmp/data || true
-          if ! compgen -G "tmp/data/*.csv" > /dev/null; then
-            echo "::error title=NoCSV::No CSV found (tried DATA_ZIP, DATA_CSV, CSV_GLOB)."
+          mkdir -p tmp/trade tmp/data _out_4u
+          # unzip code pack
+          if [ ! -f "${{ github.workspace }}/${{ inputs.CODE_PACK }}" ]; then
+            echo "::error title=Missing code pack::${{ inputs.CODE_PACK }} not found at repo root"
             exit 1
           fi
+          unzip -oq "${{ github.workspace }}/${{ inputs.CODE_PACK }}" -d tmp/trade
+          # optional data zip
+          if [ -n "${{ inputs.DATA_ZIP }}" ] && [ -f "${{ github.workspace }}/${{ inputs.DATA_ZIP }}" ]; then
+            unzip -oq "${{ github.workspace }}/${{ inputs.DATA_ZIP }}" -d tmp/data || true
+          fi
+          echo "Workspace ready"; ls -al tmp/trade | head -n 50
 
       - name: Create run_engine.py (bridge & normalizer)
+        shell: bash
         run: |
           set -Eeuo pipefail
-          cat > run_engine.py << 'PY'
-          import os, sys, glob, json, shutil, subprocess, textwrap
+          python - <<'PY'
+          import os, sys, glob, runpy, json
           from pathlib import Path
-
-          ROOT = Path.cwd()
-          TRADE = ROOT / "tmp" / "trade"
-          CONF = TRADE / "conf"
-          OUT = ROOT / "_out_4u"
-          DATA_DIRS = [ROOT/"tmp/data", ROOT/"data", TRADE/"data"]
-
-          def select_csv()->Path:
-            pats = []
-            for d in DATA_DIRS:
-              if d.exists():
-                pats += list(d.glob("**/*.csv"))
-            # filter out __MACOSX and dirs
-            pats = [p for p in pats if p.is_file() and "__MACOSX" not in str(p)]
-            if not pats:
-              raise FileNotFoundError("No CSV found under tmp/data or data")
-            # choose the first, preferring largest file
-            pats.sort(key=lambda p: p.stat().st_size, reverse=True)
-            return pats[0]
-
-          def load_cfg()->dict:
-            base = CONF/"config.yml"
-            if base.exists():
+          try:
               import yaml
-              return yaml.safe_load(base.read_text()) or {}
-            return {}
-
-          def overlay_exit(cfg:dict, ttl:int)->Path:
-            cfg = {**cfg}
-            exit_cfg = cfg.get("exit", {})
-            exit_cfg["ttl"] = int(ttl)
-            # also mirror as hold_bars if engine expects that
-            exit_cfg.setdefault("hold_bars", int(ttl))
-            cfg["exit"] = exit_cfg
-            CONF.mkdir(parents=True, exist_ok=True)
-            eff = CONF/"config.effective.yml"
-            try:
+          except Exception:
+              os.system("python -m pip -q install pyyaml >/dev/null 2>&1")
               import yaml
-              eff.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
-            except Exception:
-              # plain JSON as fallback
-              eff.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-            return eff
 
-          def call_engine(data_path:Path, cfg_path:Path, out_dir:Path)->None:
-            # prefer run_4u.py, then backtest/engine.py, then backtest/runner.py
-            candidates = []
-            p1 = TRADE/"run_4u.py"
-            p2 = TRADE/"backtest"/"engine.py"
-            p3 = TRADE/"backtest"/"runner.py"
-            for p in [p1, p2, p3]:
-              if p.exists():
-                candidates.append(p)
-            if not candidates:
-              raise FileNotFoundError("No engine entry found (run_4u.py or backtest/engine.py/runner.py)")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for entry in candidates:
-              cmd = ["python", "-u", str(entry),
-                     "--data_path", str(data_path),
-                     "--config", str(cfg_path),
-                     "--out_dir", str(out_dir)]
-              env = os.environ.copy()
-              env["PYTHONPATH"] = f"{TRADE}:{TRADE/'backtest'}:{env.get('PYTHONPATH','')}"
-              try:
-                print(f"[run_engine] RUN -> {entry} args={cmd[4:]}")
-                subprocess.run(cmd, check=True, env=env)
-                return
-              except subprocess.CalledProcessError as e:
-                print(f"[run_engine] WARN: {entry} failed: {e} — trying next candidate")
-                continue
-            raise RuntimeError("All engine entry candidates failed.")
+          ROOT = Path("tmp/trade")
+          CFG_IN = ROOT/"conf"/"config.yml"
+          CFG_OUT = ROOT/"conf"/"config.effective.yml"
+          OUT_DIR = Path("_out_4u"); OUT_DIR.mkdir(exist_ok=True, parents=True)
 
-          def ensure_trades(out_dir:Path)->Path:
-            # normalize possible locations/names into _out_4u/trades.csv
-            candidates = []
-            for pat in [
-              out_dir/"trades.csv",
-              out_dir/"trades_A.csv",
-              out_dir/"trades_B.csv",
-              TRADE/"_out_4u"/"trades.csv",
-              ROOT/"trades.csv",
-            ]:
-              if pat.exists():
-                candidates.append(pat)
-            if not candidates:
-              # best-effort scan
-              for p in (ROOT, TRADE):
-                for f in p.rglob("trades*.csv"):
-                  candidates.append(f)
-            if not candidates:
-              raise FileNotFoundError("trades.csv not produced by engine")
-            # choose latest modified
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            dst = ROOT/"_out_4u"/"trades.csv"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidates[0], dst)
-            return dst
+          def select_csv():
+              # 1) respect CSV_GLOB if user gave one
+              pat = os.environ.get("CSV_GLOB", "").strip()
+              if pat:
+                  hits = sorted(Path("tmp/data").glob(pat))
+              else:
+                  hits = sorted(Path("tmp/data").glob("**/*.csv"))
+              if not hits:
+                  # also look under repo-root data if present
+                  hits = sorted(Path("data").glob("**/*.csv"))
+              if not hits:
+                  raise FileNotFoundError("No CSV found under tmp/data or data")
+              return str(hits[0])
 
-          def main(ttl:int):
-            data = select_csv()
-            cfg = load_cfg()
-            eff = overlay_exit(cfg, ttl)
-            call_engine(data, eff, OUT)
-            return ensure_trades(OUT)
+          def build_config(exit_ttl:int):
+              cfg = {}
+              if CFG_IN.exists():
+                  cfg = yaml.safe_load(CFG_IN.read_text()) or {}
+              cfg.setdefault("exit", {})
+              cfg["exit"]["ttl"] = int(exit_ttl)
+              CFG_OUT.parent.mkdir(parents=True, exist_ok=True)
+              CFG_OUT.write_text(yaml.safe_dump(cfg, sort_keys=False))
+              return CFG_OUT
 
-          if __name__ == "__main__":
-            ttl = int(os.environ.get("TTL", "0"))
-            p = main(ttl)
-            print(f"TRADES -> {p} ({p.stat().st_size} bytes)")
+          def find_entry():
+              cand = [
+                  ROOT/"run_4u.py",
+                  ROOT/"backtest"/"engine.py",
+                  ROOT/"backtest"/"runner.py",
+              ]
+              for c in cand:
+                  if c.exists(): 
+                      return c
+              raise FileNotFoundError("No engine entry found (run_4u.py / backtest/engine.py / backtest/runner.py)")
+
+          # emit a tiny runner to standardize calling convention
+          Path("run_engine.py").write_text(
+              "\n".join([
+                  "import os,sys,runpy,glob",
+                  "from pathlib import Path",
+                  "DATA = os.environ.get('DATA_PATH')",
+                  "if not DATA:",
+                  "  PAT=os.environ.get('CSV_GLOB','').strip() or '**/*.csv'",
+                  "  hits=sorted(Path('tmp/data').glob(PAT)) or sorted(Path('data').glob(PAT))",
+                  "  DATA=str(hits[0]) if hits else None",
+                  "if not DATA: raise FileNotFoundError('No CSV found under tmp/data or data')",
+                  "ENTRY = os.environ.get('ENTRY') or ''",
+                  "if not ENTRY or not Path(ENTRY).exists():",
+                  "  for p in ['tmp/trade/run_4u.py','tmp/trade/backtest/engine.py','tmp/trade/backtest/runner.py']:",
+                  "    if Path(p).exists(): ENTRY=p; break",
+                  "if not ENTRY: raise FileNotFoundError('No engine entry found')",
+                  "CFG = os.environ.get('CFG','tmp/trade/conf/config.effective.yml')",
+                  "OUT = os.environ.get('OUT_DIR','_out_4u')",
+                  "Path(OUT).mkdir(exist_ok=True, parents=True)",
+                  "sys.argv=[ENTRY,'--data_path',DATA,'--config',CFG,'--out_dir',OUT]",
+                  "runpy.run_path(ENTRY, run_name='__main__')",
+              ])
+          )
+          # pre-flight build once for TTL=0 just to validate I/O
+          data = select_csv()
+          cfg = build_config(0)
+          entry = find_entry()
+          print(f"[bridge] csv={data}\n[bridge] cfg={cfg}\n[bridge] entry={entry}")
           PY
 
       - name: Run A (TTL=1)
+        shell: bash
         env:
-          TTL: ${{ github.event.inputs.TTL_A }}
+          CSV_GLOB: ${{ inputs.CSV_GLOB }}
+          TTL: "1"
         run: |
           set -Eeuo pipefail
-          python -u run_engine.py
-          mv -f _out_4u/trades.csv _out_4u/trades_A.csv
+          python - <<'PY'
+          import os, subprocess, sys, json
+          from pathlib import Path
+          import yaml
+          # update ttl
+          cfgp = Path("tmp/trade/conf/config.effective.yml")
+          cfg = yaml.safe_load(cfgp.read_text()) if cfgp.exists() else {}
+          cfg.setdefault("exit", {})["ttl"] = 1
+          cfgp.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          env = dict(os.environ); env.update({"CFG": str(cfgp)})
+          r = subprocess.run([sys.executable, "run_engine.py"], env=env, check=False)
+          sys.exit(r.returncode)
+          PY
+          test -f _out_4u/trades.csv && sha256sum _out_4u/trades.csv | tee _out_4u/trades_A.sha256 || true
 
       - name: Clean BETWEEN runs
         run: |
-          set -Eeuo pipefail
           rm -f _out_4u/trades.csv || true
 
       - name: Run B (TTL=5000)
+        shell: bash
         env:
-          TTL: ${{ github.event.inputs.TTL_B }}
+          CSV_GLOB: ${{ inputs.CSV_GLOB }}
+          TTL: "5000"
         run: |
           set -Eeuo pipefail
-          python -u run_engine.py
-          mv -f _out_4u/trades.csv _out_4u/trades_B.csv
+          python - <<'PY'
+          import os, subprocess, sys, json
+          from pathlib import Path
+          import yaml
+          # update ttl
+          cfgp = Path("tmp/trade/conf/config.effective.yml")
+          cfg = yaml.safe_load(cfgp.read_text()) if cfgp.exists() else {}
+          cfg.setdefault("exit", {})["ttl"] = 5000
+          cfgp.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          env = dict(os.environ); env.update({"CFG": str(cfgp)})
+          r = subprocess.run([sys.executable, "run_engine.py"], env=env, check=False)
+          sys.exit(r.returncode)
+          PY
+          test -f _out_4u/trades.csv && sha256sum _out_4u/trades.csv | tee _out_4u/trades_B.sha256 || true
 
       - name: Assert A != B (TTL effect)
+        if: always()
+        shell: bash
         run: |
           set -Eeuo pipefail
-          shaA=$(sha256sum _out_4u/trades_A.csv | awk '{print $1}')
-          shaB=$(sha256sum _out_4u/trades_B.csv | awk '{print $1}')
-          echo "SHA_A ${shaA}"
-          echo "SHA_B ${shaB}"
-          if [ "${shaA}" = "${shaB}" ]; then
-            echo "::error title=Exit/TTL not applied::A==B"
-            exit 3
+          if [ ! -f _out_4u/trades_A.sha256 ] || [ ! -f _out_4u/trades_B.sha256 ]; then
+            echo "MISSING one or both trade hashes"; exit 2
+          fi
+          A=$(cut -d' ' -f1 _out_4u/trades_A.sha256)
+          B=$(cut -d' ' -f1 _out_4u/trades_B.sha256)
+          echo "SHA_A=$A"; echo "SHA_B=$B"
+          if [ "$A" = "$B" ]; then
+            echo "::error title=Exit/TTL not applied::A==B"; exit 3
           fi
 
-      - name: Upload artifacts (pinned SHA)
+      - name: Upload artifacts (pinned)
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: exit_ttl_abtest_outputs
           path: |
-            _out_4u/trades_A.csv
-            _out_4u/trades_B.csv
-            tmp/trade/conf/config.effective.yml
-          if-no-files-found: error
+            _out_4u/trades*.sha256
+            _out_4u/trades.csv
+          if-no-files-found: warn
