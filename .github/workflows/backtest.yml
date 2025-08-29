@@ -1,17 +1,17 @@
-name: backtest (v1.1.7 simple-safe)
+name: backtest (v1.1.7 root-friendly)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Repo path to code zip
+        description: Repo path or absolute path to code zip (e.g., trade_v1.1.7.zip)
         required: true
-        default: zips/trade_v1.1.7.zip
+        default: trade_v1.1.7.zip
       DATA_ZIP:
-        description: Repo path to data zip
+        description: Repo path or absolute path to data zip (e.g., ETHUSDT_1min_2020_2025.zip)
         required: true
-        default: zips/ETHUSDT_1min_2020_2025.zip
+        default: ETHUSDT_1min_2020_2025.zip
       CSV_FILE:
-        description: Exact CSV after unzip
+        description: Exact CSV file name after unzip (e.g., ETHUSDT_1min_2020_2025.csv)
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
@@ -30,18 +30,39 @@ jobs:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Assert ZIPs exist (repo path only)
+      - name: Resolve ZIP paths (root or nested OK)
         shell: bash
         run: |
           set -euo pipefail
-          CODE="${{ github.event.inputs.CODE_ZIP }}"
-          DATA="${{ github.event.inputs.DATA_ZIP }}"
-          echo "[debug] workspace top:"; ls -la || true
-          echo "[debug] search zips/:"; find zips -maxdepth 2 -type f -print 2>/dev/null || true
-          if [ ! -f "${CODE}" ]; then echo "::error::CODE_ZIP not found: ${CODE}"; exit 66; fi
-          if [ ! -f "${DATA}" ]; then echo "::error::DATA_ZIP not found: ${DATA}"; exit 66; fi
-          echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${CODE}" >> "$GITHUB_ENV"
-          echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${DATA}" >> "$GITHUB_ENV"
+          CODE_IN="${{ github.event.inputs.CODE_ZIP }}"
+          DATA_IN="${{ github.event.inputs.DATA_ZIP }}"
+
+          resolve() {
+            in="$1"; var="$2"; path=""
+            # absolute?
+            if [[ "$in" = /* && -f "$in" ]]; then path="$in"
+            # repo-relative?
+            elif [[ -f "$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
+            elif [[ -f "${GITHUB_WORKSPACE}/$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
+            else
+              base="$(basename "$in")"
+              # root first
+              if [[ -f "${GITHUB_WORKSPACE}/$base" ]]; then path="${GITHUB_WORKSPACE}/$base"
+              else
+                found="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
+                [[ -n "$found" ]] && path="$found"
+              fi
+            fi
+            if [[ -z "$path" || ! -f "$path" ]]; then
+              echo "::error::Could not find $in under repo root. Put it in the repo or give an absolute path."
+              exit 66
+            fi
+            echo "$var=$path" >> "$GITHUB_ENV"
+            echo "[resolved] $in -> $path"
+          }
+
+          resolve "$CODE_IN" CODE_ZIP_ABS
+          resolve "$DATA_IN" DATA_ZIP_ABS
 
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -56,13 +77,19 @@ jobs:
           unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
           unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
           echo "[debug] code top:"; ls -la "${RUN_DIR}" || true
-          echo "[debug] conf:"; ls -la "${RUN_DIR}/conf" || true
-          echo "[debug] data:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
-          # 만약 ZIP이 하위 폴더 한층을 만들었다면 run_4u.py 위치로 RUN_DIR 보정
+          # run_4u.py가 하위폴더에 있으면 RUN_DIR 보정
           if [ ! -f "${RUN_DIR}/run_4u.py" ]; then
-            NEWDIR="$(dirname "$(find "${RUN_DIR}" -maxdepth 2 -name 'run_4u.py' -print -quit)")"
-            if [ -n "${NEWDIR}" ]; then echo "RUN_DIR=${NEWDIR}" >> "$GITHUB_ENV"; fi
+            CAND="$(find "${RUN_DIR}" -maxdepth 2 -type f -name 'run_4u.py' -print -quit || true)"
+            if [ -n "$CAND" ]; then
+              NEWDIR="$(dirname "$CAND")"
+              echo "RUN_DIR=$NEWDIR" >> "$GITHUB_ENV"
+              echo "[debug] RUN_DIR corrected -> $NEWDIR"
+            else
+              echo "::error::run_4u.py not found in code zip"
+              exit 67
+            fi
           fi
+          echo "[debug] data files:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
 
       - name: Install deps
         shell: bash
@@ -76,22 +103,23 @@ jobs:
             pip install pandas numpy scikit-learn pyyaml
           fi
 
-      - name: Detect CSV and preflight (ABS)
+      - name: Detect CSV and preflight (ABS path)
         shell: bash
         run: |
           set -euo pipefail
-          CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
-          if [ ! -f "${CSV_ABS}" ]; then
-            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
-            if [ -z "${FOUND}" ]; then
-              echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"
+          CSV_NAME="${{ github.event.inputs.CSV_FILE }}"
+          CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${CSV_NAME}"
+          if [ ! -f "$CSV_ABS" ]; then
+            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "$CSV_NAME" -print -quit || true)"
+            if [ -z "$FOUND" ]; then
+              echo "::error::CSV not found: $CSV_NAME"
               echo "[hint] available CSVs:"; find "${{ env.DATA_DIR }}" -type f -name '*.csv' -print || true
               exit 64
             fi
             CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
-          echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
-          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "${CSV_ABS}"
+          echo "CSV_PATH=$CSV_ABS" >> "$GITHUB_ENV"
+          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "$CSV_ABS"
 
       - name: Run backtest (v1.1.7 unified entry)
         shell: bash
