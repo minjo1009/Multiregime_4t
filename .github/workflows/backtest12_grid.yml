@@ -217,17 +217,17 @@ jobs:
             ${{ env.OUT_DIR }}/_cfg_snapshot.yml
             ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
 
-  aggregate:
+    aggregate:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
       # ✅ pinned (download-artifact v5.0.0)
-      - name: Download all artifacts
+      - name: "Download all artifacts"
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_runs
 
-      - name: Ensure jq
+      - name: "Ensure jq"
         shell: bash
         run: |
           set -euo pipefail
@@ -237,7 +237,7 @@ jobs:
           fi
 
       # ✅ 예상 런 수 가드
-      - name: Guard: expected run count
+      - name: "Guard: expected run count"
         shell: bash
         run: |
           set -euo pipefail
@@ -246,7 +246,7 @@ jobs:
           echo "[guard] expected=$EXPECT found=$FOUND"
           [ "$FOUND" -eq "$EXPECT" ] || { echo "::error::per-run artifacts missing"; exit 74; }
 
-      - name: Leaderboard (PF/Win/MCC) — robust (jq + awk fallback)
+      - name: "Leaderboard (PF/Win/MCC) — robust (jq + awk fallback)"
         shell: bash
         run: |
           set -euo pipefail
@@ -310,6 +310,14 @@ jobs:
 
           { head -n 1 leaderboard.tmp.csv; tail -n +2 leaderboard.tmp.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.csv
           echo "[TOP 12]"; head -n 12 leaderboard.csv
+
+      # ✅ pinned (upload-artifact v4.6.2)
+      - name: "Upload leaderboard"
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backtest12_grid_results
+          path: |
+            leaderboard.csv
 
       # ✅ pinned (upload-artifact v4.6.2)
       - name: Upload leaderboard
