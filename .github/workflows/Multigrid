@@ -1,0 +1,163 @@
+name: backtest_grid (v1.1.8, regime-first, no forced coverage)
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: Repo path to code zip
+        required: true
+        default: trade_v1.1.8.zip
+      DATA_ZIP:
+        description: Repo path to data zip
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_FILE:
+        description: CSV after unzip
+        required: true
+        default: ETHUSDT_1min_2020_2025.csv
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        THR: [3.2, 3.8]           # 스코어 임계값(세션 공통)
+        TP:  [0.0038]             # 익절 0.38%
+        SL:  [0.0022]             # 손절 0.22% (RR ≈ 1.7)
+        HOLD: [6, 8]              # 타임아웃 바
+        FILTER: [ema, none]       # 레짐 필터(ema50/200) vs 없음
+        BE: [0, 5]                # BE 보호(=5bar) / 0이면 off
+    env:
+      RUN_DIR: tmp/trade
+      DATA_DIR: tmp/data
+      OUT_DIR: _out_4u/run
+      PYVER: '3.11'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Resolve ZIPs (root-friendly)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for X in CODE_ZIP DATA_ZIP; do
+            V="${{ github.event.inputs.${X} }}"
+          done
+
+          res() {
+            local in="$1"
+            if [[ -f "$in" ]]; then echo "${GITHUB_WORKSPACE}/$in"; return; fi
+            if [[ -f "${GITHUB_WORKSPACE}/$in" ]]; then echo "${GITHUB_WORKSPACE}/$in"; return; fi
+            local base="$(basename "$in")"
+            if [[ -f "${GITHUB_WORKSPACE}/$base" ]]; then echo "${GITHUB_WORKSPACE}/$base"; return; fi
+            local f; f="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
+            [[ -n "$f" ]] && echo "$f" || { echo "::error::ZIP not found: $in"; exit 66; }
+          }
+          echo "CODE_ZIP_ABS=$(res '${{ github.event.inputs.CODE_ZIP }}')" >> $GITHUB_ENV
+          echo "DATA_ZIP_ABS=$(res '${{ github.event.inputs.DATA_ZIP }}')" >> $GITHUB_ENV
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+
+      - name: Unpack code and data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
+          unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
+          # run_4u.py 위치 보정(하위폴더 한 겹 대비)
+          if [ ! -f "${RUN_DIR}/run_4u.py" ]; then
+            NEWDIR="$(dirname "$(find "${RUN_DIR}" -maxdepth 2 -name 'run_4u.py' -print -quit)")"
+            [ -n "$NEWDIR" ] && echo "RUN_DIR=$NEWDIR" >> $GITHUB_ENV
+          fi
+
+      - name: Install deps
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy scikit-learn pyyaml; fi
+
+      - name: Detect CSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
+          if [ ! -f "$CSV" ]; then
+            F="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
+            [ -z "$F" ] && { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${F}"
+          fi
+          echo "CSV_PATH=$CSV" >> $GITHUB_ENV
+
+      - name: Override config (regime-first, no forced coverage)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import os, pathlib, yaml
+RUN = pathlib.Path(os.environ['RUN_DIR'])
+CONF = RUN/'conf'; CONF.mkdir(parents=True, exist_ok=True)
+eff = CONF/'config.effective.yml'
+cfg = {}
+# 기본값: 커버리지 타깃 비활성화(엔진이 무시하도록 키 제거/무의미화)
+# 게이트: 세션 공통 임계값
+thr = float(os.environ['THR'])
+cfg['gate'] = {'beta': 1.6, 'temp': 6.0,
+               'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr}}
+# 리스크 파라미터
+cfg['trade'] = {'hold_bars': int(os.environ['HOLD']),
+                'tp_pct': float(os.environ['TP']),
+                'sl_pct': float(os.environ['SL'])}
+# 정책: 양방향 허용
+cfg['policy'] = {'allow_long': True, 'allow_short': True}
+# 레짐 필터(엔진이 모르면 무시됨)
+flt = os.environ['FILTER']
+cfg['entry_filters'] = {'ema_50_200': (flt=='ema')}
+# BE 옵션 힌트(엔진 지원 시)
+be = int(os.environ['BE'])
+if be>0:
+    cfg['breakeven'] = {'bars': be, 'lock_pct': 0.0000}
+# 수수료(필요 시 조정)
+cfg['costs'] = {'taker_bps': 3, 'slippage_bps': 0}
+# 캘리브레이션(과신 완화)
+cfg['calibration'] = {'method':'isotonic'}
+eff.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
+print("[override] wrote", eff)
+PY
+
+      - name: Preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "${{ env.CSV_PATH }}"
+
+      - name: Run backtest (v1.1.8)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${PWD}"
+          echo "[grid] THR=${{ matrix.THR }} TP=${{ matrix.TP }} SL=${{ matrix.SL }} HOLD=${{ matrix.HOLD }} FILTER=${{ matrix.FILTER }} BE=${{ matrix.BE }}"
+          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+
+      - name: Upload artifacts (tagged)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: out_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}
+          path: |
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/gating_debug.json
+            ${{ env.OUT_DIR }}/preds_test.csv
+            ${{ env.OUT_DIR }}/trades.csv
+            ${{ env.OUT_DIR }}/preflight.json
