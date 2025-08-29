@@ -25,11 +25,11 @@ jobs:
       matrix:
         include:
           # === Percent 모드(고정 TP/SL) ===
-          - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
-          - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
-          - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
-          - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
-          # === ATR 모드(ATR 비율*계수 → 퍼센트 환산) ===
+          - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
+          - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
+          - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
+          - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
+          # === ATR 모드(ATR비율*계수 → 퍼센트 환산) ===
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, FILTER: ema}
           - {MODE: atr, K1: 1.6, K2: 0.9, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, FILTER: none}
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, FILTER: ema}
@@ -43,52 +43,76 @@ jobs:
 
     steps:
       # ✅ pinned (checkout v5.0.0)
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
       # ✅ pinned (setup-python v5.6.0)
-      - name: Setup Python
+      - name: "Setup Python"
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
-      - name: Resolve ZIPs
+      - name: "Resolve ZIPs"
         shell: bash
         run: |
           set -euo pipefail
-          res() { local in="$1" out="$2" path=""; local base="$(basename "$in")"; if [[ -f "$in" ]]; then path="${GITHUB_WORKSPACE}/$in"; else path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"; fi; [[ -n "$path" && -f "$path" ]] || { echo "::error::ZIP not found: $in"; exit 66; }; echo "${out}=${path}" >> "$GITHUB_ENV"; echo "[resolved] $in -> $path"; }
+          res() {
+            local in="$1" out="$2" path=""
+            local base="$(basename "$in")"
+            if [[ -f "$in" ]]; then
+              path="${GITHUB_WORKSPACE}/$in"
+            else
+              path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
+            fi
+            [[ -n "$path" && -f "$path" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
+            echo "${out}=${path}" >> "$GITHUB_ENV"
+            echo "[resolved] $in -> $path"
+          }
           res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
           res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
 
-      - name: Unpack code and data
+      - name: "Unpack code and data"
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUN_DIR" "$DATA_DIR" "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
           unzip -q "$CODE_ZIP_ABS" -d "$RUN_DIR"
           unzip -q "$DATA_ZIP_ABS" -d "$DATA_DIR"
-          if [ ! -f "$RUN_DIR/run_4u.py" ]; then CAND="$(find "$RUN_DIR" -maxdepth 2 -type f -name 'run_4u.py' -print -quit || true)"; [ -n "$CAND" ] || { echo "::error::run_4u.py not found in code zip"; exit 67; }; echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"; echo "[debug] RUN_DIR -> $(dirname "$CAND")"; fi
+          if [ ! -f "$RUN_DIR/run_4u.py" ]; then
+            CAND="$(find "$RUN_DIR" -maxdepth 2 -type f -name 'run_4u.py' -print -quit || true)"
+            [ -n "$CAND" ] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
+            echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"
+            echo "[debug] RUN_DIR -> $(dirname "$CAND")"
+          fi
           echo "[debug] CSV files:"; find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' -print || true
 
-      - name: Install deps
+      - name: "Install deps"
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install -U pip >/dev/null
-          if [ -f "$RUN_DIR/requirements.txt" ]; then pip install -r "$RUN_DIR/requirements.txt"; else pip install pandas numpy pyyaml >/dev/null; fi
+          if [ -f "$RUN_DIR/requirements.txt" ]; then
+            pip install -r "$RUN_DIR/requirements.txt"
+          else
+            pip install pandas numpy pyyaml >/dev/null
+          fi
 
-      - name: Detect CSV (ABS)
+      - name: "Detect CSV (ABS)"
         shell: bash
         run: |
           set -euo pipefail
           CSV="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
-          if [ ! -f "$CSV" ]; then F="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"; [ -n "$F" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }; CSV="${GITHUB_WORKSPACE}/${F}"; fi
+          if [ ! -f "$CSV" ]; then
+            F="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
+            [ -n "$F" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${F}"
+          fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
           echo "[csv] $CSV"
 
-      - name: Preflight (schema + ATR ratio)
+      - name: "Preflight (schema + ATR ratio)"
         shell: bash
         run: |
           set -euo pipefail
@@ -96,7 +120,7 @@ jobs:
           ATR="$(jq -r '.atr_ratio_median' "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/preflight.json")"
           echo "ATR_RATIO=$ATR" >> "$GITHUB_ENV"
 
-      - name: Set params from matrix
+      - name: "Set params from matrix"
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +143,7 @@ jobs:
           echo "SL_EFF=$SL_EFF" >> "$GITHUB_ENV"
           echo "[params] MODE=${{ matrix.MODE }} THR_US=${{ matrix.THR_US }} THR_EU=${{ matrix.THR_EU }} THR_ASIA=${{ matrix.THR_ASIA }} HOLD=${{ matrix.HOLD }} BE=${{ matrix.BE }} FILTER=${{ matrix.FILTER }} TP_EFF=$TP_EFF SL_EFF=$SL_EFF"
 
-      - name: Override config (polyfill) + snapshot
+      - name: "Override config (polyfill) + snapshot"
         shell: bash
         run: |
           set -euo pipefail
@@ -128,7 +152,7 @@ jobs:
           cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP/_cfg_snapshot.yml"
           sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP/_cfg_snapshot.sha256"
 
-      - name: Run backtest
+      - name: "Run backtest"
         shell: bash
         run: |
           set -euo pipefail
@@ -136,7 +160,7 @@ jobs:
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
       # ✅ Python 제거 — 순수 bash+awk+jq로 summary 보강(PF/Win/N)
-      - name: Enrich summary (compute PF/Win/N via awk+jq)
+      - name: "Enrich summary (compute PF/Win/N via awk+jq)"
         shell: bash
         run: |
           set -euo pipefail
@@ -185,13 +209,13 @@ jobs:
             echo "[enrich] no trades.csv — skipped"
           fi
 
-      - name: Inject APPLIED_CONFIG to outputs
+      - name: "Inject APPLIED_CONFIG to outputs"
         shell: bash
         run: |
           set -euo pipefail
           python -c "import os,json,hashlib,yaml,pathlib; run_dir=pathlib.Path(os.environ['RUN_DIR']); out_dir=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/os.environ['OUT_DIR']; conf=run_dir/'conf'/'config.effective.yml'; cfg=yaml.safe_load(conf.read_text()) if conf.exists() else {}; h=hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest(); print('APPLIED_CONFIG:', json.dumps({'sha256':h, **cfg}, ensure_ascii=False)); import json as _j; load=lambda p: (_j.loads(p.read_text()) if p.exists() else {}); dump=lambda p,o: p.write_text(_j.dumps(o, ensure_ascii=False, indent=2)); summary=out_dir/'summary.json'; gating=out_dir/'gating_debug.json'; sj=load(summary); gj=load(gating); thr=(cfg.get('thr_by_session') or {}); (isinstance(thr,dict) and gj.setdefault('thr_by_session',thr)); [gj.setdefault(k,cfg[k]) for k in ('beta','temp') if k in cfg and k not in gj]; [sj.setdefault(dst,cfg[src]) for src,dst in [('tp_pct','tp_pct'),('tp','tp_pct'),('take_profit','tp_pct'),('sl_pct','sl_pct'),('sl','sl_pct'),('stop_loss','sl_pct'),('hold_bars','hold_bars'),('holding_period','hold_bars'),('hold','hold_bars')] if src in cfg and dst not in sj]; sj.setdefault('__config_sha256__',h); gj.setdefault('__config_sha256__',h); dump(summary,sj); dump(gating,gj)"
 
-      - name: Verify hashes & keys
+      - name: "Verify hashes & keys"
         shell: bash
         run: |
           set -euo pipefail
@@ -204,7 +228,7 @@ jobs:
           echo "[gating ]"; jq -r '.thr_by_session, .beta, .temp, .__config_sha256__' "$OUT/gating_debug.json" || true
 
       # ✅ pinned (upload-artifact v4.6.2)
-      - name: Upload artifacts
+      - name: "Upload artifacts"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_mode${{ matrix.MODE }}_thrUS${{ matrix.THR_US }}_EU${{ matrix.THR_EU }}_AS${{ matrix.THR_ASIA }}_h${{ matrix.HOLD }}_be${{ matrix.BE }}_filter${{ matrix.FILTER }}
@@ -217,7 +241,7 @@ jobs:
             ${{ env.OUT_DIR }}/_cfg_snapshot.yml
             ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
 
-    aggregate:
+  aggregate:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
@@ -236,7 +260,6 @@ jobs:
             sudo apt-get install -y jq
           fi
 
-      # ✅ 예상 런 수 가드
       - name: "Guard: expected run count"
         shell: bash
         run: |
@@ -313,14 +336,6 @@ jobs:
 
       # ✅ pinned (upload-artifact v4.6.2)
       - name: "Upload leaderboard"
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: backtest12_grid_results
-          path: |
-            leaderboard.csv
-
-      # ✅ pinned (upload-artifact v4.6.2)
-      - name: Upload leaderboard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest12_grid_results
