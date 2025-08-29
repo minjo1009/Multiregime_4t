@@ -1,313 +1,86 @@
-name: "Backtest v1.1.1 (Patched Minimal - CSVFix SafeDup LinuxPy GatingSync v3)"
-
+name: backtest (strict v1.1.5)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: "Code ZIP path (repo-relative or URL)"
+        description: Code zip (e.g., trade_v1.1.5.zip)
         required: true
-        default: "trade_v1.1.1.zip"
+        default: trade_v1.1.5.zip
       DATA_ZIP:
-        description: "Data ZIP path (repo-relative or URL)"
+        description: Data zip
         required: true
-        default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "Glob for CSV inside data zip"
+        description: CSV glob (e.g., *ETHUSDT*1min*202*.csv)
         required: true
-        default: "**/*ETHUSDT*1min*2020*2025*.csv"
-      ALLOW_DEDUP:
-        description: "Deduplicate code.zip automatically if duplicate paths found"
-        required: false
-        default: "true"
-      COVERAGE_GUARD:
-        description: "Fail run when inferred coverage == 0"
-        required: false
-        default: "true"
 
 jobs:
-  backtest:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     env:
-      PYTHONUNBUFFERED: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-
+      RUN_DIR: tmp/trade
+      DATA_DIR: tmp/data
+      OUT_DIR: _out_4u/run
+      PYVER: '3.11'
     steps:
       - name: Validate pinned SHAs
-        run: |
-          set -euo pipefail
-          verify() {
-            repo="$1"; sha="$2"
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=PinFormat::${repo}@${sha} not 40-hex"; exit 1; }
-            url="https://codeload.github.com/${repo}/legacy.tar.gz/${sha}"
-            code=$(curl -s -o /dev/null -w "%{http_code}" -I "$url" || true)
-            [ "$code" = "200" ] || { echo "::error title=PinUnavailable::${repo}@${sha} codeload=$code"; exit 1; }
-          }
-          verify actions/checkout 11bd71901bbe5b1630ceea73d27597364c9af683
-          verify actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065
-          verify actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
-
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.11"
-
-      - name: Prepare OS deps
-        env:
-          DEBIAN_FRONTEND: "noninteractive"
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -yq --no-install-recommends unzip tzdata rsync
-          sudo ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime
-          sudo dpkg-reconfigure -f noninteractive tzdata
-
-      - name: Reset workspace folders
-        run: |
-          set -euo pipefail
-          rm -rf tmp/trade tmp/data tmp/trade_raw _out_4u scripts
-          mkdir -p tmp/trade tmp/data tmp/trade_raw _out_4u/run _out_4u/logs scripts
-          : > _out_4u/logs/stdout.log
-
-      - name: Bring zips
-        run: |
-          set -euo pipefail
-          CODE_ZIP="${{ github.event.inputs.CODE_ZIP }}"
-          DATA_ZIP="${{ github.event.inputs.DATA_ZIP }}"
-          fetch() { src="$1"; dst="$2"; [[ "$src" =~ ^https?:// ]] && curl -L "$src" -o "$dst" || cp -f "$src" "$dst"; }
-          fetch "$CODE_ZIP" tmp/code.zip
-          fetch "$DATA_ZIP" tmp/data.zip
-          ls -l tmp/*.zip
-
-      - name: Show code.zip sha256 & list
-        run: |
-          set -euo pipefail
-          if command -v sha256sum >/dev/null; then sha256sum tmp/code.zip; else shasum -a 256 tmp/code.zip; fi
-          unzip -Z1 tmp/code.zip | head -n 50 || true
-
-      - name: Inspect code.zip for duplicates (safe)
-        run: |
-          set -euo pipefail
-          mkdir -p _out_4u/logs
-          python - <<'PY'
-          import zipfile, os
-          dup, seen = [], set()
-          with zipfile.ZipFile('tmp/code.zip','r') as z:
-              for n in z.namelist():
-                  if n in seen and n not in dup:
-                      dup.append(n)
-                  seen.add(n)
-          open('_out_4u/logs/zip_duplicates.txt','w',encoding='utf-8').write('\n'.join(dup))
-          print(f"DUP_COUNT={len(dup)}")
-          PY
-          if [ -s _out_4u/logs/zip_duplicates.txt ]; then
-            echo "Duplicate paths detected in code.zip:"
-            head -n 20 _out_4u/logs/zip_duplicates.txt || true
-            if [ "${{ github.event.inputs.ALLOW_DEDUP }}" = "true" ]; then
-              echo "::notice::Auto-dedup enabled. Repacking code.zip…"
-              rm -rf tmp/code_src
-              mkdir -p tmp/code_src
-              unzip -oq tmp/code.zip -d tmp/code_src
-              (cd tmp && zip -qr -X code.dedup.zip code_src)
-              mv -f tmp/code.dedup.zip tmp/code.zip
-              echo "::notice::Dedup complete; cleaned archive in use."
-            else
-              echo "::error title=ZipDuplicate::Please rebuild code.zip without duplicates (or rerun with ALLOW_DEDUP=true)"
-              exit 1
-            fi
-          fi
-
-      - name: Unzip packs + sample csv list
-        run: |
-          set -euo pipefail
-          unzip -oq tmp/code.zip -d tmp/trade_raw
-          shopt -s nullglob dotglob
-          if [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && \
-             [ "$(find tmp/trade_raw -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
-            mv tmp/trade_raw/*/* tmp/trade/ 2>/dev/null || mv tmp/trade_raw/* tmp/trade/
-          else
-            mv tmp/trade_raw/* tmp/trade/ 2>/dev/null || true
-          fi
-          unzip -oq tmp/data.zip -d tmp/data
-          echo "Code tree:"; find tmp/trade -maxdepth 2 -type d -print
-          echo "CSV sample (max 10):"; find tmp/data -type f -name "*.csv" | head -n 10 || true
-
-      - name: Sanitize stdlib shadows
-        run: |
-          set -euo pipefail
-          cd tmp/trade
-          for f in importlib.py typing.py enum.py dataclasses.py; do
-            if [ -f "$f" ]; then mv "$f" "${f}.shadowed"; echo "::warning::Shadowed stdlib: $f -> ${f}.shadowed"; fi
-          done
-
-      - name: Python deps
-        working-directory: tmp/trade
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt || true; fi
-          pip install --no-cache-dir numpy pandas pyyaml scikit-learn jsonschema || true
-
-      - name: Shim py launcher (Linux)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          echo '#!/usr/bin/env bash' > py
-          echo 'exec python "$@"' >> py
-          chmod +x py
-          echo "$PWD" >> "$GITHUB_PATH"
+          set -euo pipefail
+          curl -I -sSfL https://api.github.com/repos/actions/checkout/tarball/11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a >/dev/null
+          curl -I -sSfL https://api.github.com/repos/actions/setup-python/tarball/a26af69be951a213d495a4c3e4e4022e16d87065 >/dev/null
+          curl -I -sSfL https://api.github.com/repos/actions/upload-artifact/tarball/ea165f8d65b6e75b540449e92b4886f43607fa02 >/dev/null
+          echo "Pinned SHAs OK"
 
-      - name: Writers (helpers)
+      - uses: actions/checkout@11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+          cache: pip
+
+      - name: Unpack code and data
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p scripts
-          if [ -d tmp/trade/scripts ]; then
-            rsync -a tmp/trade/scripts/ scripts/
-          fi
-          chmod +x scripts/*.sh 2>/dev/null || true
-          chmod +x scripts/*.bash 2>/dev/null || true
-          chmod +x scripts/*.py 2>/dev/null || true
-          echo "Synced scripts:"; ls -al scripts || true
+          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
+          unzip -q "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" -d "${RUN_DIR}"
+          unzip -q "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
 
-      - name: Write CSV path (preflight; fixed)
-        env:
-          CSV_GLOB: ${{ github.event.inputs.CSV_GLOB }}
+      - name: Install deps
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python - <<'PY' > preflight.json
-          import os, sys, glob, json
-          root="tmp/data"
-          pat=os.environ.get("CSV_GLOB") or "**/*.csv"
-          if pat.startswith("/"):
-              cand=[pat] if os.path.isfile(pat) else []
-          else:
-              cand=sorted(glob.glob(os.path.join(root, pat), recursive=True))
-          cand=[p for p in cand if os.path.isfile(p)]
-          sel=cand[0] if cand else ""
-          os.makedirs("scripts", exist_ok=True)
-          open("scripts/CSV_PATH.txt","w",encoding="utf-8").write(sel)
-          print(json.dumps({"selected": sel, "exists": bool(sel and os.path.isfile(sel))}, ensure_ascii=False))
-          if not sel:
-              raise SystemExit(1)
-          PY
-          echo "Preflight path:"; cat scripts/CSV_PATH.txt
-          echo "Exists?"; [ -f "$(cat scripts/CSV_PATH.txt)" ] && echo yes || echo no
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy scikit-learn pyyaml; fi
 
-      - name: Verify skeleton and import
-        continue-on-error: true
+      - name: Detect CSV and preflight (from code zip)
+        shell: bash
         run: |
           set -euo pipefail
-          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python - <<'PY'
-          import os, importlib, json
-          p=open("scripts/CSV_PATH.txt").read().strip() if os.path.exists("scripts/CSV_PATH.txt") else ""
-          out={"csv_path":p, "csv_exists": os.path.isfile(p)}
-          for mod in ["backtest.runner","trend4p.calibration"]:
-              try:
-                  m=importlib.import_module(mod); out[mod]=getattr(m,"__file__",None)
-              except Exception as e:
-                  out[mod]=f"IMPORT_ERROR: {e}"
-          print(json.dumps(out, ensure_ascii=False))
-          if not out["csv_exists"]: raise SystemExit(3)
-          PY
+          shopt -s globstar nullglob
+          GLOB="${{ github.event.inputs.CSV_GLOB }}"
+          CAND=( ${DATA_DIR}/**/${GLOB} )
+          if [ ${#CAND[@]} -eq 0 ]; then echo "::error::No CSV matched ${GLOB}"; exit 64; fi
+          echo "CSV_PATH=${CAND[0]}" >> "$GITHUB_ENV"
+          python "${RUN_DIR}/scripts/preflight_strict.py" "${CAND[0]}"
 
-      - name: Engine compile triage
-        continue-on-error: true
+      - name: Run backtest (unified entry)
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import sys, os, py_compile, pathlib, json
-          roots=["tmp/trade","tmp/trade/backtest","tmp/trade/trend4p"]
-          files=[]
-          for r in roots:
-              if os.path.isdir(r):
-                  for p in pathlib.Path(r).rglob("*.py"):
-                      files.append(str(p))
-          fails=[]
-          for f in files:
-              try:
-                  py_compile.compile(f, doraise=True)
-              except Exception as e:
-                  fails.append((f,str(e)))
-          print(json.dumps({"compiled": len(files)-len(fails), "failed": fails[:10]}, ensure_ascii=False))
-          PY
-
-      - name: Smoke test Calibrator API
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          python - <<'PY'
-          import numpy as np
-          from trend4p.calibration import Calibrator
-          c = Calibrator(method="isotonic").fit([0,1,1,0],[0.1,0.8,0.9,0.2])
-          x = [0.2,0.5,0.8]
-          for fn in ("transform","predict","predict_proba"):
-              y = getattr(c, fn)(x)
-              arr = np.asarray(y, float)
-              assert arr.shape[0]==3 and np.isfinite(arr).all() and (arr>=0).all() and (arr<=1).all(), fn
-          print("Calibrator API OK")
-          PY
-
-      - name: Run backtest (robust)
-        run: |
-          set -Eeuo pipefail
-          export PYTHONPATH="tmp/trade:tmp/trade/backtest:${PYTHONPATH:-}"
-          CSV_PATH="$(cat scripts/CSV_PATH.txt)"
-          mkdir -p _out_4u/run _out_4u/logs
-          if [ -f tmp/trade/scripts/entrypoint_run.sh ]; then
-            ( bash -x tmp/trade/scripts/entrypoint_run.sh ) 2>&1 | tee _out_4u/logs/stdout.log || true
-          elif [ -f scripts/entrypoint_run.sh ]; then
-            ( bash -x scripts/entrypoint_run.sh ) 2>&1 | tee _out_4u/logs/stdout.log || true
-          fi
-          if [ ! -s _out_4u/summary.json ] && [ -f tmp/trade/run_4u.py ]; then
-            python -u tmp/trade/run_4u.py --data_path "$CSV_PATH" --config tmp/trade/conf/config.yml 2>&1 | tee -a _out_4u/logs/stdout.log || true
-          fi
-          [ -f _out_4u/summary.json ]   || : > _out_4u/summary.json
-          [ -f _out_4u/preds_test.csv ] || : > _out_4u/preds_test.csv
-          [ -f _out_4u/trades.csv ]     || : > _out_4u/trades.csv
-
-      - name: Collect outputs to root
-        run: |
-          set -Eeuo pipefail
-          mkdir -p _out_4u
-          for f in summary.json preds_test.csv trades.csv gating_debug.json; do
-            if [ -s "_out_4u/run/$f" ]; then
-              cp -f "_out_4u/run/$f" "_out_4u/$f"
-            fi
-          done
-          ls -l _out_4u || true
-
-      - name: Post analyze gating
-        env:
-          COVERAGE_GUARD: ${{ github.event.inputs.COVERAGE_GUARD }}
-        run: |
-          set -euo pipefail
-          python -u scripts/post_analyze.py
-
-      - name: Self-check gating
-        run: |
-          set -euo pipefail
-          python -u scripts/self_check_gate.py
-
-      - name: Quick report
-        run: |
-          set -euo pipefail
-          python -u scripts/quick_report.py || true
-
-      - name: Sync gating_debug root
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          cp -f _out_4u/run/gating_debug.json _out_4u/gating_debug.json || true
+          export PYTHONPATH="${PWD}"
+          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
+          ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
 
       - name: Upload artifacts
-        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: backtest_outputs
+          name: backtest-output
           path: |
-            _out_4u/**
-            preflight.json
+            ${{ env.OUT_DIR }}/summary.json
+            ${{ env.OUT_DIR }}/gating_debug.json
+            ${{ env.OUT_DIR }}/preds_test.csv
+            ${{ env.OUT_DIR }}/trades.csv
+            ${{ env.OUT_DIR }}/preflight.json
