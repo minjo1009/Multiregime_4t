@@ -122,70 +122,69 @@ jobs:
           echo "CSV_PATH=$CSV_ABS" >> "$GITHUB_ENV"
           python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "$CSV_ABS"
 
-      # === Regime-first config override (no coverage forcing) ===
+      # === Regime-first config override (no heredoc, safe printf) ===
       - name: Apply regime-first config (override)
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           mkdir -p conf
-          cat > conf/config.effective.yml <<'YAML'
-calibration:
-  method: isotonic
-
-# 커버리지 타깃 비활성화 (엔진이 무시/우회하도록)
-coverage_target_min: null
-coverage_target_max: null
-
-gate:
-  mode: regime
-  force_coverage: false
-  beta: 1.6
-  temp: 6.0
-  thr_by_regime:
-    BULL: 3.8
-    BEAR: 3.8
-    RANGE: 4.2
-  session_bias:
-    US: 1.0
-    EU: 1.0
-    ASIA: 1.0
-
-regime:
-  trend:
-    ema_fast: 50
-    ema_slow: 200
-    band_bps: 5
-  vol:
-    atr_len: 14
-    atr_pct_len: 10080
-    bins_bps: [40, 120]
-  liquidity:
-    vol_ma_len: 50
-    min_rel_vol: 0.8
-
-entry:
-  long:
-    rule: "trend==BULL and vol in ['MED','HIGH'] and conf>=thr_for_regime and liquidity_ok"
-  short:
-    rule: "trend==BEAR and vol in ['MED','HIGH'] and conf>=thr_for_regime and liquidity_ok"
-  allow_range_breakouts: false
-
-costs:
-  taker_bps: 3
-  slippage_bps: 0
-
-trade:
-  hold_bars: 8
-  tp_pct: 0.004
-  sl_pct: 0.002
-  breakeven_after_bars: 5
-  breakeven_trigger_bps: 2
-
-policy:
-  allow_long: true
-  allow_short: true
-YAML
+          printf "%s\n" \
+            "calibration:" \
+            "  method: isotonic" \
+            "" \
+            "coverage_target_min: null" \
+            "coverage_target_max: null" \
+            "" \
+            "gate:" \
+            "  mode: regime" \
+            "  force_coverage: false" \
+            "  beta: 1.6" \
+            "  temp: 6.0" \
+            "  thr_by_regime:" \
+            "    BULL: 3.8" \
+            "    BEAR: 3.8" \
+            "    RANGE: 4.2" \
+            "  session_bias:" \
+            "    US: 1.0" \
+            "    EU: 1.0" \
+            "    ASIA: 1.0" \
+            "" \
+            "regime:" \
+            "  trend:" \
+            "    ema_fast: 50" \
+            "    ema_slow: 200" \
+            "    band_bps: 5" \
+            "  vol:" \
+            "    atr_len: 14" \
+            "    atr_pct_len: 10080" \
+            "    bins_bps: [40, 120]" \
+            "  liquidity:" \
+            "    vol_ma_len: 50" \
+            "    min_rel_vol: 0.8" \
+            "" \
+            "entry:" \
+            "  long:" \
+            "    rule: \"trend==BULL and vol in ['MED','HIGH'] and conf>=thr_for_regime and liquidity_ok\"" \
+            "  short:" \
+            "    rule: \"trend==BEAR and vol in ['MED','HIGH'] and conf>=thr_for_regime and liquidity_ok\"" \
+            "  allow_range_breakouts: false" \
+            "" \
+            "costs:" \
+            "  taker_bps: 3" \
+            "  slippage_bps: 0" \
+            "" \
+            "trade:" \
+            "  hold_bars: 8" \
+            "  tp_pct: 0.004" \
+            "  sl_pct: 0.002" \
+            "  breakeven_after_bars: 5" \
+            "  breakeven_trigger_bps: 2" \
+            "" \
+            "policy:" \
+            "  allow_long: true" \
+            "  allow_short: true" \
+            > conf/config.effective.yml
           echo "[debug] wrote conf/config.effective.yml"
           head -n 20 conf/config.effective.yml || true
 
