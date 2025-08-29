@@ -42,10 +42,14 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      - name: Checkout (pinned)
+      # ✅ pinned (checkout v5.0.0)
+      - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
 
-      - name: Setup Python (pinned)
+      # ✅ pinned (setup-python v5.6.0)
+      - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
@@ -89,119 +93,4 @@ jobs:
         run: |
           set -euo pipefail
           python -c "import os,json,pandas as pd,numpy as np; csv=os.environ['CSV_PATH']; cols=['open_time','high','low','close']; df=pd.read_csv(csv,usecols=cols,nrows=400000); need=['open_time','open','high','low','close','volume']; miss=[c for c in need if c not in df.columns]; pc=df['close'].shift(1); tr=(df['high']-df['low']).abs(); tr=np.maximum(tr,(df['high']-pc).abs()); tr=np.maximum(tr,(df['low']-pc).abs()); atr=pd.Series(tr).rolling(14,min_periods=14).mean(); ratio=float(np.nanmedian((atr/df['close']).values)); hint='ms' if pd.to_numeric(df['open_time'],errors='coerce').max()>1e12 else 's'; print(json.dumps({'path':csv,'rows_scanned':int(len(df)),'columns':list(df.columns),'missing':miss,'open_time_hint':hint,'atr_ratio_median':ratio}))" | tee "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/preflight.json"
-          echo "ATR_RATIO=$(jq -r '.atr_ratio_median' ${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/preflight.json)" >> "$GITHUB_ENV"
-
-      - name: Set params from matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "MODE=${{ matrix.MODE }}" >> "$GITHUB_ENV"
-          echo "THR_US=${{ matrix.THR_US }}" >> "$GITHUB_ENV"
-          echo "THR_EU=${{ matrix.THR_EU }}" >> "$GITHUB_ENV"
-          echo "THR_ASIA=${{ matrix.THR_ASIA }}" >> "$GITHUB_ENV"
-          echo "HOLD=${{ matrix.HOLD }}" >> "$GITHUB_ENV"
-          echo "BE=${{ matrix.BE }}" >> "$GITHUB_ENV"
-          echo "FILTER=${{ matrix.FILTER }}" >> "$GITHUB_ENV"
-          if [ "${{ matrix.MODE }}" = "atr" ]; then TP_EFF=$(awk "BEGIN { print ${ATR_RATIO:-0} * ${{ matrix.K1 }} }"); SL_EFF=$(awk "BEGIN { print ${ATR_RATIO:-0} * ${{ matrix.K2 }} }"); else TP_EFF="${{ matrix.TP }}"; SL_EFF="${{ matrix.SL }}"; fi
-          echo "TP_EFF=$TP_EFF" >> "$GITHUB_ENV"
-          echo "SL_EFF=$SL_EFF" >> "$GITHUB_ENV"
-          echo "[params] MODE=${{ matrix.MODE }} THR_US=${{ matrix.THR_US }} THR_EU=${{ matrix.THR_EU }} THR_ASIA=${{ matrix.THR_ASIA }} HOLD=${{ matrix.HOLD }} BE=${{ matrix.BE }} FILTER=${{ matrix.FILTER }} TP_EFF=$TP_EFF SL_EFF=$SL_EFF"
-
-      - name: Override config (polyfill) + snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -c "import os,pathlib,yaml,hashlib,json; run_dir=os.environ['RUN_DIR']; mode=os.environ.get('MODE','pct'); thr_us=float(os.environ['THR_US']); thr_eu=float(os.environ['THR_EU']); thr_asia=float(os.environ['THR_ASIA']); hold=int(os.environ['HOLD']); tp=float(os.environ['TP_EFF']); sl=float(os.environ['SL_EFF']); flt=os.environ['FILTER']; be=int(os.environ['BE']); conf=pathlib.Path(run_dir)/'conf'; conf.mkdir(parents=True, exist_ok=True); eff=conf/'config.effective.yml'; base=conf/'config.yml'; cfg={'thr_by_session':{'US':thr_us,'EU':thr_eu,'ASIA':thr_asia},'thr':thr_us,'threshold':thr_us,'tp_pct':tp,'tp':tp,'take_profit':tp,'sl_pct':sl,'sl':sl,'stop_loss':sl,'hold_bars':hold,'hold':hold,'holding_period':hold,'allow_long':True,'allow_short':True,'fees_bps_per_leg':3.0,'taker_bps':3.0,'slippage_bps':0.0,'calibration':'isotonic','beta':1.6,'temp':6.0,'__debug_tag__':'mode{}_thrUS{}_EU{}_AS{}_h{}_tp{}_sl{}_f{}_be{}'.format(mode,thr_us,thr_eu,thr_asia,hold,tp,sl,flt,be)}; text=yaml.safe_dump(cfg, sort_keys=False).encode(); open(eff,'wb').write(text); open(base,'wb').write(text); print(json.dumps({'wrote':[str(eff),str(base)],'sha256':hashlib.sha256(text).hexdigest()}))"
-          SNAP="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP/_cfg_snapshot.yml"
-          sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP/_cfg_snapshot.sha256"
-
-      - name: Run backtest
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="$RUN_DIR"
-          python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-
-      - name: Inject APPLIED_CONFIG to outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -c "import os,json,hashlib,yaml,pathlib; run_dir=pathlib.Path(os.environ['RUN_DIR']); out_dir=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/os.environ['OUT_DIR']; conf=run_dir/'conf'/'config.effective.yml'; cfg=yaml.safe_load(conf.read_text()) if conf.exists() else {}; h=hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest(); print('APPLIED_CONFIG:', json.dumps({'sha256':h, **cfg}, ensure_ascii=False)); import json as _j; load=lambda p: (_j.loads(p.read_text()) if p.exists() else {}); dump=lambda p,o: p.write_text(_j.dumps(o, ensure_ascii=False, indent=2)); summary=out_dir/'summary.json'; gating=out_dir/'gating_debug.json'; sj=load(summary); gj=load(gating); thr=(cfg.get('thr_by_session') or {}); (isinstance(thr,dict) and gj.setdefault('thr_by_session',thr)); [gj.setdefault(k,cfg[k]) for k in ('beta','temp') if k in cfg and k not in gj]; [sj.setdefault(dst,cfg[src]) for src,dst in [('tp_pct','tp_pct'),('tp','tp_pct'),('take_profit','tp_pct'),('sl_pct','sl_pct'),('sl','sl_pct'),('stop_loss','sl_pct'),('hold_bars','hold_bars'),('holding_period','hold_bars'),('hold','hold_bars')] if src in cfg and dst not in sj]; sj.setdefault('__config_sha256__',h); gj.setdefault('__config_sha256__',h); dump(summary,sj); dump(gating,gj)"
-
-      - name: Verify hashes & keys
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          PRE_HASH="$(cat "$OUT/_cfg_snapshot.sha256")"
-          POST_HASH="$(sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}')"
-          echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
-          [ "$PRE_HASH" = "$POST_HASH" ] || { echo "::error::override overwritten during run"; exit 71; }
-          echo "[summary]"; jq -r '.tp_pct, .sl_pct, .hold_bars, .__config_sha256__' "$OUT/summary.json" || true
-          echo "[gating ]"; jq -r '.thr_by_session, .beta, .temp, .__config_sha256__' "$OUT/gating_debug.json" || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: out_mode${{ matrix.MODE }}_thrUS${{ matrix.THR_US }}_EU${{ matrix.THR_EU }}_AS${{ matrix.THR_ASIA }}_h${{ matrix.HOLD }}_be${{ matrix.BE }}_filter${{ matrix.FILTER }}
-          path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/trades.csv
-            ${{ env.OUT_DIR }}/preds_test.csv
-            ${{ env.OUT_DIR }}/preflight.json
-            ${{ env.OUT_DIR }}/_cfg_snapshot.yml
-            ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
-
-  aggregate:
-    needs: [grid]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: all_runs
-
-      - name: Ensure jq
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
-
-      - name: Leaderboard (PF/Win/MCC) — bash+jq
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "artifact,thr_US,thr_EU,thr_ASIA,tp_pct,sl_pct,hold_bars,hit_rate,profit_factor,mcc,n_trades" > leaderboard.tmp.csv
-          while IFS= read -r -d '' s; do
-            dir="$(dirname "$s")"
-            tag="$(basename "$dir")"
-            if [[ -f "$dir/gating_debug.json" ]]; then
-              thr_US="$(jq -r '.thr_by_session.US // empty' "$dir/gating_debug.json")"
-              thr_EU="$(jq -r '.thr_by_session.EU // empty' "$dir/gating_debug.json")"
-              thr_AS="$(jq -r '.thr_by_session.ASIA // empty' "$dir/gating_debug.json")"
-            else
-              thr_US=""; thr_EU=""; thr_AS=""
-            fi
-            tp="$(jq -r '.tp_pct // empty' "$s")"
-            sl="$(jq -r '.sl_pct // empty' "$s")"
-            hold="$(jq -r '.hold_bars // empty' "$s")"
-            hit="$(jq -r '.hit_rate // empty' "$s")"
-            pf="$(jq -r '.profit_factor // empty' "$s")"
-            mcc="$(jq -r '.mcc // empty' "$s")"
-            nt="$(jq -r '.n_trades // empty' "$s")"
-            echo "$tag,$thr_US,$thr_EU,$thr_AS,$tp,$sl,$hold,$hit,$pf,$mcc,$nt" >> leaderboard.tmp.csv
-          done < <(find all_runs -type f -name summary.json -print0)
-          { head -n 1 leaderboard.tmp.csv; tail -n +2 leaderboard.tmp.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.csv
-          echo "[TOP 12]"; head -n 12 leaderboard.csv
-
-      - name: Upload leaderboard
-        uses: actions/upload-artifact@v4
-        with:
-          name: backtest12_grid_results
-          path: |
-            leaderboard.csv
+          echo "ATR_RATIO=$(jq
