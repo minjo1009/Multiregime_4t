@@ -24,7 +24,6 @@ jobs:
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
       PYVER: '3.11'
-      # ==== 전략 V1 기본 파라미터(필요 시 수정) ====
       THR_US: '4.1'
       THR_EU: '3.9'
       THR_ASIA: '3.6'
@@ -140,14 +139,42 @@ jobs:
         with:
           path: all_runs
 
-      - name: Leaderboard (PF/Win/MCC) — single line
+      - name: Leaderboard (PF/Win/MCC) — bash+jq (no python -c)
         shell: bash
         run: |
           set -euo pipefail
-          python -c "import json,glob; from pathlib import Path; import pandas as pd; rows=[]; import os; files=glob.glob('all_runs/**/summary.json', recursive=True); 
-[rows.append((lambda p,sj,gj,tag: {'artifact':tag,'thr_US':(gj.get('thr_by_session') or {}).get('US'),'thr_EU':(gj.get('thr_by_session') or {}).get('EU'),'thr_ASIA':(gj.get('thr_by_session') or {}).get('ASIA'),'tp_pct':sj.get('tp_pct'),'sl_pct':sj.get('sl_pct'),'hold_bars':sj.get('hold_bars'),'hit_rate':sj.get('hit_rate'),'profit_factor':sj.get('profit_factor'),'mcc':sj.get('mcc'),'n_trades':sj.get('n_trades')})(Path(s).parent, json.loads(open(s,'r').read()), (json.loads(open((Path(s).parent/'gating_debug.json'),'r').read()) if (Path(s).parent/'gating_debug.json').exists() else {}), (Path(s).parent.parts[1] if len(Path(s).parent.parts)>1 else Path(s).parent.name))) for s in files]; df=pd.DataFrame(rows); 
-df.sort_values(by=[c for c in ['profit_factor','hit_rate','mcc'] if c in df.columns], ascending=False, inplace=True); df.to_csv('leaderboard.csv', index=False); print(df[['artifact','profit_factor','hit_rate','mcc','n_trades']].head(12).to_string(index=False))"
-          ls -l
+          # 헤더
+          echo "artifact,thr_US,thr_EU,thr_ASIA,tp_pct,sl_pct,hold_bars,hit_rate,profit_factor,mcc,n_trades" > leaderboard.tmp.csv
+          # 각 summary.json 순회
+          while IFS= read -r -d '' s; do
+            dir="$(dirname "$s")"
+            tag="$(basename "$dir")"
+            if [[ -f "$dir/gating_debug.json" ]]; then
+              thr_US="$(jq -r '.thr_by_session.US // empty' "$dir/gating_debug.json")"
+              thr_EU="$(jq -r '.thr_by_session.EU // empty' "$dir/gating_debug.json")"
+              thr_AS="$(jq -r '.thr_by_session.ASIA // empty' "$dir/gating_debug.json")"
+            else
+              thr_US=""; thr_EU=""; thr_AS=""
+            fi
+            tp="$(jq -r '.tp_pct // empty' "$s")"
+            sl="$(jq -r '.sl_pct // empty' "$s")"
+            hold="$(jq -r '.hold_bars // empty' "$s")"
+            hit="$(jq -r '.hit_rate // empty' "$s")"
+            pf="$(jq -r '.profit_factor // empty' "$s")"
+            mcc="$(jq -r '.mcc // empty' "$s")"
+            nt="$(jq -r '.n_trades // empty' "$s")"
+            echo "$tag,$thr_US,$thr_EU,$thr_AS,$tp,$sl,$hold,$hit,$pf,$mcc,$nt" >> leaderboard.tmp.csv
+          done < <(find all_runs -type f -name summary.json -print0)
+
+          # 정렬(우선 PF, 그 다음 승률, 그 다음 MCC)
+          if [[ -s leaderboard.tmp.csv ]]; then
+            { head -n 1 leaderboard.tmp.csv; tail -n +2 leaderboard.tmp.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.csv
+            echo "[TOP 12]"
+            head -n 12 leaderboard.csv
+          else
+            echo "::warning::No summary.json files found under all_runs"
+            cp leaderboard.tmp.csv leaderboard.csv
+          fi
 
       - name: Upload leaderboard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
