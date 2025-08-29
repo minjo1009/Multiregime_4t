@@ -22,15 +22,14 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-    # ===== GRID CASES =====
       matrix:
         include:
-          # Percent 모드(고정 TP/SL)
+          # === Percent 모드(고정 TP/SL) ===
           - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
           - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
           - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
           - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
-          # ATR 모드(ATR 비율*계수 → 퍼센트 환산)
+          # === ATR 모드(ATR 비율*계수 → 퍼센트 환산) ===
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, FILTER: ema}
           - {MODE: atr, K1: 1.6, K2: 0.9, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, FILTER: none}
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, FILTER: ema}
@@ -43,13 +42,13 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      # pinned (checkout v5.0.0)
+      # ✅ pinned (checkout v5.0.0)
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
-      # pinned (setup-python v5.6.0)
+      # ✅ pinned (setup-python v5.6.0)
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -136,6 +135,34 @@ jobs:
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
+      # ✅ 런 직후 summary 보강 (PF/Win/N 계산 주입) — pandas 사용
+      - name: Enrich summary (compute PF/Win/N from trades.csv)
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          python -c "import json,pandas as pd,numpy as np,sys,pathlib; out=pathlib.Path(sys.argv[1]); sjp=out/'summary.json'; tsp=out/'trades.csv'; import os; sj={}; 
+try:
+ sj=json.loads(sjp.read_text())
+except Exception:
+ pass
+pf=hit=nt=None
+if tsp.exists():
+ df=pd.read_csv(tsp)
+ for cand in ['pnl','ret','pnl_pct','PnL','pl','profit','strategy_return']:
+  if cand in df.columns:
+   v=pd.to_numeric(df[cand], errors='coerce').dropna()
+   n=len(v)
+   if n>0:
+    nt=int(n); hit=float((v>0).mean()); pos=float(v[v>0].sum()); neg=float((-v[v<0]).sum()); pf=(pos/neg) if neg>0 else (1e9 if pos>0 else 0.0)
+   break
+if hit is not None: sj.setdefault('hit_rate', hit)
+if pf  is not None: sj.setdefault('profit_factor', pf)
+if nt  is not None: sj.setdefault('n_trades', nt)
+sj.setdefault('metrics_schema_version', 1)
+sjp.write_text(json.dumps(sj, ensure_ascii=False, indent=2))
+print('[enrich]', {'hit_rate':hit, 'profit_factor':pf, 'n_trades':nt})" "${OUT}"
+
       - name: Inject APPLIED_CONFIG to outputs
         shell: bash
         run: |
@@ -151,10 +178,10 @@ jobs:
           POST_HASH="$(sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}')"
           echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
           [ "$PRE_HASH" = "$POST_HASH" ] || { echo "::error::override overwritten during run"; exit 71; }
-          echo "[summary]"; jq -r '.tp_pct, .sl_pct, .hold_bars, .__config_sha256__' "$OUT/summary.json" || true
+          echo "[summary]"; jq -r '.tp_pct, .sl_pct, .hold_bars, .hit_rate, .profit_factor, .n_trades, .__config_sha256__' "$OUT/summary.json" || true
           echo "[gating ]"; jq -r '.thr_by_session, .beta, .temp, .__config_sha256__' "$OUT/gating_debug.json" || true
 
-      # pinned (upload-artifact v4.6.2)
+      # ✅ pinned (upload-artifact v4.6.2)
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -172,7 +199,7 @@ jobs:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
-      # pinned (download-artifact v5.0.0)
+      # ✅ pinned (download-artifact v5.0.0)
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
@@ -186,6 +213,16 @@ jobs:
             sudo apt-get update -y
             sudo apt-get install -y jq
           fi
+
+      # ✅ 예상 런 수 가드(없으면 실패)
+      - name: Guard: expected run count
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECT=8
+          FOUND=$(find all_runs -type f -name summary.json | wc -l | tr -d ' ')
+          echo "[guard] expected=$EXPECT found=$FOUND"
+          [ "$FOUND" -eq "$EXPECT" ] || { echo "::error::per-run artifacts missing"; exit 74; }
 
       - name: Leaderboard (PF/Win/MCC) — robust (jq + awk fallback)
         shell: bash
@@ -252,7 +289,7 @@ jobs:
           { head -n 1 leaderboard.tmp.csv; tail -n +2 leaderboard.tmp.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.csv
           echo "[TOP 12]"; head -n 12 leaderboard.csv
 
-      # pinned (upload-artifact v4.6.2)
+      # ✅ pinned (upload-artifact v4.6.2)
       - name: Upload leaderboard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
