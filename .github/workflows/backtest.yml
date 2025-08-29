@@ -1,4 +1,4 @@
-name: backtest (strict v1.1.6, abs-csv)
+name: backtest (strict v1.1.6 + cfg-fix)
 on:
   workflow_dispatch:
     inputs:
@@ -64,14 +64,46 @@ jobs:
             pip install pandas numpy scikit-learn pyyaml
           fi
 
+      # ★ 효과 설정 보증: config.effective.yml 강제 생성
+      - name: Ensure effective config
+        shell: bash
+        working-directory: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          CONF_DIR="${PWD}/conf"
+          mkdir -p "${CONF_DIR}"
+          if [ -f "${CONF_DIR}/config.yml" ]; then
+            cp -f "${CONF_DIR}/config.yml" "${CONF_DIR}/config.effective.yml"
+          else
+            cat > "${CONF_DIR}/config.effective.yml" <<'YAML'
+calibration:
+  method: isotonic
+coverage_target_min: 0.03
+coverage_target_max: 0.08
+gate:
+  beta: 1.2
+  temp: 10.0
+costs:
+  taker_bps: 7
+  slippage_bps: 0
+trade:
+  hold_bars: 5
+  tp_pct: 0.004
+  sl_pct: 0.003
+policy:
+  allow_long: true
+  allow_short: true
+YAML
+          fi
+          echo "[debug] using conf:"
+          ls -l "${CONF_DIR}/config.effective.yml" || true
+
       - name: Detect CSV and preflight (ABS path)
         shell: bash
         run: |
           set -euo pipefail
-          # 1) 기대 경로(루트 기준) → 절대경로 구성
           CSV_CAND="${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_GLOB }}"
           CSV_ABS="${GITHUB_WORKSPACE}/${CSV_CAND}"
-          # 2) 없으면 find로 1개 탐색하고 절대경로로 보정
           if [ ! -f "$CSV_ABS" ]; then
             FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_GLOB }}" | head -n 1 || true)"
             if [ -z "$FOUND" ]; then
@@ -90,7 +122,6 @@ jobs:
         run: |
           set -euo pipefail
           export PYTHONPATH="${PWD}"
-          # 절대경로를 run_4u.py에 전달 → 내부 cwd와 무관
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
           ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
 
