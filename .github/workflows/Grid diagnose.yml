@@ -84,11 +84,14 @@ jobs:
 
       - name: Install deps
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy pyyaml; fi
+          if [ -f "$RUN_DIR/requirements.txt" ]; then
+            pip install -r "$RUN_DIR/requirements.txt"
+          else
+            pip install pandas numpy pyyaml
+          fi
 
       - name: Detect CSV (ABS)
         shell: bash
@@ -102,18 +105,19 @@ jobs:
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
 
-      # 1) Override: 최상위 키 + 센티넬 + 해시 기록
+      # 1) Override: 최상위 키 + 센티넬 + 해시 기록 (런타임 RUN_DIR 사용)
       - name: Override effective config (hash + preview)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          python - "${{ matrix.THR }}" "${{ matrix.HOLD }}" "${{ matrix.TP }}" "${{ matrix.SL }}" "${{ matrix.FILTER }}" "${{ matrix.BE }}" <<'PY'
+          echo "[ctx] RUN_DIR=$RUN_DIR"
+          python - "$RUN_DIR" "${{ matrix.THR }}" "${{ matrix.HOLD }}" "${{ matrix.TP }}" "${{ matrix.SL }}" "${{ matrix.FILTER }}" "${{ matrix.BE }}" <<'PY'
           import os, sys, pathlib, yaml, hashlib
-          thr=float(sys.argv[1]); hold=int(sys.argv[2]); tp=float(sys.argv[3]); sl=float(sys.argv[4]); flt=sys.argv[5]; be=int(sys.argv[6])
-          RUN=pathlib.Path(os.environ['RUN_DIR']); CONF=RUN/'conf'; CONF.mkdir(parents=True, exist_ok=True)
-          eff=CONF/'config.effective.yml'
-          cfg={
+          run_dir = pathlib.Path(sys.argv[1])
+          thr=float(sys.argv[2]); hold=int(sys.argv[3]); tp=float(sys.argv[4]); sl=float(sys.argv[5]); flt=sys.argv[6]; be=int(sys.argv[7])
+          conf = run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
+          eff = conf/'config.effective.yml'
+          cfg = {
             'beta': 1.6, 'temp': 6.0,
             'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr},
             'tp_pct': tp, 'sl_pct': sl, 'hold_bars': hold,
@@ -123,26 +127,27 @@ jobs:
           }
           if flt=='ema': cfg['filter_ema_50_200']=True
           if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
-          text=yaml.safe_dump(cfg, sort_keys=False).encode()
-          h=hashlib.sha256(text).hexdigest()
+          text = yaml.safe_dump(cfg, sort_keys=False).encode()
+          h = hashlib.sha256(text).hexdigest()
           eff.write_bytes(text)
           print("[override] wrote", eff)
           print("[override] sha256:", h)
           print("[override] preview:\\n", text.decode()[:300])
           PY
-          echo "PRE_HASH=$(sha256sum conf/config.effective.yml | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "[PRE] conf path = $(realpath conf/config.effective.yml)"
-          sed -n '1,40p' conf/config.effective.yml
+          CONF_PATH="$RUN_DIR/conf/config.effective.yml"
+          echo "PRE_HASH=$(sha256sum "$CONF_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "[PRE] conf path = $(realpath "$CONF_PATH")"
+          sed -n '1,40p' "$CONF_PATH"
 
       # 2) bridge 무력화 + 1.1.9 skip-bridge 코드 경로 확인(경고만)
       - name: Lock bridge & check skip-bridge code path (warn-only)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          test -f VERSION.txt && { echo "[version]"; head -n 1 VERSION.txt; } || true
-          if [ -f backtest/exit_bridge.py ]; then rm -f backtest/exit_bridge.py; echo "[bridge] exit_bridge.py removed"; fi
-          if grep -q "pre-existing config.effective.yml" run_4u.py; then
+          echo "[ctx] RUN_DIR=$RUN_DIR"
+          test -f "$RUN_DIR/VERSION.txt" && { echo "[version]"; head -n 1 "$RUN_DIR/VERSION.txt"; } || true
+          if [ -f "$RUN_DIR/backtest/exit_bridge.py" ]; then rm -f "$RUN_DIR/backtest/exit_bridge.py"; echo "[bridge] exit_bridge.py removed"; fi
+          if grep -q "pre-existing config.effective.yml" "$RUN_DIR/run_4u.py"; then
             echo "[check] run_4u.py has skip-bridge logic"
           else
             echo "::warning::run_4u.py skip-bridge string not found (해시 검증으로 진행)"
@@ -151,23 +156,22 @@ jobs:
       # 3) 실행 (로그 저장만)
       - name: Run backtest (tee log)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          export PYTHONPATH="${PWD}"
+          export PYTHONPATH="$RUN_DIR"
           TAG="thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}"
           mkdir -p "${GITHUB_WORKSPACE}/_diag"
-          python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" 2>&1 | tee "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log"
+          python "$RUN_DIR/run_4u.py" --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" 2>&1 | tee "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log"
           ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
       # 4) 실행 후: 해시 비교 + 값 검증 + 라벨링
       - name: Post-run verify (hash compare + value check)
         shell: bash
-        working-directory: ${{ env.RUN_DIR }}
         run: |
           set -euo pipefail
-          POST_HASH="$(sha256sum conf/config.effective.yml | awk '{print $1}')"
-          echo "[POST] conf path = $(realpath conf/config.effective.yml)"
+          CONF_PATH="$RUN_DIR/conf/config.effective.yml"
+          POST_HASH="$(sha256sum "$CONF_PATH" | awk '{print $1}')"
+          echo "[POST] conf path = $(realpath "$CONF_PATH")"
           echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
           if [ "$PRE_HASH" != "$POST_HASH" ]; then
             echo "::error::config.effective.yml was OVERWRITTEN after override → 경로/순서 이슈 가능 (bridge/기본생성/다른 디렉토리)."; exit 71
@@ -184,8 +188,8 @@ jobs:
             echo "::error::엔진이 다른 config를 읽었거나 스키마가 전혀 다릅니다 (경로/스키마)."; exit 72
           fi
           if [ "$THR_JSON" != "$THR_EXPECT" ] || [ "$TP_JSON" != "$TP_EXPECT" ] || [ "$SL_JSON" != "$SL_EXPECT" ]; then
-            echo "::error::override 적용값과 엔진 출력값 불일치 → '스키마 키 이름' 또는 '엔진이 참조하는 파일 경로' 불일치 가능성."
-            echo "[hint] grep -R \"tp_pct\\|sl_pct\\|thr_by_session\\|hold_bars\" backtest -n  로 실제 키명을 확인하세요."
+            echo "::error::override 적용값과 엔진 출력값 불일치 → '스키마 키 이름' 또는 '엔진이 참조하는 파일 경로' 불일치 가능성.";
+            echo "[hint] grep -R \"tp_pct\\|sl_pct\\|thr_by_session\\|hold_bars\" \"$RUN_DIR/backtest\" -n";
             exit 73
           fi
           echo "[ok] override kept (hash match) AND engine outputs match expectations."
@@ -216,7 +220,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "[list]"; find all_runs -type f -name 'summary.json' -maxdepth 3 | sed 's/^/ - /'
-          # 시그니처 생성
           SIG="[]"
           while IFS= read -r sum; do
             gate="$(dirname "$sum")/gating_debug.json"
