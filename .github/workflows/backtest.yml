@@ -1,17 +1,17 @@
-name: backtest (strict v1.1.6 + cfg-fix)
+name: backtest (strict v1.1.7)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
         description: Code zip
         required: true
-        default: trade_v1.1.6.zip
+        default: trade_v1.1.7.zip
       DATA_ZIP:
         description: Data zip
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: CSV file name (exact or glob)
+        description: CSV file name
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
@@ -25,7 +25,6 @@ jobs:
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
       PYVER: '3.11'
-
     steps:
       - name: Validate pinned SHAs
         shell: bash
@@ -45,8 +44,6 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" -d "${RUN_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
-          echo "[debug] data listing:"
-          find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" -print || true
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -64,59 +61,20 @@ jobs:
             pip install pandas numpy scikit-learn pyyaml
           fi
 
-      # ★ 효과 설정 보증: config.effective.yml 강제 생성
-      - name: Ensure effective config
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          CONF_DIR="${PWD}/conf"
-          mkdir -p "${CONF_DIR}"
-          if [ -f "${CONF_DIR}/config.yml" ]; then
-            cp -f "${CONF_DIR}/config.yml" "${CONF_DIR}/config.effective.yml"
-          else
-            cat > "${CONF_DIR}/config.effective.yml" <<'YAML'
-calibration:
-  method: isotonic
-coverage_target_min: 0.03
-coverage_target_max: 0.08
-gate:
-  beta: 1.2
-  temp: 10.0
-costs:
-  taker_bps: 7
-  slippage_bps: 0
-trade:
-  hold_bars: 5
-  tp_pct: 0.004
-  sl_pct: 0.003
-policy:
-  allow_long: true
-  allow_short: true
-YAML
-          fi
-          echo "[debug] using conf:"
-          ls -l "${CONF_DIR}/config.effective.yml" || true
-
-      - name: Detect CSV and preflight (ABS path)
+      - name: Detect CSV and preflight (ABS)
         shell: bash
         run: |
           set -euo pipefail
-          CSV_CAND="${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_GLOB }}"
-          CSV_ABS="${GITHUB_WORKSPACE}/${CSV_CAND}"
+          CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_GLOB }}"
           if [ ! -f "$CSV_ABS" ]; then
             FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_GLOB }}" | head -n 1 || true)"
-            if [ -z "$FOUND" ]; then
-              echo "::error::CSV not found: ${CSV_CAND}"
-              exit 64
-            fi
+            if [ -z "$FOUND" ]; then echo "::error::CSV not found"; exit 64; fi
             CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
           echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
-          echo "[debug] CSV_PATH=$CSV_ABS"
           python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "$CSV_ABS"
 
-      - name: Run backtest (unified entry)
+      - name: Run backtest
         shell: bash
         working-directory: ${{ env.RUN_DIR }}
         run: |
