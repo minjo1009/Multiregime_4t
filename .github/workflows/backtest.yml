@@ -1,4 +1,4 @@
-name: backtest (strict v1.1.6)
+name: backtest (strict v1.1.6, abs-csv)
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ on:
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: CSV file name
+        description: CSV file name (exact or glob)
         required: true
         default: ETHUSDT_1min_2020_2025.csv
 
@@ -45,6 +45,8 @@ jobs:
           mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" -d "${RUN_DIR}"
           unzip -q "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" -d "${DATA_DIR}"
+          echo "[debug] data listing:"
+          find "${DATA_DIR}" -maxdepth 2 -type f -name "*.csv" -print || true
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -62,17 +64,25 @@ jobs:
             pip install pandas numpy scikit-learn pyyaml
           fi
 
-      - name: Detect CSV and preflight
+      - name: Detect CSV and preflight (ABS path)
         shell: bash
         run: |
           set -euo pipefail
-          CSV="${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_GLOB }}"
-          if [ ! -f "$CSV" ]; then
-            echo "::error::CSV not found: $CSV"
-            exit 64
+          # 1) 기대 경로(루트 기준) → 절대경로 구성
+          CSV_CAND="${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_GLOB }}"
+          CSV_ABS="${GITHUB_WORKSPACE}/${CSV_CAND}"
+          # 2) 없으면 find로 1개 탐색하고 절대경로로 보정
+          if [ ! -f "$CSV_ABS" ]; then
+            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_GLOB }}" | head -n 1 || true)"
+            if [ -z "$FOUND" ]; then
+              echo "::error::CSV not found: ${CSV_CAND}"
+              exit 64
+            fi
+            CSV_ABS="${GITHUB_WORKSPACE}/${FOUND}"
           fi
-          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
-          python "${RUN_DIR}/scripts/preflight_strict.py" "$CSV"
+          echo "CSV_PATH=${CSV_ABS}" >> "$GITHUB_ENV"
+          echo "[debug] CSV_PATH=$CSV_ABS"
+          python "${{ env.RUN_DIR }}/scripts/preflight_strict.py" "$CSV_ABS"
 
       - name: Run backtest (unified entry)
         shell: bash
@@ -80,6 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           export PYTHONPATH="${PWD}"
+          # 절대경로를 run_4u.py에 전달 → 내부 cwd와 무관
           python run_4u.py --data_path "${{ env.CSV_PATH }}" --out_dir "${{ github.workspace }}/${{ env.OUT_DIR }}"
           ls -l "${{ github.workspace }}/${{ env.OUT_DIR }}"
 
@@ -92,4 +103,4 @@ jobs:
             ${{ env.OUT_DIR }}/gating_debug.json
             ${{ env.OUT_DIR }}/preds_test.csv
             ${{ env.OUT_DIR }}/trades.csv
-            ${{ env.OUT_DIR }}/preflight.jsonDIR }}/preflight.json
+            ${{ env.OUT_DIR }}/preflight.json
