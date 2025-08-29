@@ -1,4 +1,4 @@
-name: backtest (v1.1.7 hard-safe)
+name: backtest (v1.1.7 simple-safe)
 on:
   workflow_dispatch:
     inputs:
@@ -58,39 +58,11 @@ jobs:
           echo "[debug] code top:"; ls -la "${RUN_DIR}" || true
           echo "[debug] conf:"; ls -la "${RUN_DIR}/conf" || true
           echo "[debug] data:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
-
-      # effective config 사전 보장(엔트리 호출 전)
-      - name: Ensure effective config (outside ZIP)
-        shell: bash
-        working-directory: ${{ env.RUN_DIR }}
-        run: |
-          set -euo pipefail
-          mkdir -p conf
-          if [ -f conf/config.yml ]; then
-            cp -f conf/config.yml conf/config.effective.yml
-          else
-            cat > conf/config.effective.yml <<'CFG'
-calibration:
-  method: isotonic
-coverage_target_min: 0.03
-coverage_target_max: 0.08
-gate:
-  beta: 1.2
-  temp: 10.0
-costs:
-  taker_bps: 7
-  slippage_bps: 0
-trade:
-  hold_bars: 5
-  tp_pct: 0.004
-  sl_pct: 0.003
-policy:
-  allow_long: true
-  allow_short: true
-CFG
+          # 만약 ZIP이 하위 폴더 한층을 만들었다면 run_4u.py 위치로 RUN_DIR 보정
+          if [ ! -f "${RUN_DIR}/run_4u.py" ]; then
+            NEWDIR="$(dirname "$(find "${RUN_DIR}" -maxdepth 2 -name 'run_4u.py' -print -quit)")"
+            if [ -n "${NEWDIR}" ]; then echo "RUN_DIR=${NEWDIR}" >> "$GITHUB_ENV"; fi
           fi
-          echo "[debug] effective cfg ready:"; ls -la conf/config.effective.yml
-          head -n 10 conf/config.effective.yml || true
 
       - name: Install deps
         shell: bash
@@ -110,7 +82,7 @@ CFG
           set -euo pipefail
           CSV_ABS="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
           if [ ! -f "${CSV_ABS}" ]; then
-            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" | head -n 1 || true)"
+            FOUND="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
             if [ -z "${FOUND}" ]; then
               echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"
               echo "[hint] available CSVs:"; find "${{ env.DATA_DIR }}" -type f -name '*.csv' -print || true
