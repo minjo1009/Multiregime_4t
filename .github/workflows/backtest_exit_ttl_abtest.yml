@@ -1,11 +1,27 @@
-name: Exit/TTL A-B test (core-fixed)
+name: exit_ttl_abtest_param
 
 on:
   workflow_dispatch:
+    inputs:
+      CODE_PACK:
+        description: "Repo-root code pack zip filename (e.g., trade_v1.1.4.zip)"
+        required: true
+        default: "trade_v1.1.4.zip"
+      DATA_CSV:
+        description: "Data CSV path under repo (optional). If omitted, auto-discover under tmp/data/**"
+        required: false
+        default: ""
+      TTL_A:
+        description: "A-run TTL"
+        required: true
+        default: "1"
+      TTL_B:
+        description: "B-run TTL"
+        required: true
+        default: "5000"
 
-defaults:
-  run:
-    shell: bash
+permissions:
+  contents: read
 
 jobs:
   abtest:
@@ -14,192 +30,181 @@ jobs:
       - name: Checkout (pinned SHA)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Setup Python 3.11 (pinned SHA)
-        uses: actions/setup-python@a26af69be951a213e376a39fc6824e9f5b089bc5
-        with:
-          python-version: '3.11'
-
-      - name: Prepare workspace
+      - name: Init workspace (unpack code pack)
         run: |
           set -Eeuo pipefail
-          mkdir -p tmp/trade/conf tmp/data _out_4u
-          python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir pyyaml
-          echo "Workspace ready."
-          # If there is no CSV yet, list current tree (for debugging)
-          echo "--- repo tree (depth 2) ---"
-          find . -maxdepth 2 -type f | sed 's/^/  /' || true
+          mkdir -p tmp/trade tmp/data _out_4u
+          CODE_PACK="${{ github.event.inputs.CODE_PACK }}"
+          test -f "$CODE_PACK" || { echo "::error::CODE_PACK not found: $CODE_PACK"; exit 1; }
+          cp -f "$CODE_PACK" tmp/code.zip
+          unzip -oq tmp/code.zip -d tmp/trade
+          # optional dataset
+          if [ -n "${{ github.event.inputs.DATA_CSV }}" ] && [ -f "${{ github.event.inputs.DATA_CSV }}" ]; then
+            cp -f "${{ github.event.inputs.DATA_CSV }}" tmp/data/
+          fi
+          echo "--- tree(tmp/trade, depth 2) ---"; find tmp/trade -maxdepth 2 -type f | sed 's/^/  /' || true
 
-      - name: Create run_engine.py (core v7)
+      - name: Ensure Python 3.11 (no external action)
         run: |
           set -Eeuo pipefail
+          if ! python3 - <<'PY'
+          import sys
+          v=sys.version_info
+          assert (v.major,v.minor)==(3,11)
+          PY
+          then
+            sudo apt-get update
+            sudo apt-get install -y software-properties-common
+            sudo add-apt-repository -y ppa:deadsnakes/ppa
+            sudo apt-get update
+            sudo apt-get install -y python3.11 python3.11-venv python3-pip
+          fi
+          python3 -V
+          python3 -m pip install --upgrade pip
+          # best-effort requirements
+          if [ -f tmp/trade/requirements.txt ]; then python3 -m pip install -r tmp/trade/requirements.txt || true; fi
+          python3 -m pip install pyyaml
+
+      - name: Create run_engine.py (bridge & normalizer)
+        run: |
           cat > run_engine.py <<'PY'
-          import os, sys, glob, json, shutil, runpy, hashlib, textwrap, pathlib
+          import os, sys, glob, json, shutil, runpy, hashlib
           from pathlib import Path
-          # Optional: use YAML overlay if available
-          try:
-              import yaml  # installed in workflow
-          except Exception:
-              yaml = None
 
           ROOT = Path(".")
-          OUT = ROOT / "_out_4u"
-          OUT.mkdir(parents=True, exist_ok=True)
+          TR = Path("tmp/trade")
+          OUT = Path("_out_4u"); OUT.mkdir(parents=True, exist_ok=True)
+          CFG_BASE = TR/"conf"/"config.yml"
+          CFG_EFF  = TR/"conf"/"config.effective.yml"
 
           def select_csv():
-              pat = os.environ.get("CSV_GLOB", "tmp/data/**/*.csv")
-              paths = [Path(p) for p in glob.glob(pat, recursive=True)]
+              env = os.environ.get("DATA_CSV","").strip()
+              if env and Path(env).exists():
+                  return env
+              pats = ["tmp/data/**/*.csv", "data/**/*.csv"]
+              paths = []
+              for pat in pats:
+                  paths.extend([Path(p) for p in glob.glob(pat, recursive=True)])
               paths = [p for p in paths if p.is_file()]
               if not paths:
-                  raise FileNotFoundError(f"No CSV found with pattern: {pat}")
-              # Prefer ETHUSDT if present
+                  raise FileNotFoundError("No CSV found under tmp/data or data")
+              # prefer ETHUSDT
               for p in paths:
                   if "ETHUSDT" in p.name.upper():
                       return str(p)
               return str(paths[0])
 
-          def write_effective_cfg(base_cfg_path: Path, ttl_val: int):
-              eff = Path("tmp/trade/conf/config.effective.yml")
-              if yaml and base_cfg_path.exists():
+          def overlay_cfg(ttl_val: int):
+              import yaml
+              base = {}
+              if CFG_BASE.exists():
                   try:
-                      base = yaml.safe_load(base_cfg_path.read_text()) or {}
+                      base = yaml.safe_load(CFG_BASE.read_text()) or {}
                   except Exception:
                       base = {}
-              else:
-                  base = {}
-              # ensure sections
+              # ensure sections & overlay both styles
               base.setdefault("trade", {})
               base.setdefault("exit", {})
-              # overlay values from base + env
-              # keep existing trade.tp/sl/hold_bars if present
-              # but force exit.ttl from env (or config.yml if set)
-              ttl_from_env = os.environ.get("TTL")
-              if ttl_from_env is not None:
-                  try:
-                      ttl_val = int(ttl_from_env)
-                  except Exception:
-                      pass
+              base["trade"]["hold_bars"] = ttl_val
               base["exit"]["ttl"] = ttl_val
-              eff.write_text(yaml.safe_dump(base, sort_keys=False) if yaml else "")
-              print(f"[exit_bridge] wrote {eff}")
-              return str(eff)
+              CFG_EFF.parent.mkdir(parents=True, exist_ok=True)
+              CFG_EFF.write_text(yaml.safe_dump(base, sort_keys=False))
+              print(f"[exit_bridge] wrote {CFG_EFF} (ttl={ttl_val})")
 
           def find_runner():
-              # Priority: tmp/trade/run_4u.py -> tmp/trade/runner.py -> backtest/runner.py -> backtest/engine.py
-              cands = [
-                  Path("tmp/trade/run_4u.py"),
-                  Path("tmp/trade/runner.py"),
-                  Path("backtest/runner.py"),
-                  Path("backtest/engine.py"),
-              ]
+              # priority: tmp/trade/runner.py -> tmp/trade/run_4u.py -> backtest/runner.py -> backtest/engine.py
+              cands = [TR/"runner.py", TR/"run_4u.py", Path("backtest")/"runner.py", Path("backtest")/"engine.py"]
               for c in cands:
                   if c.exists():
                       return c
-              raise FileNotFoundError("No engine entry found (run_4u.py or backtest/runner.py or backtest/engine.py)")
+              raise FileNotFoundError("No engine entry found")
 
-          def run_once():
-              data_path = select_csv()
-              base_cfg = Path("tmp/trade/conf/config.yml")
-              # choose a TTL default from config (if any), else env, else 0
-              ttl_default = int(os.environ.get("TTL", "0"))
-              eff_cfg = write_effective_cfg(base_cfg, ttl_default)
-
-              runner = find_runner()
-              # Always pass args to unify interfaces
+          def call_runner(runner, data_path):
               argv = [str(runner),
-                      "--data_path", data_path,
-                      "--config", eff_cfg,
+                      "--data_path", str(data_path),
+                      "--config", str(CFG_EFF),
                       "--out_dir", "_out_4u"]
               sys.argv = argv
-              print(f"[RUNNER] {runner} argv={argv[1:]}")
-
-              # Try to run; if engine.py uses import style, still works
+              print("[RUNNER]", runner, "argv=", argv[1:])
               runpy.run_path(str(runner), run_name="__main__")
 
-              # Normalize trades.csv (search then copy)
-              found = None
-              for p in OUT.rglob("trades.csv"):
-                  found = p
-                  break
-              if not found:
-                  # search project-wide (some engines write elsewhere)
-                  for p in Path(".").rglob("trades.csv"):
-                      found = p
-                      break
-              if not found:
-                  raise FileNotFoundError("trades.csv not produced by engine")
-              target = OUT / "trades.csv"
-              if found.resolve() != target.resolve():
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copyfile(str(found), str(target))
-              print(f"[collect] trades.csv -> {target}")
-              return True
+          def normalize_trades():
+              # prefer OUT first
+              for p in [OUT/"trades.csv"]:
+                  if p.exists(): return p
+              # otherwise search tree
+              for p in ROOT.rglob("trades.csv"):
+                  if p.is_file():
+                      tgt = OUT/"trades.csv"
+                      if p.resolve()!=tgt.resolve():
+                          shutil.copy2(p, tgt)
+                      return tgt
+              return None
 
-          if __name__ == "__main__":
-              ok = run_once()
-              print(json.dumps({"ok": bool(ok)}))
-          PY
-          python -m pyflakes run_engine.py || true
-
-      - name: Run A (ttl=1)
-        env:
-          TTL: "1"
-        run: |
-          set -Eeuo pipefail
-          # Config A
-          cat > tmp/trade/conf/config.yml <<'YML'
-          trade:
-            tp_pct: 0.010
-            sl_pct: 0.005
-            hold_bars: 1
-            be_on: false
-            trail_on: false
-          exit:
-            ttl: 1
-          YML
-          python -u run_engine.py
-          mv -f _out_4u/trades.csv _out_4u/trades_A.csv
-
-      - name: Run B (ttl=5000)
-        env:
-          TTL: "5000"
-        run: |
-          set -Eeuo pipefail
-          # Config B
-          cat > tmp/trade/conf/config.yml <<'YML'
-          trade:
-            tp_pct: 0.010
-            sl_pct: 0.005
-            hold_bars: 5000
-            be_on: false
-            trail_on: false
-          exit:
-            ttl: 5000
-          YML
-          python -u run_engine.py
-          mv -f _out_4u/trades.csv _out_4u/trades_B.csv
-
-      - name: Assert A != B
-        run: |
-          set -Eeuo pipefail
-          python - <<'PY'
-          import hashlib, sys
-          def sha(p):
-              h = hashlib.sha256()
-              with open(p,'rb') as f:
-                  while True:
-                      b=f.read(1024*1024)
-                      if not b: break
+          def sha256(p):
+              h=hashlib.sha256()
+              with open(p,"rb") as f:
+                  for b in iter(lambda: f.read(1<<20), b""):
                       h.update(b)
               return h.hexdigest()
-          a = sha("_out_4u/trades_A.csv")
-          b = sha("_out_4u/trades_B.csv")
-          print("SHA_A", a)
-          print("SHA_B", b)
-          if a == b:
-              print("Error: Exit/TTL not applied (A==B)")
-              sys.exit(3)
+
+          if __name__=="__main__":
+              ttl = int(os.environ.get("EXIT_TTL","0"))
+              data = select_csv()
+              overlay_cfg(ttl)
+              runner = find_runner()
+              call_runner(runner, data)
+              t = normalize_trades()
+              print("[collect] trades path:", t, "exists:", bool(t and Path(t).exists()))
+              if not t:
+                  raise SystemExit(2)
+              print("TRADES_SHA256", sha256(t))
           PY
+
+      - name: Run A (TTL=${{ github.event.inputs.TTL_A }})
+        env:
+          EXIT_TTL: ${{ github.event.inputs.TTL_A }}
+          DATA_CSV: ${{ github.event.inputs.DATA_CSV }}
+        run: |
+          set -Eeuo pipefail
+          # base config (kept small; overlay will set TTL & hold_bars)
+          mkdir -p tmp/trade/conf
+          cat > tmp/trade/conf/config.yml <<'YML'
+          trade:
+            tp_pct: 0.010
+            sl_pct: 0.005
+            be_on: false
+            trail_on: false
+          YML
+          python3 -u run_engine.py
+          cp -f _out_4u/trades.csv _out_4u/trades_A.csv
+          sha256sum _out_4u/trades_A.csv | awk '{print $1}' > _out_4u/trades_A.sha256
+
+      - name: Clean BETWEEN runs
+        run: rm -f _out_4u/trades.csv
+
+      - name: Run B (TTL=${{ github.event.inputs.TTL_B }})
+        env:
+          EXIT_TTL: ${{ github.event.inputs.TTL_B }}
+          DATA_CSV: ${{ github.event.inputs.DATA_CSV }}
+        run: |
+          set -Eeuo pipefail
+          python3 -u run_engine.py
+          cp -f _out_4u/trades.csv _out_4u/trades_B.csv
+          sha256sum _out_4u/trades_B.csv | awk '{print $1}' > _out_4u/trades_B.sha256
+
+      - name: Assert A != B (TTL effect)
+        run: |
+          set -Eeuo pipefail
+          A=$(cat _out_4u/trades_A.sha256 2>/dev/null || echo "")
+          B=$(cat _out_4u/trades_B.sha256 2>/dev/null || echo "")
+          echo "SHA_A $A"; echo "SHA_B $B"
+          if [ -z "$A" ] || [ -z "$B" ]; then
+            echo "Error: missing trades_A/B.sha256"; exit 2
+          fi
+          if [ "$A" = "$B" ]; then
+            echo "Error: Exit/TTL not applied (A==B)"; exit 3
+          fi
 
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -208,5 +213,7 @@ jobs:
           path: |
             _out_4u/trades_A.csv
             _out_4u/trades_B.csv
+            _out_4u/trades_A.sha256
+            _out_4u/trades_B.sha256
             tmp/trade/conf/config.yml
             tmp/trade/conf/config.effective.yml
