@@ -1,13 +1,13 @@
-name: backtest (strict v1.1.7, robust fetch)
+name: backtest (strict v1.1.7, path-or-url only)
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Code zip (path, URL, or release asset name)
+        description: Code zip (repo path OR https URL)
         required: true
         default: trade_v1.1.7.zip
       DATA_ZIP:
-        description: Data zip (path, URL, or release asset name)
+        description: Data zip (repo path OR https URL)
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -38,83 +38,49 @@ jobs:
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      # ---- Robust fetch for CODE_ZIP ----
-      - name: Fetch code zip (path/URL/release)
+      # ---- CODE_ZIP: repo path or URL only ----
+      - name: Fetch code zip (path or URL)
         shell: bash
         env:
           INPUT_CODE_ZIP: ${{ github.event.inputs.CODE_ZIP }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p tmp/fetch
           TARGET="tmp/fetch/code.zip"
-
-          fetch_ok=0
           if [[ "${INPUT_CODE_ZIP}" =~ ^https?:// ]]; then
-            echo "[fetch] downloading from URL: ${INPUT_CODE_ZIP}"
-            curl -sSfL -o "${TARGET}" "${INPUT_CODE_ZIP}" && fetch_ok=1 || fetch_ok=0
-          elif [[ -f "${INPUT_CODE_ZIP}" ]]; then
-            echo "[fetch] using workspace relative file: ${INPUT_CODE_ZIP}"
-            cp -f "${INPUT_CODE_ZIP}" "${TARGET}" && fetch_ok=1 || fetch_ok=0
+            echo "[fetch] URL: ${INPUT_CODE_ZIP}"
+            curl -sSfL -o "${TARGET}" "${INPUT_CODE_ZIP}"
           elif [[ -f "${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}" ]]; then
-            echo "[fetch] using workspace file: ${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}"
-            cp -f "${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}" "${TARGET}" && fetch_ok=1 || fetch_ok=0
+            echo "[fetch] repo file: ${INPUT_CODE_ZIP}"
+            cp -f "${GITHUB_WORKSPACE}/${INPUT_CODE_ZIP}" "${TARGET}"
+          else
+            echo "::error::CODE_ZIP not found in repo and not a URL. Commit it to the repo or provide a URL."
+            exit 66
           fi
-
-          if [[ "${fetch_ok}" -eq 0 ]]; then
-            if command -v gh >/dev/null 2>&1; then
-              echo "[fetch] trying release asset: ${INPUT_CODE_ZIP}"
-              gh release download -R "${GITHUB_REPOSITORY}" --pattern "${INPUT_CODE_ZIP}" --clobber --dir tmp/fetch
-              mv "tmp/fetch/${INPUT_CODE_ZIP}" "${TARGET}"
-              fetch_ok=1
-            else
-              echo "::error::gh CLI not available and file not found. Provide path or URL for CODE_ZIP."
-              exit 66
-            fi
-          fi
-
-          test -s "${TARGET}" || { echo "::error::code zip not fetched"; exit 66; }
+          test -s "${TARGET}" || { echo "::error::empty code zip"; exit 66; }
           echo "CODE_ZIP_ABS=${GITHUB_WORKSPACE}/${TARGET}" >> "$GITHUB_ENV"
-          echo "[fetch] code zip at: ${GITHUB_WORKSPACE}/${TARGET}"
 
-      # ---- Robust fetch for DATA_ZIP ----
-      - name: Fetch data zip (path/URL/release)
+      # ---- DATA_ZIP: repo path or URL only ----
+      - name: Fetch data zip (path or URL)
         shell: bash
         env:
           INPUT_DATA_ZIP: ${{ github.event.inputs.DATA_ZIP }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p tmp/fetch
           TARGET="tmp/fetch/data.zip"
-
-          fetch_ok=0
           if [[ "${INPUT_DATA_ZIP}" =~ ^https?:// ]]; then
-            echo "[fetch] downloading from URL: ${INPUT_DATA_ZIP}"
-            curl -sSfL -o "${TARGET}" "${INPUT_DATA_ZIP}" && fetch_ok=1 || fetch_ok=0
-          elif [[ -f "${INPUT_DATA_ZIP}" ]]; then
-            echo "[fetch] using workspace relative file: ${INPUT_DATA_ZIP}"
-            cp -f "${INPUT_DATA_ZIP}" "${TARGET}" && fetch_ok=1 || fetch_ok=0
+            echo "[fetch] URL: ${INPUT_DATA_ZIP}"
+            curl -sSfL -o "${TARGET}" "${INPUT_DATA_ZIP}"
           elif [[ -f "${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}" ]]; then
-            echo "[fetch] using workspace file: ${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}"
-            cp -f "${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}" "${TARGET}" && fetch_ok=1 || fetch_ok=0
+            echo "[fetch] repo file: ${INPUT_DATA_ZIP}"
+            cp -f "${GITHUB_WORKSPACE}/${INPUT_DATA_ZIP}" "${TARGET}"
+          else
+            echo "::error::DATA_ZIP not found in repo and not a URL. Commit it to the repo or provide a URL."
+            exit 66
           fi
-
-          if [[ "${fetch_ok}" -eq 0 ]]; then
-            if command -v gh >/dev/null 2>&1; then
-              echo "[fetch] trying release asset: ${INPUT_DATA_ZIP}"
-              gh release download -R "${GITHUB_REPOSITORY}" --pattern "${INPUT_DATA_ZIP}" --clobber --dir tmp/fetch
-              mv "tmp/fetch/${INPUT_DATA_ZIP}" "${TARGET}"
-              fetch_ok=1
-            else
-              echo "::error::gh CLI not available and file not found. Provide path or URL for DATA_ZIP."
-              exit 66
-            fi
-          fi
-
-          test -s "${TARGET}" || { echo "::error::data zip not fetched"; exit 66; }
+          test -s "${TARGET}" || { echo "::error::empty data zip"; exit 66; }
           echo "DATA_ZIP_ABS=${GITHUB_WORKSPACE}/${TARGET}" >> "$GITHUB_ENV"
-          echo "[fetch] data zip at: ${GITHUB_WORKSPACE}/${TARGET}"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
