@@ -99,114 +99,67 @@ jobs:
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
           echo "[csv] $CSV"
 
-      - name: Preflight (schema/tz/missing)  # 파일로 저장→실행 (YAML 충돌 방지)
+      - name: Preflight (schema/tz/missing)  # 헤어독 없이 python -c
         shell: bash
         run: |
           set -euo pipefail
-          cat > preflight.py <<'PY'
-import os, json, pandas as pd
-csv = os.environ['CSV_PATH']
-df  = pd.read_csv(csv, nrows=10000)
+          python -c "import os,json,pandas as pd; csv=os.environ['CSV_PATH']; df=pd.read_csv(csv, nrows=10000); \
+miss=[c for c in ['open_time','open','high','low','close','volume'] if c not in df.columns]; \
+m=pd.to_numeric(df['open_time'], errors='coerce').max() if 'open_time' in df.columns else -1; \
+hint='ms' if (m is not None and m>1e12) else 's'; \
+print(json.dumps({'path':csv,'rows_scanned':int(len(df)),'columns':list(df.columns),'missing':miss,'open_time_hint':hint}));" \
+          | tee "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/preflight.json"
 
-needed  = ['open_time','open','high','low','close','volume']
-missing = [c for c in needed if c not in df.columns]
-
-# 타임스탬프 힌트
-ts_max = pd.to_numeric(df['open_time'], errors='coerce').max() if 'open_time' in df.columns else -1
-hint   = "ms" if ts_max and ts_max > 1e12 else "s"
-
-print(json.dumps({
-  "path": csv,
-  "rows_scanned": int(len(df)),
-  "columns": list(df.columns),
-  "missing": missing,
-  "open_time_hint": hint
-}))
-PY
-          mkdir -p "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          python preflight.py | tee "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}/preflight.json"
-
-      - name: Override config (polyfill, asym thr) + snapshot
+      - name: Override config (polyfill, asym thr) + snapshot  # 헤어독 없이 python -c
         shell: bash
         run: |
           set -euo pipefail
-          cat > override_cfg.py <<'PY'
-import sys, pathlib, yaml, hashlib, json, os
-run_dir   = pathlib.Path(os.environ['RUN_DIR'])
-thr_us    = float(os.environ['THR_US'])
-thr_eu    = float(os.environ['THR_EU'])
-thr_asia  = float(os.environ['THR_ASIA'])
-hold      = int(os.environ['HOLD'])
-tp        = float(os.environ['TP'])
-sl        = float(os.environ['SL'])
-flt       = os.environ['FILTER']
-be        = int(os.environ['BE'])
-conf = run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
-eff  = conf/'config.effective.yml'
-base = conf/'config.yml'
-cfg = {
-  'thr_by_session': {'US':thr_us,'EU':thr_eu,'ASIA':thr_asia},
-  'thr': thr_us, 'threshold': thr_us,
-  'tp_pct': tp, 'tp': tp, 'take_profit': tp,
-  'sl_pct': sl, 'sl': sl, 'stop_loss': sl,
-  'hold_bars': hold, 'hold': hold, 'holding_period': hold,
-  'allow_long': True, 'allow_short': True,
-  'fees_bps_per_leg': 3.0, 'taker_bps': 3.0, 'slippage_bps': 0.0,
-  'calibration': 'isotonic',
-  'beta': 1.6, 'temp': 6.0,
-  '__debug_tag__': f"thrUS{thr_us}_EU{thr_eu}_AS{thr_asia}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
-}
-if flt=='ema': cfg['filter_ema_50_200']=True
-if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
-text = yaml.safe_dump(cfg, sort_keys=False).encode()
-for p in (eff, base): p.write_bytes(text)
-print(json.dumps({"wrote":[str(eff), str(base)], "sha256": hashlib.sha256(text).hexdigest()}))
-PY
-          python override_cfg.py | tee _override_log.json
+          python -c "import os,sys,pathlib,yaml,hashlib,json; \
+run_dir=os.environ['RUN_DIR']; thr_us=float(os.environ['THR_US']); thr_eu=float(os.environ['THR_EU']); thr_asia=float(os.environ['THR_ASIA']); \
+hold=int(os.environ['HOLD']); tp=float(os.environ['TP']); sl=float(os.environ['SL']); flt=os.environ['FILTER']; be=int(os.environ['BE']); \
+conf=pathlib.Path(run_dir)/'conf'; conf.mkdir(parents=True, exist_ok=True); eff=conf/'config.effective.yml'; base=conf/'config.yml'; \
+cfg={'thr_by_session':{'US':thr_us,'EU':thr_eu,'ASIA':thr_asia},'thr':thr_us,'threshold':thr_us,'tp_pct':tp,'tp':tp,'take_profit':tp, \
+'sl_pct':sl,'sl':sl,'stop_loss':sl,'hold_bars':hold,'hold':hold,'holding_period':hold,'allow_long':True,'allow_short':True, \
+'fees_bps_per_leg':3.0,'taker_bps':3.0,'slippage_bps':0.0,'calibration':'isotonic','beta':1.6,'temp':6.0, \
+'__debug_tag__':f'thrUS{thr_us}_EU{thr_eu}_AS{thr_asia}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}'}; \
+import io; text=yaml.safe_dump(cfg, sort_keys=False).encode(); open(eff,'wb').write(text); open(base,'wb').write(text); \
+print(json.dumps({'wrote':[str(eff),str(base)],'sha256':hashlib.sha256(text).hexdigest()}))"
           SNAP="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
           cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP/_cfg_snapshot.yml"
           sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP/_cfg_snapshot.sha256"
           echo "[snap] _cfg_snapshot.* created at $SNAP"
 
-      - name: Run backtest + inject applied config (no heredoc)
+      - name: Run backtest
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
-          cat > inject_applied.py <<'PY'
-import json, sys, pathlib, yaml, hashlib, os
-run_dir = pathlib.Path(os.environ['RUN_DIR'])
-out_dir = pathlib.Path(os.environ['GITHUB_WORKSPACE'])/os.environ['OUT_DIR']
-conf    = run_dir/'conf'/'config.effective.yml'
-cfg = yaml.safe_load(conf.read_text()) if conf.exists() else {}
-h   = hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest()
-print("APPLIED_CONFIG:", json.dumps({"sha256":h, **cfg}, ensure_ascii=False))
-
-def load(p):
-    try: return json.loads(p.read_text())
-    except: return {}
-def dump(p, obj):
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
-
-summary = out_dir/'summary.json'
-gating  = out_dir/'gating_debug.json'
-sj = load(summary); gj = load(gating)
-
-thr = (cfg.get("thr_by_session") or {})
-if thr and isinstance(thr, dict):
-    gj.setdefault("thr_by_session", thr)
-for k in ("beta","temp"):
-    if k in cfg and k not in gj: gj[k]=cfg[k]
-for src,dst in (("tp_pct","tp_pct"),("tp","tp_pct"),("take_profit","tp_pct"),
-                ("sl_pct","sl_pct"),("sl","sl_pct"),("stop_loss","sl_pct"),
-                ("hold_bars","hold_bars"),("holding_period","hold_bars"),("hold","hold_bars")):
-    if src in cfg and dst not in sj: sj[dst]=cfg[src]
-sj.setdefault("__config_sha256__", h); gj.setdefault("__config_sha256__", h)
-dump(summary, sj); dump(gating, gj)
-PY
-          python inject_applied.py
+      - name: Inject APPLIED_CONFIG to outputs (no heredoc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "import os,json,hashlib,yaml,pathlib; \
+run_dir=pathlib.Path(os.environ['RUN_DIR']); out_dir=pathlib.Path(os.environ['GITHUB_WORKSPACE'])/os.environ['OUT_DIR']; \
+conf=run_dir/'conf'/'config.effective.yml'; \
+cfg=yaml.safe_load(conf.read_text()) if conf.exists() else {}; \
+h=hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest(); \
+print('APPLIED_CONFIG:', json.dumps({'sha256':h, **cfg}, ensure_ascii=False)); \
+def load(p): \
+  import json; \
+  try: return json.loads(p.read_text()) \
+  except: return {}; \
+def dump(p,obj): p.write_text(json.dumps(obj, ensure_ascii=False, indent=2)); \
+summary=out_dir/'summary.json'; gating=out_dir/'gating_debug.json'; \
+sj=load(summary); gj=load(gating); \
+thr=(cfg.get('thr_by_session') or {}); \
+isinstance(thr,dict) and gj.setdefault('thr_by_session',thr); \
+[k for k in ['beta','temp'] if (k in cfg and k not in gj and not gj.setdefault(k,cfg[k]))]; \
+for src,dst in [('tp_pct','tp_pct'),('tp','tp_pct'),('take_profit','tp_pct'),('sl_pct','sl_pct'),('sl','sl_pct'),('stop_loss','sl_pct'),('hold_bars','hold_bars'),('holding_period','hold_bars'),('hold','hold_bars')]: \
+  (src in cfg and dst not in sj) and sj.setdefault(dst,cfg[src]); \
+sj.setdefault('__config_sha256__',h); gj.setdefault('__config_sha256__',h); \
+dump(summary,sj); dump(gating,gj)"
           ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
       - name: Verify hashes & keys
