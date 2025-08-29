@@ -1,4 +1,4 @@
-name: multigrid-v1.1.10
+name: bactest10
 
 on:
   workflow_dispatch:
@@ -17,35 +17,22 @@ on:
         default: ETHUSDT_1min_2020_2025.csv
 
 jobs:
-  grid:
+  run:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      # 콤비 폭발 방지: include로 필요한 조합만 실행
-      matrix:
-        include:
-          # 세션 비대칭 THR 세트 A/B + HOLD 6/8 + BE 3/5 + TP/SL 2x2 + FILTER ema/none
-          # Set A
-          - {THR_US: 3.9, THR_EU: 3.7, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
-          - {THR_US: 3.9, THR_EU: 3.7, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
-          - {THR_US: 4.1, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
-          - {THR_US: 4.1, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
-          # Set B
-          - {THR_US: 4.3, THR_EU: 4.0, THR_ASIA: 3.7, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
-          - {THR_US: 4.3, THR_EU: 4.0, THR_ASIA: 3.7, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
-          - {THR_US: 4.1, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
-          - {THR_US: 4.1, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
-          # 탐색 보완(득점 좋은 쪽 두어 개 더)
-          - {THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.4, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
-          - {THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
-          - {THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.5, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
-          - {THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.4, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_DIR: _out_4u/run
       PYVER: '3.11'
+      # 파라미터(원하면 변경)
+      THR_US: '4.1'
+      THR_EU: '3.9'
+      THR_ASIA: '3.6'
+      HOLD: '6'
+      TP: '0.0038'
+      SL: '0.0020'
+      FILTER: 'ema'
+      BE: '5'
 
     steps:
       - name: Checkout (pinned)
@@ -60,20 +47,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          resolve() {
-            local in="$1" outvar="$2" path=""
+          res() {
+            local in="$1" out="$2" path=""
+            local base="$(basename "$in")"
             if [[ -f "$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
-            elif [[ -f "${GITHUB_WORKSPACE}/$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
-            else
-              local base="$(basename "$in")"
-              path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
+            else path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
             fi
             [[ -n "$path" && -f "$path" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
-            echo "${outvar}=${path}" >> "$GITHUB_ENV"
+            echo "${out}=${path}" >> "$GITHUB_ENV"
             echo "[resolved] $in -> $path"
           }
-          resolve "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
-          resolve "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
+          res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
+          res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
 
       - name: Unpack code and data
         shell: bash
@@ -88,15 +73,6 @@ jobs:
             echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"
             echo "[debug] RUN_DIR -> $(dirname "$CAND")"
           fi
-          echo "[debug] CSV files:"; find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' -print || true
-
-      - name: Install deps
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip >/dev/null
-          if [ -f "$RUN_DIR/requirements.txt" ]; then pip install -r "$RUN_DIR/requirements.txt"; else pip install pandas numpy pyyaml >/dev/null; fi
-          pip install jqpy >/dev/null || true  # 경량 jq 대체 (선택)
 
       - name: Detect CSV (ABS)
         shell: bash
@@ -116,106 +92,88 @@ jobs:
           set -euo pipefail
           python - <<'PY'
 import os, json, pandas as pd
-csv=os.environ['CSV_PATH']
-df=pd.read_csv(csv, nrows=10000)
-miss=[c for c in ['open_time','open','high','low','close','volume'] if c not in df.columns]
-hint="ms" if 'open_time' in df.columns and df['open_time'].max()>1e12 else "s"
-print(json.dumps({"path":csv,"rows_scanned":len(df),"columns":list(df.columns),"missing":miss,"open_time_hint":hint}))
+csv = os.environ['CSV_PATH']
+df = pd.read_csv(csv, nrows=10000)
+miss = [c for c in ['open_time','open','high','low','close','volume'] if c not in df.columns]
+hint = "ms" if 'open_time' in df.columns and pd.to_numeric(df['open_time'], errors='coerce').max() > 1e12 else "s"
+print(json.dumps({
+  "path": csv,
+  "rows_scanned": int(len(df)),
+  "columns": list(df.columns),
+  "missing": miss,
+  "open_time_hint": hint
+}))
 PY
 
-      # v1.1.10: Override + polyfill + 세션 비대칭 + 해시
-      - name: Override config (v1.1.10 polyfill, asym thr)
+      - name: Override config (polyfill, asym thr)
         shell: bash
         run: |
           set -euo pipefail
-          python - "$RUN_DIR" "${{ matrix.THR_US }}" "${{ matrix.THR_EU }}" "${{ matrix.THR_ASIA }}" "${{ matrix.HOLD }}" "${{ matrix.TP }}" "${{ matrix.SL }}" "${{ matrix.FILTER }}" "${{ matrix.BE }}" <<'PY'
-          import sys, pathlib, yaml, hashlib
-          run_dir=pathlib.Path(sys.argv[1])
-          thr_us=float(sys.argv[2]); thr_eu=float(sys.argv[3]); thr_asia=float(sys.argv[4])
-          hold=int(sys.argv[5]); tp=float(sys.argv[6]); sl=float(sys.argv[7]); flt=sys.argv[8]; be=int(sys.argv[9])
-          conf=run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
-          eff=conf/'config.effective.yml'; base=conf/'config.yml'
-          cfg={
-            # 세션별 임계
-            'thr_by_session': {'US':thr_us,'EU':thr_eu,'ASIA':thr_asia},
-            'thr': thr_us, 'threshold': thr_us,  # fallback
-            # TP/SL 동의어
-            'tp_pct': tp, 'tp': tp, 'take_profit': tp,
-            'sl_pct': sl, 'sl': sl, 'stop_loss': sl,
-            # HOLD 동의어
-            'hold_bars': hold, 'hold': hold, 'holding_period': hold,
-            # 방향/수수료/보정
-            'allow_long': True, 'allow_short': True,
-            'fees_bps_per_leg': 3.0, 'taker_bps': 3.0, 'slippage_bps': 0.0,
-            'calibration': 'isotonic',
-            # 게이팅/온도
-            'beta': 1.6, 'temp': 6.0,
-            # 디버그
-            '__debug_tag__': f"thrUS{thr_us}_EU{thr_eu}_AS{thr_asia}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
-          }
-          if flt=='ema': cfg['filter_ema_50_200']=True
-          if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
-          text=yaml.safe_dump(cfg, sort_keys=False).encode()
-          for p in (eff,base): p.write_bytes(text)
-          print("[override] wrote", eff, "sha256:", hashlib.sha256(text).hexdigest())
-          PY
+          python - "$RUN_DIR" "${THR_US}" "${THR_EU}" "${THR_ASIA}" "${HOLD}" "${TP}" "${SL}" "${FILTER}" "${BE}" <<'PY'
+import sys, pathlib, yaml, hashlib
+run_dir=pathlib.Path(sys.argv[1])
+thr_us=float(sys.argv[2]); thr_eu=float(sys.argv[3]); thr_asia=float(sys.argv[4])
+hold=int(sys.argv[5]); tp=float(sys.argv[6]); sl=float(sys.argv[7]); flt=sys.argv[8]; be=int(sys.argv[9])
+conf=run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
+eff=conf/'config.effective.yml'; base=conf/'config.yml'
+cfg={
+  'thr_by_session': {'US':thr_us,'EU':thr_eu,'ASIA':thr_asia},
+  'thr': thr_us, 'threshold': thr_us,
+  'tp_pct': tp, 'tp': tp, 'take_profit': tp,
+  'sl_pct': sl, 'sl': sl, 'stop_loss': sl,
+  'hold_bars': hold, 'hold': hold, 'holding_period': hold,
+  'allow_long': True, 'allow_short': True,
+  'fees_bps_per_leg': 3.0, 'taker_bps': 3.0, 'slippage_bps': 0.0,
+  'calibration': 'isotonic',
+  'beta': 1.6, 'temp': 6.0,
+  '__debug_tag__': f"thrUS{thr_us}_EU{thr_eu}_AS{thr_asia}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
+}
+if flt=='ema': cfg['filter_ema_50_200']=True
+if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
+text=yaml.safe_dump(cfg, sort_keys=False).encode()
+for p in (eff,base): p.write_bytes(text)
+print("[override] sha256:", hashlib.sha256(text).hexdigest())
+PY
           SNAP="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
           mkdir -p "$SNAP"
           cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP/_cfg_snapshot.yml"
           sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP/_cfg_snapshot.sha256"
           echo "[snap] _cfg_snapshot.* created"
 
-      # v1.1.10: APPLIED_CONFIG 로거 + 출력 주입기(코드패치 없이)
-      - name: Write APPLIED_CONFIG logger (v1.1.10 shim)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUN_DIR/tools"
-          cat > "$RUN_DIR/tools/applied_config.py" <<'PY'
-import json, sys, pathlib, yaml, hashlib
-run_dir = pathlib.Path(sys.argv[1])
-out_dir = pathlib.Path(sys.argv[2])
-conf = run_dir/'conf'/'config.effective.yml'
-cfg = yaml.safe_load(conf.read_text()) if conf.exists() else {}
-h = hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest()
-print("APPLIED_CONFIG:", json.dumps({"sha256":h, **cfg}, ensure_ascii=False))
-# 실행 후 summary/gating이 키를 노출하지 않는 엔진을 위한 보강 주입
-summary = out_dir/'summary.json'
-gating = out_dir/'gating_debug.json'
-def load(p): 
-    try: return json.loads(p.read_text())
-    except: return {}
-def dump(p, obj):
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
-sumj = load(summary)
-gatej = load(gating)
-# 핵심 키 주입(없으면 생성)
-thr = (cfg.get("thr_by_session") or {})
-if thr and isinstance(thr, dict):
-    gatej.setdefault("thr_by_session", thr)
-for k in ("beta","temp"): 
-    if k in cfg and k not in gatej: gatej[k]=cfg[k]
-for src,dst in (("tp_pct","tp_pct"),("tp","tp_pct"),("take_profit","tp_pct"),
-                ("sl_pct","sl_pct"),("sl","sl_pct"),("stop_loss","sl_pct"),
-                ("hold_bars","hold_bars"),("holding_period","hold_bars"),("hold","hold_bars")):
-    if src in cfg and dst not in sumj: sumj[dst]=cfg[src]
-# 메타 태그/해시
-sumj.setdefault("__config_sha256__", h)
-gatej.setdefault("__config_sha256__", h)
-dump(summary, sumj); dump(gating, gatej)
-PY
-
-      - name: Run backtest
+      - name: Run backtest + inject applied config
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          # v1.1.10: 실행 직후 APPLIED_CONFIG 출력 & 주입
-          python "$RUN_DIR/tools/applied_config.py" "$RUN_DIR" "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          python - "$RUN_DIR" "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" <<'PY'
+import json, sys, pathlib, yaml, hashlib
+run_dir=pathlib.Path(sys.argv[1]); out_dir=pathlib.Path(sys.argv[2])
+conf=run_dir/'conf'/'config.effective.yml'
+cfg=yaml.safe_load(conf.read_text()) if conf.exists() else {}
+h=hashlib.sha256((yaml.safe_dump(cfg, sort_keys=False)).encode()).hexdigest()
+print("APPLIED_CONFIG:", json.dumps({"sha256":h, **cfg}, ensure_ascii=False))
+def load(p): 
+    try: return json.loads(p.read_text())
+    except: return {}
+def dump(p, obj):
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2))
+summary=out_dir/'summary.json'; gating=out_dir/'gating_debug.json'
+sj=load(summary); gj=load(gating)
+thr=(cfg.get("thr_by_session") or {})
+if thr and isinstance(thr, dict): gj.setdefault("thr_by_session", thr)
+for k in ("beta","temp"):
+    if k in cfg and k not in gj: gj[k]=cfg[k]
+for src,dst in (("tp_pct","tp_pct"),("tp","tp_pct"),("take_profit","tp_pct"),
+                ("sl_pct","sl_pct"),("sl","sl_pct"),("stop_loss","sl_pct"),
+                ("hold_bars","hold_bars"),("holding_period","hold_bars"),("hold","hold_bars")):
+    if src in cfg and dst not in sj: sj[dst]=cfg[src]
+sj.setdefault("__config_sha256__", h); gj.setdefault("__config_sha256__", h)
+dump(summary, sj); dump(gating, gj)
+PY
           ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
 
-      - name: Post-verify (hash integrity + key presence)
+      - name: Verify hashes & keys
         shell: bash
         run: |
           set -euo pipefail
@@ -224,13 +182,13 @@ PY
           POST_HASH="$(sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}')"
           echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
           [ "$PRE_HASH" = "$POST_HASH" ] || { echo "::error::override overwritten during run"; exit 71; }
-          echo "[summary keys]"; jq -r '.tp_pct, .sl_pct, .hold_bars, .__config_sha256__' "$OUT/summary.json" || true
-          echo "[gating  keys]"; jq -r '.thr_by_session, .beta, .temp, .__config_sha256__' "$OUT/gating_debug.json" || true
+          echo "[summary]"; jq -r '.tp_pct, .sl_pct, .hold_bars, .__config_sha256__' "$OUT/summary.json" || true
+          echo "[gating ]"; jq -r '.thr_by_session, .beta, .temp, .__config_sha256__' "$OUT/gating_debug.json" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: out_thrUS${{ matrix.THR_US }}_EU${{ matrix.THR_EU }}_AS${{ matrix.THR_ASIA }}_h${{ matrix.HOLD }}_be${{ matrix.BE }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_f${{ matrix.FILTER }}
+          name: out_single_run
           path: |
             ${{ env.OUT_DIR }}/summary.json
             ${{ env.OUT_DIR }}/gating_debug.json
@@ -239,66 +197,3 @@ PY
             ${{ env.OUT_DIR }}/preflight.json
             ${{ env.OUT_DIR }}/_cfg_snapshot.yml
             ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
-
-  aggregate:
-    needs: [grid]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          path: all_runs
-
-      - name: Make leaderboard (PF/Win/Return) and topN
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-import json, glob, pathlib, pandas as pd
-rows=[]
-for sumf in glob.glob("all_runs/**/summary.json", recursive=True):
-    outdir=pathlib.Path(sumf).parent
-    gate=outdir/"gating_debug.json"
-    sj=json.loads(open(sumf).read())
-    gj=json.loads(open(gate).read()) if gate.exists() else {}
-    tag = outdir.parts[1] if len(outdir.parts)>1 else outdir.name
-    thr = (gj.get("thr_by_session") or {})
-    rows.append({
-      "artifact": tag,
-      "thr_US": thr.get("US"), "thr_EU": thr.get("EU"), "thr_ASIA": thr.get("ASIA"),
-      "tp_pct": sj.get("tp_pct"), "sl_pct": sj.get("sl_pct"), "hold_bars": sj.get("hold_bars"),
-      "hit_rate": sj.get("hit_rate"), "profit_factor": sj.get("profit_factor"),
-      "mcc": sj.get("mcc"), "sharpe": sj.get("sharpe"),
-      "n_trades": sj.get("n_trades"), "config_sha256": sj.get("__config_sha256__")
-    })
-df=pd.DataFrame(rows)
-# trades.csv로 수익률/승률 보강
-rets=[]
-for t in glob.glob("all_runs/**/trades.csv", recursive=True):
-    import pandas as p
-    d=p.read_csv(t)
-    pnl_col=None
-    for c in ["pnl","ret","pnl_pct","PnL"]:
-        if c in d.columns: pnl_col=c; break
-    if pnl_col is None or len(d)==0: continue
-    ret=float(p.to_numeric(d[pnl_col], errors="coerce").fillna(0).sum())
-    win=float((d[pnl_col]>0).mean()) if len(d)>0 else None
-    tag=pathlib.Path(t).parent.parts[1]
-    rets.append({"artifact": tag, "return_%": ret*100.0, "win_%": (win*100.0 if win is not None else None)})
-df=df.merge(pd.DataFrame(rets), on="artifact", how="left")
-df.to_csv("leaderboard.csv", index=False)
-# Top-N 규칙: PF 우선, 동률 시 return%/win%/mcc
-df_sorted=df.sort_values(by=[c for c in ["profit_factor","return_%","win_%","mcc"] if c in df.columns], ascending=False)
-top=df_sorted.head(8)
-top.to_csv("topN_summary.csv", index=False)
-print("Saved: leaderboard.csv / topN_summary.csv")
-print(top[["artifact","profit_factor","return_%","win_%","mcc","n_trades"]].fillna("").to_string(index=False))
-PY
-
-      - name: Upload leaderboard
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: multigrid_v1.1.10_results
-          path: |
-            leaderboard.csv
-            topN_summary.csv
