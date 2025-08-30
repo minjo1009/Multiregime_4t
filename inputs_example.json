@@ -1,0 +1,9 @@
+{
+  "CODE_ZIP_URL": "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/strategy_v2_codepack_v2.1.3.zip",
+  "DATA_ZIP_URL": "https://raw.githubusercontent.com/<OWNER>/<REPO>/main/ETHUSDT_1min_2020_2025.zip",
+  "CSV_GLOB": "**/*ETHUSDT*1min*2020*2025*.csv",
+  "FEES_BPS": "7.5",
+  "CHAMPION_CONFIG": "grid_p0.83_tp2.2_sl0.45_cd34_mh12_ofi0.42_thi0.74",
+  "SPLITS": "4",
+  "TZ": "Asia/Seoul"
+}
