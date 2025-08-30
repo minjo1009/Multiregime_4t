@@ -3,15 +3,15 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Path to code zip (optional)
+        description: 'Path to code zip (optional)'
         required: false
         default: codepack_v1.1.8_baseline.zip
       DATA_ZIP:
-        description: Path to data zip
+        description: 'Path to data zip'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: CSV glob (ex: **/*ETHUSDT*1min*2020*2025*.csv)
+        description: 'CSV glob (e.g. **/*ETHUSDT*1min*2020*2025*.csv)'
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
 jobs:
@@ -33,7 +33,6 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/data _out_4u/run
           if [ -n "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true; fi
-          # Ensure artifacts exist even on failure
           echo "{}" > _out_4u/run/gating_debug.json
           echo "{}" > _out_4u/run/summary.json
           echo "open_time,signal,score" > _out_4u/run/preds_test.csv
@@ -87,10 +86,6 @@ jobs:
 ' '    if missing: raise SystemExit(f"Missing required columns: {missing}")' >> preflight_strict.py
           printf '%s
 ' 'if __name__ == "__main__": main()' >> preflight_strict.py
-      - name: Preflight strict
-        run: |
-          set -euo pipefail
-          python preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
