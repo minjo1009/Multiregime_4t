@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'Path to code zip'
+        description: 'Path or URL to code zip'
         required: true
         default: codepack_v1.1.8_baseline.zip
       DATA_ZIP:
-        description: 'Path to data zip'
+        description: 'Path or URL to data zip'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -23,12 +23,43 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip || true
           pip install pandas numpy pyyaml || true
-      - name: Unpack code and data
+      - name: Acquire CODE_ZIP and DATA_ZIP
+        env:
+          CODE_ZIP: "${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u/run
-          unzip -q "${{ github.event.inputs.CODE_ZIP }}" -d tmp/trade
-          unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true
+          # CODE_ZIP
+          CSRC=""
+          if [ -f "$CODE_ZIP" ]; then
+            CSRC="$CODE_ZIP"
+          elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then
+            echo "Downloading CODE_ZIP from URL: $CODE_ZIP"
+            curl -fL "$CODE_ZIP" -o tmp/trade/code.zip
+            CSRC="tmp/trade/code.zip"
+          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" ]; then
+            CSRC="${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}"
+          else
+            echo "CODE_ZIP not found as file or URL: $CODE_ZIP"
+            exit 1
+          fi
+          # DATA_ZIP
+          DSRC=""
+          if [ -f "$DATA_ZIP" ]; then
+            DSRC="$DATA_ZIP"
+          elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then
+            echo "Downloading DATA_ZIP from URL: $DATA_ZIP"
+            curl -fL "$DATA_ZIP" -o tmp/data/data.zip
+            DSRC="tmp/data/data.zip"
+          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" ]; then
+            DSRC="${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}"
+          else
+            echo "DATA_ZIP not found as file or URL: $DATA_ZIP"
+            exit 1
+          fi
+          unzip -q "$CSRC" -d tmp/trade || (echo "Unzip failed for $CSRC" && exit 1)
+          unzip -q "$DSRC" -d tmp/data || (echo "Unzip failed for $DSRC" && exit 1)
       - name: Preflight strict
         run: |
           set -euo pipefail

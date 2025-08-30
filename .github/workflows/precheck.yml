@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'Path to code zip (optional)'
+        description: 'Path or URL to code zip (optional)'
         required: false
         default: codepack_v1.1.8_baseline.zip
       DATA_ZIP:
-        description: 'Path to data zip'
+        description: 'Path or URL to data zip'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -23,21 +23,56 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip || true
           pip install pandas numpy pyyaml || true
-      - name: Prepare workspace
+      - name: Acquire DATA_ZIP and prepare
+        env:
+          DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
           mkdir -p tmp/data _out_4u/run
-          if [ -n "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true; fi
+          SRC=""
+          if [ -f "$DATA_ZIP" ]; then
+            SRC="$DATA_ZIP"
+          elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then
+            echo "Downloading DATA_ZIP from URL: $DATA_ZIP"
+            curl -fL "$DATA_ZIP" -o tmp/data/data.zip
+            SRC="tmp/data/data.zip"
+          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" ]; then
+            SRC="${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}"
+          else
+            echo "DATA_ZIP not found as file or URL: $DATA_ZIP"
+            exit 1
+          fi
+          unzip -q "$SRC" -d tmp/data || (echo "Unzip failed for $SRC" && exit 1)
           echo "{}" > _out_4u/run/gating_debug.json
           echo "{}" > _out_4u/run/summary.json
           echo "open_time,signal,score" > _out_4u/run/preds_test.csv
           echo "open_time,side,price,qty" > _out_4u/run/trades.csv
-      - name: Write preflight_strict.py (base64, no heredoc)
-        env:
-          PY_B64: "aW1wb3J0IGFyZ3BhcnNlLCBqc29uLCBvcywgZ2xvYiwgcGFuZGFzIGFzIHBkClJFUT1bIm9wZW5fdGltZSIsIm9wZW4iLCJoaWdoIiwibG93IiwiY2xvc2UiLCJ2b2x1bWUiXQphcD1hcmdwYXJzZS5Bcmd1bWVudFBhcnNlcigpOyBhcC5hZGRfYXJndW1lbnQoIi0tZGF0YS1yb290IixyZXF1aXJlZD1UcnVlKTsgYXAuYWRkX2FyZ3VtZW50KCItLWNzdi1nbG9iIixkZWZhdWx0PSIqKi8qLmNzdiIpOyBhcC5hZGRfYXJndW1lbnQoIi0tb3V0ZGlyIixyZXF1aXJlZD1UcnVlKTsgYT1hcC5wYXJzZV9hcmdzKCkKb3MubWFrZWRpcnMoYS5vdXRkaXIsIGV4aXN0X29rPVRydWUpCnBhdD1hLmNzdl9nbG9iIGlmIGEuY3N2X2dsb2IgZWxzZSAiKiovKi5jc3YiCnBhdGhzPWdsb2IuZ2xvYihvcy5wYXRoLmpvaW4oYS5kYXRhX3Jvb3QsIHBhdCksIHJlY3Vyc2l2ZT1UcnVlKQppZiBub3QgcGF0aHM6IHJhaXNlIFN5c3RlbUV4aXQoZiJObyBDU1YgZm91bmQgdW5kZXIge2EuZGF0YV9yb290fSB3aXRoIHBhdHRlcm4ge3BhdH0iKQpwcmVmPVtwIGZvciBwIGluIHBhdGhzIGlmICJFVEhVU0RUIiBpbiBvcy5wYXRoLmJhc2VuYW1lKHApLnVwcGVyKCldOyBjc3Y9KHByZWYgb3IgcGF0aHMpWzBdCmRmPXBkLnJlYWRfY3N2KGNzdiwgbnJvd3M9MjAwMCkKbWlzcz1bYyBmb3IgYyBpbiBSRVEgaWYgYyBub3QgaW4gZGYuY29sdW1uc10KcmVwPXsiY3N2X3BhdGgiOmNzdiwicm93c19yZWFkIjppbnQobGVuKGRmKSksIm1pc3NpbmciOm1pc3MsInJlcXVpcmVkIjpSRVEsInN0YXR1cyI6Im9rIiBpZiBub3QgbWlzcyBlbHNlICJmYWlsIn0Kd2l0aCBvcGVuKG9zLnBhdGguam9pbihhLm91dGRpciwic3VtbWFyeS5qc29uIiksInciKSBhcyBmOiBqc29uLmR1bXAocmVwLGYsaW5kZW50PTIpCm9wZW4ob3MucGF0aC5qb2luKGEub3V0ZGlyLCJnYXRpbmdfZGVidWcuanNvbiIpLCJhIikuY2xvc2UoKQpvcGVuKG9zLnBhdGguam9pbihhLm91dGRpciwicHJlZHNfdGVzdC5jc3YiKSwiYSIpLmNsb3NlKCkKb3Blbihvcy5wYXRoLmpvaW4oYS5vdXRkaXIsInRyYWRlcy5jc3YiKSwiYSIpLmNsb3NlKCkKaWYgbWlzczogcmFpc2UgU3lzdGVtRXhpdChmIk1pc3NpbmcgcmVxdWlyZWQgY29sdW1uczoge21pc3N9IikK"
+      - name: Write preflight_strict.py (inline, no heredoc)
         run: |
           set -euo pipefail
-          python -c "import os,base64; open('preflight_strict.py','wb').write(base64.b64decode(os.environ['PY_B64'].encode('ascii')))"
+          cat > preflight_strict.py <<'PYX'
+import argparse, json, os, glob
+import pandas as pd
+REQ=["open_time","open","high","low","close","volume"]
+ap=argparse.ArgumentParser()
+ap.add_argument("--data-root", required=True)
+ap.add_argument("--csv-glob", default="**/*.csv")
+ap.add_argument("--outdir", required=True)
+a=ap.parse_args()
+os.makedirs(a.outdir, exist_ok=True)
+pat=a.csv_glob if a.csv_glob else "**/*.csv"
+paths=glob.glob(os.path.join(a.data_root, pat), recursive=True)
+if not paths: raise SystemExit(f"No CSV found under {a.data_root} with pattern {pat}")
+pref=[p for p in paths if "ETHUSDT" in os.path.basename(p).upper()]; csv=(pref or paths)[0]
+df=pd.read_csv(csv, nrows=2000)
+miss=[c for c in REQ if c not in df.columns]
+rep={"csv_path":csv,"rows_read":int(len(df)),"missing":miss,"required":REQ,"status":"ok" if not miss else "fail"}
+with open(os.path.join(a.outdir,"summary.json"),"w") as f: json.dump(rep,f,indent=2)
+open(os.path.join(a.outdir,"gating_debug.json"),"a").close()
+open(os.path.join(a.outdir,"preds_test.csv"),"a").close()
+open(os.path.join(a.outdir,"trades.csv"),"a").close()
+if miss: raise SystemExit(f"Missing required columns: {miss}")
+PYX
       - name: Run preflight
         run: |
           set -euo pipefail
