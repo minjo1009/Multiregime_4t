@@ -100,17 +100,24 @@ jobs:
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"; echo "[csv] $CSV"
 
-          python - <<'PY' > "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
+          # --- 여기서부터: python here-doc을 'cat > 파일'로 우회 (YAML 파싱 이슈 제거)
+          cat > preflight.py <<'PY'
 import os, json, pandas as pd, numpy as np
-csv=os.environ['CSV_PATH']
-need=['open_time','open','high','low','close','volume']
-df=pd.read_csv(csv, nrows=200000)
-missing=[c for c in need if c not in df.columns]
+csv = os.environ['CSV_PATH']
+need = ['open_time','open','high','low','close','volume']
+df = pd.read_csv(csv, nrows=200000)
+missing = [c for c in need if c not in df.columns]
 max_ot = pd.to_numeric(df.get('open_time', pd.Series(dtype='float64')), errors='coerce').max()
-hint='ms' if (pd.notna(max_ot) and max_ot>1e12) else 's'
-print(json.dumps({"path":csv,"rows_scanned":int(len(df)),"columns":list(df.columns),"missing":missing,"open_time_hint":hint}))
+hint = 'ms' if (pd.notna(max_ot) and max_ot > 1e12) else 's'
+out = {"path": csv,
+       "rows_scanned": int(len(df)),
+       "columns": list(df.columns),
+       "missing": missing,
+       "open_time_hint": hint}
+print(json.dumps(out))
 PY
 
+          python preflight.py > "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
           cat "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
           miss=$(jq -r '.missing|length' "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json")
           [[ "$miss" == "0" ]] || { echo "::error::Required columns missing"; exit 65; }
