@@ -1,0 +1,117 @@
+name: Backtest-Grid-V2
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: 'Path or URL to V2 code zip (repo root file name allowed)'
+        required: true
+        default: strategy_v2_codepack_v2.0.zip
+      DATA_ZIP:
+        description: 'Path or URL to data zip (repo root file name allowed)'
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_GLOB:
+        description: 'CSV glob (e.g. **/*ETHUSDT*1min*2020*2025*.csv)'
+        required: false
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      P_THR_RANGE:
+        description: 'entry.p_thr.range constant (matrix covers trend only)'
+        required: false
+        default: "0.55"
+      SL_ATR:
+        description: 'exit.sl_atr constant (matrix covers tp_atr only)'
+        required: false
+        default: "0.5"
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ofi_thr: [0.15, 0.20, 0.25]
+        pthr_tr: [0.55, 0.60]
+        tp_atr: [0.70, 0.90]
+    steps:
+      - name: Install deps (pandas, numpy, pyyaml, numba)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip || true
+          pip install pandas numpy pyyaml numba || true
+
+      - name: Acquire code/data (local / URL / repo raw)
+        env:
+          CODE_ZIP: "${ github.event.inputs.CODE_ZIP }"
+          DATA_ZIP: "${ github.event.inputs.DATA_ZIP }"
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade tmp/data _out_4u/run tools
+          # CODE_ZIP
+          if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP";           elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip";           else RCODE="https://raw.githubusercontent.com/${ github.repository }/${ github.ref_name }/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
+          unzip -q "$CSRC" -d tmp/trade
+          # DATA_ZIP
+          if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP";           elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip";           else RDATA="https://raw.githubusercontent.com/${ github.repository }/${ github.ref_name }/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
+          unzip -q "$DSRC" -d tmp/data
+
+      - name: Patch params for this matrix (base64 python)
+        env:
+          OFI_THR: "${ matrix.ofi_thr }"
+          P_THR_TR: "${ matrix.pthr_tr }"
+          P_THR_RG: "${ github.event.inputs.P_THR_RANGE }"
+          TP_ATR: "${ matrix.tp_atr }"
+          SL_ATR: "${ github.event.inputs.SL_ATR }"
+          PY_B64: "CmltcG9ydCBvcywgc3lzLCB5YW1sLCBqc29uCnBhdGggPSBzeXMuYXJndlsxXQplbnYgPSBvcy5lbnZpcm9uCndpdGggb3BlbihwYXRoLCAncicpIGFzIGY6CiAgICBjZmcgPSB5YW1sLnNhZmVfbG9hZChmKQojIGVuc3VyZSBrZXlzIGV4aXN0CmNmZy5zZXRkZWZhdWx0KCdvcmRlcmZsb3cnLCB7fSkKY2ZnLnNldGRlZmF1bHQoJ2VudHJ5Jywge30pLnNldGRlZmF1bHQoJ3BfdGhyJywge30pCmNmZy5zZXRkZWZhdWx0KCdleGl0Jywge30pCiMgYXBwbHkKZGVmIGdldGYoaywgZGZsdCk6IAogICAgdHJ5OiByZXR1cm4gZmxvYXQoZW52LmdldChrLCBkZmx0KSkKICAgIGV4Y2VwdDogcmV0dXJuIGZsb2F0KGRmbHQpCmNmZ1snb3JkZXJmbG93J11bJ29maV90aHInXSA9IGdldGYoJ09GSV9USFInLCBjZmdbJ29yZGVyZmxvdyddLmdldCgnb2ZpX3RocicsIDAuMikpCmNmZ1snZW50cnknXVsncF90aHInXVsndHJlbmQnXSA9IGdldGYoJ1BfVEhSX1RSJywgY2ZnWydlbnRyeSddWydwX3RociddLmdldCgndHJlbmQnLCAwLjYpKQpjZmdbJ2VudHJ5J11bJ3BfdGhyJ11bJ3JhbmdlJ10gPSBnZXRmKCdQX1RIUl9SRycsIGNmZ1snZW50cnknXVsncF90aHInXS5nZXQoJ3JhbmdlJywgMC41NSkpCmNmZ1snZXhpdCddWyd0cF9hdHInXSA9IGdldGYoJ1RQX0FUUicsIGNmZ1snZXhpdCddLmdldCgndHBfYXRyJywgMC44KSkKY2ZnWydleGl0J11bJ3NsX2F0ciddID0gZ2V0ZignU0xfQVRSJywgY2ZnWydleGl0J10uZ2V0KCdzbF9hdHInLCAwLjUpKQp3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgeWFtbC5zYWZlX2R1bXAoY2ZnLCBmLCBzb3J0X2tleXM9RmFsc2UpCnByaW50KGpzb24uZHVtcHMoeydwYXRjaGVkJzogcGF0aCwgJ29maV90aHInOiBjZmdbJ29yZGVyZmxvdyddWydvZmlfdGhyJ10sICdwX3Rocl90cmVuZCc6IGNmZ1snZW50cnknXVsncF90aHInXVsndHJlbmQnXSwgJ3BfdGhyX3JhbmdlJzogY2ZnWydlbnRyeSddWydwX3RociddWydyYW5nZSddLCAndHBfYXRyJzogY2ZnWydleGl0J11bJ3RwX2F0ciddLCAnc2xfYXRyJzogY2ZnWydleGl0J11bJ3NsX2F0ciddfSkpCg=="
+        run: |
+          set -euo pipefail
+          echo "$PY_B64" > tools/patch.b64
+          python - <<'PY'
+import base64, os, sys
+os.makedirs('tools', exist_ok=True)
+open('tools/patch_params.py','wb').write(base64.b64decode(open('tools/patch.b64','rb').read()))
+PY
+          python tools/patch_params.py tmp/trade/conf/params.v2.yml
+          echo "---- params.v2.yml ----"
+          cat tmp/trade/conf/params.v2.yml
+
+      - name: Preflight strict
+        env:
+          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
+        run: |
+          set -euo pipefail
+          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run
+
+      - name: Detect entrypoint and run (V2)
+        env:
+          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
+        run: |
+          set -euo pipefail
+          ENTRY=""
+          for c in "tmp/trade/run_4u.py" "tmp/trade/backtest/run_4u.py" "tmp/trade/backtest/runner.py"; do
+            if [ -f "$c" ]; then ENTRY="$c"; break; fi
+          done
+          if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
+          echo "ENTRY=$ENTRY"
+          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params conf/params.v2.yml
+
+      - name: Grid metrics (from summary.json)
+        env:
+          PY_B64: "CmltcG9ydCBqc29uLCBvcwpzID0ganNvbi5sb2FkKG9wZW4oJ19vdXRfNHUvcnVuL3N1bW1hcnkuanNvbicpKSBpZiBvcy5wYXRoLmV4aXN0cygnX291dF80dS9ydW4vc3VtbWFyeS5qc29uJykgZWxzZSB7fQptID0geydjdW1fcG5sX2Nsb3NlX2Jhc2VkJzogcy5nZXQoJ2N1bV9wbmxfY2xvc2VfYmFzZWQnLCBOb25lKSwKICAgICAnYXZnX2dhdGVwJzogcy5nZXQoJ2F2Z19nYXRlcCcsIE5vbmUpLAogICAgICd0cmVuZF9mcmFjJzogcy5nZXQoJ3RyZW5kX2ZyYWMnLCBOb25lKSwKICAgICAncmFuZ2VfZnJhYyc6IHMuZ2V0KCdyYW5nZV9mcmFjJywgTm9uZSl9Cmpzb24uZHVtcChtLCBvcGVuKCdfb3V0XzR1L3J1bi9ncmlkX21ldHJpY3MuanNvbicsJ3cnKSwgaW5kZW50PTIpCg=="
+        run: |
+          set -euo pipefail
+          echo "$PY_B64" > tools/metrics.b64
+          python - <<'PY'
+import base64, os
+open('tools/metrics.py','wb').write(base64.b64decode(open('tools/metrics.b64','rb').read()))
+PY
+          python tools/metrics.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
+        with:
+          name: "v2-ofi=${ matrix.ofi_thr }-ptr=${ matrix.pthr_tr }-tp=${ matrix.tp_atr }"
+          path: |
+            _out_4u/run/gating_debug.json
+            _out_4u/run/summary.json
+            _out_4u/run/preds_test.csv
+            _out_4u/run/trades.csv
+            _out_4u/run/grid_metrics.json
