@@ -31,7 +31,7 @@ jobs:
         tp_atr: [0.70, 0.90]
         r_lo: [0.30, 0.35, 0.40]
         t_hi: [0.60, 0.65, 0.70]
-        cooldown: [5, 10]   # reduced to keep total <=256 (3*2*2*3*3*2 = 216)
+        cooldown: [5, 10]
     steps:
       - name: Install deps (pandas, numpy, pyyaml, numba)
         run: |
@@ -65,7 +65,7 @@ jobs:
           R_LO: "${{ matrix.r_lo }}"
           T_HI: "${{ matrix.t_hi }}"
           COOL: "${{ matrix.cooldown }}"
-          B64: "CmltcG9ydCBvcywgeWFtbApwPSd0bXAvdHJhZGUvY29uZi9wYXJhbXMudjIueW1sJwp3aXRoIG9wZW4ocCwncicpIGFzIGY6IGNmZz15YW1sLnNhZmVfbG9hZChmKQpjZmcuc2V0ZGVmYXVsdCgnb3JkZXJmbG93Jyx7fSlbJ29maV90aHInXT1mbG9hdChvcy5lbnZpcm9uWydPRklfVEhSJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pLnNldGRlZmF1bHQoJ3BfdGhyJyx7fSlbJ3RyZW5kJ109ZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSkKY2ZnLnNldGRlZmF1bHQoJ2V4aXQnLHt9KQpjZmdbJ2V4aXQnXVsndHBfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnVFBfQVRSJ10pOyBjZmdbJ2V4aXQnXVsnc2xfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pCmNmZy5zZXRkZWZhdWx0KCdyZWdpbWUnLHt9KQpjZmdbJ3JlZ2ltZSddWydyYW5nZV9sb19wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydSX0xPJ10pOyBjZmdbJ3JlZ2ltZSddWyd0cmVuZF9oaV9wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydUX0hJJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pWydjb29sZG93bl9iYXJzJ109aW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpCndpdGggb3BlbihwLCd3JykgYXMgZjogeWFtbC5zYWZlX2R1bXAoY2ZnLGYsc29ydF9rZXlzPUZhbHNlKQo="
+          B64: "CmltcG9ydCBvcywgeWFtbCwganNvbgpwPSd0bXAvdHJhZGUvY29uZi9wYXJhbXMudjIueW1sJwp3aXRoIG9wZW4ocCwncicpIGFzIGY6IGNmZz15YW1sLnNhZmVfbG9hZChmKQpjZmcuc2V0ZGVmYXVsdCgnb3JkZXJmbG93Jyx7fSlbJ29maV90aHInXT1mbG9hdChvcy5lbnZpcm9uWydPRklfVEhSJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pLnNldGRlZmF1bHQoJ3BfdGhyJyx7fSlbJ3RyZW5kJ109ZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSkKY2ZnLnNldGRlZmF1bHQoJ2V4aXQnLHt9KQpjZmdbJ2V4aXQnXVsndHBfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnVFBfQVRSJ10pOyBjZmdbJ2V4aXQnXVsnc2xfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pCmNmZy5zZXRkZWZhdWx0KCdyZWdpbWUnLHt9KQpjZmdbJ3JlZ2ltZSddWydyYW5nZV9sb19wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydSX0xPJ10pOyBjZmdbJ3JlZ2ltZSddWyd0cmVuZF9oaV9wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydUX0hJJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pWydjb29sZG93bl9iYXJzJ109aW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpCndpdGggb3BlbihwLCd3JykgYXMgZjogeWFtbC5zYWZlX2R1bXAoY2ZnLGYsc29ydF9rZXlzPUZhbHNlKQojIGFsc28gcGVyc2lzdCBwYXJhbXMgZm9yIGNvbGxlY3RvcgpwYXJhbXNfb3V0ID0gewogICdvZmlfdGhyJzogZmxvYXQob3MuZW52aXJvblsnT0ZJX1RIUiddKSwKICAncHRyJzogZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSksCiAgJ3RwX2F0cic6IGZsb2F0KG9zLmVudmlyb25bJ1RQX0FUUiddKSwKICAnc2xfYXRyJzogZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pLAogICdyX2xvJzogZmxvYXQob3MuZW52aXJvblsnUl9MTyddKSwKICAndF9oaSc6IGZsb2F0KG9zLmVudmlyb25bJ1RfSEknXSksCiAgJ2Nvb2xkb3duJzogaW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpLAp9Cm9zLm1ha2VkaXJzKCdfb3V0XzR1L3J1bicsIGV4aXN0X29rPVRydWUpCndpdGggb3BlbignX291dF80dS9ydW4vcGFyYW1zLmpzb24nLCd3JykgYXMgZjoKICBqc29uLmR1bXAocGFyYW1zX291dCwgZiwgaW5kZW50PTIpCg=="
         run: |
           set -euo pipefail
           mkdir -p tools
@@ -94,23 +94,41 @@ jobs:
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: Grid metrics (no heredoc; base64 -> tools/metrics.py)
+      - name: Upload tiny metrics artifact (per-matrix)
+        uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
+        with:
+          name: "grid-metrics-ofi=${{ matrix.ofi_thr }}-ptr=${{ matrix.pthr_tr }}-tp=${{ matrix.tp_atr }}-rlo=${{ matrix.r_lo }}-thi=${{ matrix.t_hi }}-cool=${{ matrix.cooldown }}"
+          path: |
+            _out_4u/run/grid_metrics.json
+            _out_4u/run/summary.json
+            _out_4u/run/params.json
+
+  collect:
+    needs: grid
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all grid metrics
+        uses: actions/download-artifact@v4
+        with:
+          pattern: grid-metrics-*
+          merge-multiple: false
+          path: metrics
+
+      - name: Aggregate & publish Top10 (no heredoc; base64 -> tools/aggregate.py)
         env:
-          B64: "CmltcG9ydCBqc29uLCBvcwpzID0ganNvbi5sb2FkKG9wZW4oJ19vdXRfNHUvcnVuL3N1bW1hcnkuanNvbicpKSBpZiBvcy5wYXRoLmV4aXN0cygnX291dF80dS9ydW4vc3VtbWFyeS5qc29uJykgZWxzZSB7fQprZXlzPVsnY3VtX3BubF9jbG9zZV9iYXNlZCcsJ2F2Z19nYXRlcCcsJ3RyZW5kX2ZyYWMnLCdyYW5nZV9mcmFjJywnZW50cmllcycsJ2V4aXRzJ10KbSA9IHtrOnMuZ2V0KGspIGZvciBrIGluIGtleXN9Cmpzb24uZHVtcChtLCBvcGVuKCdfb3V0XzR1L3J1bi9ncmlkX21ldHJpY3MuanNvbicsJ3cnKSwgaW5kZW50PTIpCg=="
+          B64: "CmltcG9ydCBvcywganNvbiwgZ2xvYiwgcGFuZGFzIGFzIHBkCnJvb3QgPSAnbWV0cmljcycKcmVjcyA9IFtdCmZvciBkIGluIGdsb2IuZ2xvYihvcy5wYXRoLmpvaW4ocm9vdCwgJyonKSk6CiAgICBnbSA9IG9zLnBhdGguam9pbihkLCAnZ3JpZF9tZXRyaWNzLmpzb24nKQogICAgcGogPSBvcy5wYXRoLmpvaW4oZCwgJ3BhcmFtcy5qc29uJykKICAgIG0gPSB7fQogICAgaWYgb3MucGF0aC5leGlzdHMoZ20pOgogICAgICAgIHRyeTogbSA9IGpzb24ubG9hZChvcGVuKGdtKSkKICAgICAgICBleGNlcHQ6IG0gPSB7fQogICAgcCA9IHt9CiAgICBpZiBvcy5wYXRoLmV4aXN0cyhwaik6CiAgICAgICAgdHJ5OiBwID0ganNvbi5sb2FkKG9wZW4ocGopKQogICAgICAgIGV4Y2VwdDogcCA9IHt9CiAgICByID0ge30KICAgIHIudXBkYXRlKHApOyByLnVwZGF0ZShtKQogICAgclsnYXJ0aWZhY3QnXSA9IG9zLnBhdGguYmFzZW5hbWUoZCkKICAgIHJlY3MuYXBwZW5kKHIpCgpkZiA9IHBkLkRhdGFGcmFtZShyZWNzKQppZiBub3QgZGYuZW1wdHk6CiAgICBvcmRlciA9IFsnb2ZpX3RocicsJ3B0cicsJ3RwX2F0cicsJ3NsX2F0cicsJ3JfbG8nLCd0X2hpJywnY29vbGRvd24nLCdjdW1fcG5sX2Nsb3NlX2Jhc2VkJywnYXZnX2dhdGVwJywndHJlbmRfZnJhYycsJ3JhbmdlX2ZyYWMnLCdlbnRyaWVzJywnZXhpdHMnLCdhcnRpZmFjdCddCiAgICBjb2xzID0gW2MgZm9yIGMgaW4gb3JkZXIgaWYgYyBpbiBkZi5jb2x1bW5zXSArIFtjIGZvciBjIGluIGRmLmNvbHVtbnMgaWYgYyBub3QgaW4gb3JkZXJdCiAgICBkZiA9IGRmW2NvbHNdCmRmLnRvX2NzdignZ3JpZF9hZ2dyZWdhdGUuY3N2JywgaW5kZXg9RmFsc2UpCnRvcCA9IGRmLnNvcnRfdmFsdWVzKFsnY3VtX3BubF9jbG9zZV9iYXNlZCcsJ2F2Z19nYXRlcCddLCBhc2NlbmRpbmc9W0ZhbHNlLCBGYWxzZV0pLmhlYWQoMTApCnRvcC50b19jc3YoJ2dyaWRfdG9wMTAuY3N2JywgaW5kZXg9RmFsc2UpCmJlc3QgPSB0b3AuaGVhZCgxKS50b19kaWN0KG9yaWVudD0ncmVjb3JkcycpCmpzb24uZHVtcChiZXN0LCBvcGVuKCdiZXN0X2NvbmZpZy5qc29uJywndycpLCBpbmRlbnQ9MikKCiMgV3JpdGUgR2l0SHViIHJ1biBzdW1tYXJ5IChtYXJrZG93bikgd2l0aG91dCBleHRlcm5hbCBkZXBzCmRlZiBtZF90YWJsZShkZik6CiAgICBpZiBkZi5lbXB0eToKICAgICAgICByZXR1cm4gIk5vIHJlc3VsdHMuIgogICAgY29scyA9IGxpc3QoZGYuY29sdW1ucykKICAgIGxpbmVzID0gW10KICAgIGxpbmVzLmFwcGVuZCgnfCcgKyAnfCcuam9pbihjb2xzKSArICd8JykKICAgIGxpbmVzLmFwcGVuZCgnfCcgKyAnfCcuam9pbihbJy0tLSddKmxlbihjb2xzKSkgKyAnfCcpCiAgICBmb3IgXywgcm93IGluIGRmLml0ZXJyb3dzKCk6CiAgICAgICAgdmFscyA9IFtzdHIocm93LmdldChjLCcnKSkgZm9yIGMgaW4gY29sc10KICAgICAgICBsaW5lcy5hcHBlbmQoJ3wnICsgJ3wnLmpvaW4odmFscykgKyAnfCcpCiAgICByZXR1cm4gJ1xcbicuam9pbihsaW5lcykKCndpdGggb3Blbihvcy5lbnZpcm9uLmdldCgnR0lUSFVCX1NURVBfU1VNTUFSWScsJ1NVTU1BUlkubWQnKSwgJ2EnKSBhcyBmOgogICAgZi53cml0ZSgnIyBHcmlkIFRvcCAxMFxcblxcbicpCiAgICBmLndyaXRlKG1kX3RhYmxlKHRvcCkpCg=="
         run: |
           set -euo pipefail
           mkdir -p tools
-          echo "$B64" > tools/m.b64
-          python -c "import base64; open('tools/metrics.py','wb').write(base64.b64decode(open('tools/m.b64','rb').read()))"
-          python tools/metrics.py
+          echo "$B64" > tools/a.b64
+          python -c "import base64; open('tools/aggregate.py','wb').write(base64.b64decode(open('tools/a.b64','rb').read()))"
+          python tools/aggregate.py
 
-      - name: Upload artifacts
+      - name: Upload consolidated tables
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
-          name: "v2.1-ofi=${{ matrix.ofi_thr }}-ptr=${{ matrix.pthr_tr }}-tp=${{ matrix.tp_atr }}-rlo=${{ matrix.r_lo }}-thi=${{ matrix.t_hi }}-cool=${{ matrix.cooldown }}"
+          name: "grid-aggregate"
           path: |
-            _out_4u/run/gating_debug.json
-            _out_4u/run/summary.json
-            _out_4u/run/preds_test.csv
-            _out_4u/run/trades.csv
-            _out_4u/run/grid_metrics.json
+            grid_aggregate.csv
+            grid_top10.csv
+            best_config.json
