@@ -53,16 +53,16 @@ jobs:
           echo "[PIN] validating SHAs by fetching commits..."
           mkdir -p _pincheck && cd _pincheck
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
-          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "${ env.CHECKOUT_SHA }"
+          [ "$(git cat-file -t "${ env.CHECKOUT_SHA }")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
-          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "${ env.SETUP_PYTHON_SHA }"
+          [ "$(git cat-file -t "${ env.SETUP_PYTHON_SHA }")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
-          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${ env.UPLOAD_ARTIFACT_SHA }"
+          [ "$(git cat-file -t "${ env.UPLOAD_ARTIFACT_SHA }")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
@@ -86,11 +86,11 @@ jobs:
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/single" "_out_4u/run"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
-          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
-          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/single" "_out_4u/run"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
+          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
+          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
@@ -164,10 +164,10 @@ jobs:
         run: |
           set -euo pipefail
           export MODE=single
-          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
-          export FEES_BPS="${{ inputs.FEES_BPS }}"
-          export TZ="${{ inputs.TZ }}"
-          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
+          export CSV_GLOB="${ inputs.CSV_GLOB }"
+          export FEES_BPS="${ inputs.FEES_BPS }"
+          export TZ="${ inputs.TZ }"
+          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
           python work/preflight_strict.py || { echo "::error::Preflight failed"; exit 3; }
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
@@ -214,89 +214,88 @@ jobs:
           pip install --upgrade pip
           pip install pandas numpy scikit-learn pyyaml pytz
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/wfo"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
-          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
-          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/wfo"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
+          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
+          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
           mkdir -p work
-          { cat > work/preflight_strict.py <<'PY'; }
-import os,sys,glob,json
-import pandas as pd
-def find_csv(root,patt):
-  g=glob.glob(os.path.join(root,patt),recursive=True)
-  if not g: raise SystemExit("CSVDetect: no csv")
-  return g[0]
-def read_df(path):
-  df=pd.read_csv(path)
-  cols={"open_time","open","high","low","close","volume"}
-  if not cols.issubset(df.columns):
-    raise SystemExit("Preflight: missing columns")
-  ot=df["open_time"]
-  try:
-    if pd.api.types.is_numeric_dtype(ot):
-      dt=pd.to_datetime(ot,unit="ms",utc=True)
-    else:
-      dt=pd.to_datetime(ot,utc=True)
-  except Exception:
-    dt=pd.to_datetime(ot,utc=True,errors="coerce")
-  df["dt_utc"]=dt
-  return df
-def write_cfg(path,data_path,fee_bps,champion):
-  os.makedirs(os.path.dirname(path),exist_ok=True)
-  with open(path,"w") as f:
-    f.write("data_path: \"" + data_path + "\"\n")
-    f.write("fee_bps: " + str(fee_bps) + "\n")
-    f.write("champion_config: \"" + champion + "\"\n")
-if __name__=="__main__":
-  mode=os.environ.get("MODE","single")
-  root_csv="work/data"
-  patt=os.environ.get("CSV_GLOB","**/*.csv")
-  fee=os.environ.get("FEES_BPS","7.5")
-  tz=os.environ.get("TZ","Asia/Seoul")
-  champion=os.environ.get("CHAMPION_CONFIG","")
-  out_csv="work/input.csv"
-  p=find_csv(root_csv,patt)
-  df=read_df(p)
-  if mode=="single":
-    df.to_csv(out_csv,index=False)
-  elif mode=="wfo":
-    k=int(os.environ.get("K","4"))
-    i=int(os.environ.get("I","0"))
-    dt=df["dt_utc"]
-    t0=dt.min(); t1=dt.max()
-    edges=pd.date_range(t0,t1,periods=k+1)
-    s=edges[i]; e=edges[i+1]
-    m=(dt>=s)&(dt<e)
-    df[m].to_csv(out_csv,index=False)
-  elif mode=="session":
-    sname=os.environ.get("SESSION","ASIA")
-    dfl=df.copy()
-    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)
-    hr=dfl["dt_loc"].dt.hour
-    if sname=="ASIA":
-      m=(hr>=9)&(hr<17)
-    elif sname=="EU":
-      m=(hr>=17)|(hr<1)
-    else:
-      m=(hr>=1)&(hr<9)
-    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)
-  else:
-    raise SystemExit("Runtime: unknown MODE")
-  write_cfg("conf/config.effective.yml",out_csv,fee,champion)
-PY
-          :
+          {
+            echo 'import os,sys,glob,json'
+            echo 'import pandas as pd'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv")'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  cols={"open_time","open","high","low","close","volume"}'
+            echo '  if not cols.issubset(df.columns):'
+            echo '    raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    if pd.api.types.is_numeric_dtype(ot):'
+            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
+            echo '    else:'
+            echo '      dt=pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def write_cfg(path,data_path,fee_bps,champion):'
+            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
+            echo '  with open(path,"w") as f:'
+            echo '    f.write("data_path: \"" + data_path + "\"\n")'
+            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
+            echo '    f.write("champion_config: \"" + champion + "\"\n")'
+            echo 'if __name__=="__main__":'
+            echo '  mode=os.environ.get("MODE","single")'
+            echo '  root_csv="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=os.environ.get("FEES_BPS","7.5")'
+            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
+            echo '  champion=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  out_csv="work/input.csv"'
+            echo '  p=find_csv(root_csv,patt)'
+            echo '  df=read_df(p)'
+            echo '  if mode=="single":'
+            echo '    df.to_csv(out_csv,index=False)'
+            echo '  elif mode=="wfo":'
+            echo '    k=int(os.environ.get("K","4"))'
+            echo '    i=int(os.environ.get("I","0"))'
+            echo '    dt=df["dt_utc"]'
+            echo '    t0=dt.min(); t1=dt.max()'
+            echo '    edges=pd.date_range(t0,t1,periods=k+1)'
+            echo '    s=edges[i]; e=edges[i+1]'
+            echo '    m=(dt>=s)&(dt<e)'
+            echo '    df[m].to_csv(out_csv,index=False)'
+            echo '  elif mode=="session":'
+            echo '    sname=os.environ.get("SESSION","ASIA")'
+            echo '    dfl=df.copy()'
+            echo '    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)'
+            echo '    hr=dfl["dt_loc"].dt.hour'
+            echo '    if sname=="ASIA":'
+            echo '      m=(hr>=9)&(hr<17)'
+            echo '    elif sname=="EU":'
+            echo '      m=(hr>=17)|(hr<1)'
+            echo '    else:'
+            echo '      m=(hr>=1)&(hr<9)'
+            echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
+            echo '  else:'
+            echo '    raise SystemExit("Runtime: unknown MODE")'
+            echo '  write_cfg("conf/config.effective.yml",out_csv,fee,champion)'
+          } > work/preflight_strict.py
       - name: Run WFO splits
         run: |
           set -euo pipefail
-          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
-          export FEES_BPS="${{ inputs.FEES_BPS }}"
-          export TZ="${{ inputs.TZ }}"
-          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
-          K="${{ inputs.SPLITS }}"
+          export CSV_GLOB="${ inputs.CSV_GLOB }"
+          export FEES_BPS="${ inputs.FEES_BPS }"
+          export TZ="${ inputs.TZ }"
+          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
+          K="${ inputs.SPLITS }"
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
           [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
@@ -348,91 +347,87 @@ PY
           pip install --upgrade pip
           pip install pandas numpy scikit-learn pyyaml pytz
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/sessions"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
-          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
-          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/sessions"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
+          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
+          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
           mkdir -p work
-          cp -f work/preflight_strict.py work/preflight_strict.py 2>/dev/null || {
-            echo "::warning::preflight missing in cache, rewriting..."
-            { cat > work/preflight_strict.py <<'PY'; }
-import os,sys,glob,json
-import pandas as pd
-def find_csv(root,patt):
-  g=glob.glob(os.path.join(root,patt),recursive=True)
-  if not g: raise SystemExit("CSVDetect: no csv")
-  return g[0]
-def read_df(path):
-  df=pd.read_csv(path)
-  cols={"open_time","open","high","low","close","volume"}
-  if not cols.issubset(df.columns):
-    raise SystemExit("Preflight: missing columns")
-  ot=df["open_time"]
-  try:
-    if pd.api.types.is_numeric_dtype(ot):
-      dt=pd.to_datetime(ot,unit="ms",utc=True)
-    else:
-      dt=pd.to_datetime(ot,utc=True)
-  except Exception:
-    dt=pd.to_datetime(ot,utc=True,errors="coerce")
-  df["dt_utc"]=dt
-  return df
-def write_cfg(path,data_path,fee_bps,champion):
-  os.makedirs(os.path.dirname(path),exist_ok=True)
-  with open(path,"w") as f:
-    f.write("data_path: \"" + data_path + "\"\n")
-    f.write("fee_bps: " + str(fee_bps) + "\n")
-    f.write("champion_config: \"" + champion + "\"\n")
-if __name__=="__main__":
-  mode=os.environ.get("MODE","single")
-  root_csv="work/data"
-  patt=os.environ.get("CSV_GLOB","**/*.csv")
-  fee=os.environ.get("FEES_BPS","7.5")
-  tz=os.environ.get("TZ","Asia/Seoul")
-  champion=os.environ.get("CHAMPION_CONFIG","")
-  out_csv="work/input.csv"
-  p=find_csv(root_csv,patt)
-  df=read_df(p)
-  if mode=="single":
-    df.to_csv(out_csv,index=False)
-  elif mode=="wfo":
-    k=int(os.environ.get("K","4"))
-    i=int(os.environ.get("I","0"))
-    dt=df["dt_utc"]
-    t0=dt.min(); t1=dt.max()
-    edges=pd.date_range(t0,t1,periods=k+1)
-    s=edges[i]; e=edges[i+1]
-    m=(dt>=s)&(dt<e)
-    df[m].to_csv(out_csv,index=False)
-  elif mode=="session":
-    sname=os.environ.get("SESSION","ASIA")
-    dfl=df.copy()
-    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)
-    hr=dfl["dt_loc"].dt.hour
-    if sname=="ASIA":
-      m=(hr>=9)&(hr<17)
-    elif sname=="EU":
-      m=(hr>=17)|(hr<1)
-    else:
-      m=(hr>=1)&(hr<9)
-    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)
-  else:
-    raise SystemExit("Runtime: unknown MODE")
-  write_cfg("conf/config.effective.yml",out_csv,fee,champion)
-PY
-          :
-          }
+          {
+            echo 'import os,sys,glob,json'
+            echo 'import pandas as pd'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv")'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  cols={"open_time","open","high","low","close","volume"}'
+            echo '  if not cols.issubset(df.columns):'
+            echo '    raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    if pd.api.types.is_numeric_dtype(ot):'
+            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
+            echo '    else:'
+            echo '      dt=pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def write_cfg(path,data_path,fee_bps,champion):'
+            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
+            echo '  with open(path,"w") as f:'
+            echo '    f.write("data_path: \"" + data_path + "\"\n")'
+            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
+            echo '    f.write("champion_config: \"" + champion + "\"\n")'
+            echo 'if __name__=="__main__":'
+            echo '  mode=os.environ.get("MODE","single")'
+            echo '  root_csv="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=os.environ.get("FEES_BPS","7.5")'
+            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
+            echo '  champion=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  out_csv="work/input.csv"'
+            echo '  p=find_csv(root_csv,patt)'
+            echo '  df=read_df(p)'
+            echo '  if mode=="single":'
+            echo '    df.to_csv(out_csv,index=False)'
+            echo '  elif mode=="wfo":'
+            echo '    k=int(os.environ.get("K","4"))'
+            echo '    i=int(os.environ.get("I","0"))'
+            echo '    dt=df["dt_utc"]'
+            echo '    t0=dt.min(); t1=dt.max()'
+            echo '    edges=pd.date_range(t0,t1,periods=k+1)'
+            echo '    s=edges[i]; e=edges[i+1]'
+            echo '    m=(dt>=s)&(dt<e)'
+            echo '    df[m].to_csv(out_csv,index=False)'
+            echo '  elif mode=="session":'
+            echo '    sname=os.environ.get("SESSION","ASIA")'
+            echo '    dfl=df.copy()'
+            echo '    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)'
+            echo '    hr=dfl["dt_loc"].dt.hour'
+            echo '    if sname=="ASIA":'
+            echo '      m=(hr>=9)&(hr<17)'
+            echo '    elif sname=="EU":'
+            echo '      m=(hr>=17)|(hr<1)'
+            echo '    else:'
+            echo '      m=(hr>=1)&(hr<9)'
+            echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
+            echo '  else:'
+            echo '    raise SystemExit("Runtime: unknown MODE")'
+            echo '  write_cfg("conf/config.effective.yml",out_csv,fee,champion)'
+          } > work/preflight_strict.py
       - name: Run sessions
         run: |
           set -euo pipefail
-          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
-          export FEES_BPS="${{ inputs.FEES_BPS }}"
-          export TZ="${{ inputs.TZ }}"
-          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
+          export CSV_GLOB="${ inputs.CSV_GLOB }"
+          export FEES_BPS="${ inputs.FEES_BPS }"
+          export TZ="${ inputs.TZ }"
+          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
           [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
