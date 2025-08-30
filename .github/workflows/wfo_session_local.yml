@@ -32,7 +32,7 @@ on:
       SPLITS:
         description: "Number of WFO splits"
         required: false
-        default: "4"
+        default: "3"
         type: string
       TZ:
         description: "IANA timezone for session split"
@@ -131,20 +131,24 @@ jobs:
             echo '  df["dt_utc"]=dt'
             echo '  return df'
             echo 'def parse_champion(s):'
-            echo '  d={"name": s, "params": {}}'
-            echo '  if not s: return d'
-            echo '  tokens=s.split("_")'
-            echo '  if tokens and tokens[0].lower()=="grid":'
-            echo '    d["params"]["grid"]=True'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  tok=s.split("_")'
+            echo '  if tok and tok[0].lower()=="grid":'
+            echo '    d["grid"]=True'
             echo '  import re'
             echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
-            echo '  for t in tokens:'
+            echo '  for t in tok:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
             echo '      k,v=m.group(1).lower(),float(m.group(2))'
-            echo '      d["params"][k]=v'
-            echo '      if k=="grid_p": d["params"]["p"]=v'
-            echo '  return d'
+            echo '      d[k]=v'
+            echo '      if k in ("grid_p","p_grid"):'
+            echo '        d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -182,10 +186,14 @@ jobs:
             echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
-            echo '  pdict=parse_champion(champ)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  # flat shape for runners expecting top-level keys'
             echo '  with open("conf/params.effective.yml","w") as f:'
-            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+            echo '  print("[PARAMS.FLAT]", params)'
           } > work/preflight_strict.py
 
           {
@@ -285,6 +293,7 @@ jobs:
           name: single_results
           path: |
             work/out/single
+            conf/*.yml
             _out_4u/logs
 
   wfo:
@@ -350,20 +359,24 @@ jobs:
             echo '  df["dt_utc"]=dt'
             echo '  return df'
             echo 'def parse_champion(s):'
-            echo '  d={"name": s, "params": {}}'
-            echo '  if not s: return d'
-            echo '  tokens=s.split("_")'
-            echo '  if tokens and tokens[0].lower()=="grid":'
-            echo '    d["params"]["grid"]=True'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  tok=s.split("_")'
+            echo '  if tok and tok[0].lower()=="grid":'
+            echo '    d["grid"]=True'
             echo '  import re'
             echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
-            echo '  for t in tokens:'
+            echo '  for t in tok:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
             echo '      k,v=m.group(1).lower(),float(m.group(2))'
-            echo '      d["params"][k]=v'
-            echo '      if k=="grid_p": d["params"]["p"]=v'
-            echo '  return d'
+            echo '      d[k]=v'
+            echo '      if k in ("grid_p","p_grid"):'
+            echo '        d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -401,10 +414,14 @@ jobs:
             echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
-            echo '  pdict=parse_champion(champ)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  # flat shape for runners expecting top-level keys'
             echo '  with open("conf/params.effective.yml","w") as f:'
-            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+            echo '  print("[PARAMS.FLAT]", params)'
           } > work/preflight_strict.py
 
           {
@@ -503,6 +520,7 @@ jobs:
           name: wfo_results
           path: |
             work/out/wfo
+            conf/*.yml
             _out_4u/logs
 
   sessions:
@@ -568,20 +586,24 @@ jobs:
             echo '  df["dt_utc"]=dt'
             echo '  return df'
             echo 'def parse_champion(s):'
-            echo '  d={"name": s, "params": {}}'
-            echo '  if not s: return d'
-            echo '  tokens=s.split("_")'
-            echo '  if tokens and tokens[0].lower()=="grid":'
-            echo '    d["params"]["grid"]=True'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  tok=s.split("_")'
+            echo '  if tok and tok[0].lower()=="grid":'
+            echo '    d["grid"]=True'
             echo '  import re'
             echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
-            echo '  for t in tokens:'
+            echo '  for t in tok:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
             echo '      k,v=m.group(1).lower(),float(m.group(2))'
-            echo '      d["params"][k]=v'
-            echo '      if k=="grid_p": d["params"]["p"]=v'
-            echo '  return d'
+            echo '      d[k]=v'
+            echo '      if k in ("grid_p","p_grid"):'
+            echo '        d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -619,10 +641,14 @@ jobs:
             echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
-            echo '  pdict=parse_champion(champ)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  # flat shape for runners expecting top-level keys'
             echo '  with open("conf/params.effective.yml","w") as f:'
-            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+            echo '  print("[PARAMS.FLAT]", params)'
           } > work/preflight_strict.py
 
           {
@@ -721,4 +747,5 @@ jobs:
           name: bundle_results
           path: |
             work/out/sessions
+            conf/*.yml
             _out_4u/logs
