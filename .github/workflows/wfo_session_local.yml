@@ -41,7 +41,6 @@ on:
         type: string
 
 jobs:
-
   validate_shas:
     runs-on: ubuntu-latest
     env:
@@ -67,6 +66,7 @@ jobs:
           [ "$(git cat-file -t "${{ env.UPLOAD_ARTIFACT_SHA }}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
+
 
   single_run:
     needs: validate_shas
@@ -138,7 +138,6 @@ jobs:
             echo '  toks=s.split("_")'
             echo '  if toks and toks[0].lower()=="grid":'
             echo '    d["grid"]=True'
-            echo '  # robust pair extraction over the whole string'
             echo '  pairs=re.findall(r"([a-zA-Z]+)([-+]?[0-9]+(?:\\.[0-9]+)?)", s)'
             echo '  for k,v in pairs:'
             echo '    k=k.lower(); v=float(v)'
@@ -188,13 +187,262 @@ jobs:
             echo '    yaml.safe_dump(obj, f, sort_keys=False)'
             echo '  with open("conf/params.effective.yml","w") as f:'
             echo '    yaml.safe_dump(params, f, sort_keys=False)'
-            echo '  # sanity: if only grid present, warn loudly (so we catch it in logs)'
-            echo '  if set(params.keys())<= { "grid" }: '
+            echo '  if set(params.keys())<= {"grid"}:'
             echo '    print("[WARN] Only grid flag parsed; params appear incomplete ->", params)'
             echo '  else:'
             echo '    print("[PARAMS.FLAT]", params)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
+
+
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy pyyaml scikit-learn pytz
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          WORK=work
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+      - name: Install project deps
+        run: |
+          set -euo pipefail
+          REQ=""
+          for f in requirements.txt requirements-prod.txt requirements.in; do
+            [ -f "work/code/$f" ] && REQ="work/code/$f" && break
+            [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
+          done
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight & post-summarizer
+        run: |
+          set -euo pipefail
+          mkdir -p work conf
+
+          {
+            echo 'import os,sys,glob,json,re,yaml'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  req={"open_time","open","high","low","close","volume"}'
+            echo '  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    if pd.api.types.is_numeric_dtype(ot):'
+            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
+            echo '    else:'
+            echo '      dt=pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  tok=s.split("_")'
+            echo '  if tok and tok[0].lower()=="grid":'
+            echo '    d["grid"]=True'
+            echo '  import re'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
+            echo '  for t in tok:'
+            echo '    m=pat.fullmatch(t)'
+            echo '    if m:'
+            echo '      k,v=m.group(1).lower(),float(m.group(2))'
+            echo '      d[k]=v'
+            echo '      if k in ("grid_p","p_grid"):'
+            echo '        d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
+            echo 'if __name__=="__main__":'
+            echo '  mode=os.environ.get("MODE","single")'
+            echo '  root="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=float(os.environ.get("FEES_BPS","7.5"))'
+            echo '  champ=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
+            echo '  csv=find_csv(root,patt)'
+            echo '  df=read_df(csv)'
+            echo '  out_csv="work/input.csv"'
+            echo '  if mode=="single":'
+            echo '    df.to_csv(out_csv,index=False)'
+            echo '  elif mode=="wfo":'
+            echo '    k=int(os.environ.get("K","4"))'
+            echo '    i=int(os.environ.get("I","0"))'
+            echo '    dt=df["dt_utc"]'
+            echo '    t0=dt.min(); t1=dt.max()'
+            echo '    edges=pd.date_range(t0,t1,periods=k+1)'
+            echo '    s=edges[i]; e=edges[i+1]'
+            echo '    m=(dt>=s)&(dt<e)'
+            echo '    df[m].to_csv(out_csv,index=False)'
+            echo '  elif mode=="session":'
+            echo '    sname=os.environ.get("SESSION","ASIA")'
+            echo '    dfl=df.copy()'
+            echo '    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)'
+            echo '    hr=dfl["dt_loc"].dt.hour'
+            echo '    if sname=="ASIA":'
+            echo '      m=(hr>=9)&(hr<17)'
+            echo '    elif sname=="EU":'
+            echo '      m=(hr>=17)|(hr<1)'
+            echo '    else:'
+            echo '      m=(hr>=1)&(hr<9)'
+            echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
+            echo '  with open("conf/config.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  # flat shape for runners expecting top-level keys'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
+            echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+            echo '  print("[PARAMS.FLAT]", params)'
+          } > work/preflight_strict.py
+
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
 
       - name: Run single
         run: |
@@ -233,10 +481,196 @@ jobs:
             conf/*.yml
             _out_4u/logs
 
+
   wfo:
     needs: validate_shas
     runs-on: ubuntu-latest
     steps:
+
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy pyyaml scikit-learn pytz
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          WORK=work
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+      - name: Install project deps
+        run: |
+          set -euo pipefail
+          REQ=""
+          for f in requirements.txt requirements-prod.txt requirements.in; do
+            [ -f "work/code/$f" ] && REQ="work/code/$f" && break
+            [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
+          done
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight & post-summarizer
+        run: |
+          set -euo pipefail
+          mkdir -p work conf
+
+          {
+            echo 'import os,sys,glob,json,re,yaml'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  req={"open_time","open","high","low","close","volume"}'
+            echo '  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    if pd.api.types.is_numeric_dtype(ot):'
+            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
+            echo '    else:'
+            echo '      dt=pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  toks=s.split("_")'
+            echo '  if toks and toks[0].lower()=="grid":'
+            echo '    d["grid"]=True'
+            echo '  pairs=re.findall(r"([a-zA-Z]+)([-+]?[0-9]+(?:\\.[0-9]+)?)", s)'
+            echo '  for k,v in pairs:'
+            echo '    k=k.lower(); v=float(v)'
+            echo '    d[k]=v'
+            echo '    if k in ("grid_p","p_grid","p"): d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
+            echo 'if __name__=="__main__":'
+            echo '  mode=os.environ.get("MODE","single")'
+            echo '  root="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=float(os.environ.get("FEES_BPS","7.5"))'
+            echo '  champ=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
+            echo '  csv=find_csv(root,patt)'
+            echo '  df=read_df(csv)'
+            echo '  out_csv="work/input.csv"'
+            echo '  if mode=="single":'
+            echo '    df.to_csv(out_csv,index=False)'
+            echo '  elif mode=="wfo":'
+            echo '    k=int(os.environ.get("K","4"))'
+            echo '    i=int(os.environ.get("I","0"))'
+            echo '    dt=df["dt_utc"]'
+            echo '    t0=dt.min(); t1=dt.max()'
+            echo '    edges=pd.date_range(t0,t1,periods=k+1)'
+            echo '    s=edges[i]; e=edges[i+1]'
+            echo '    m=(dt>=s)&(dt<e)'
+            echo '    df[m].to_csv(out_csv,index=False)'
+            echo '  elif mode=="session":'
+            echo '    sname=os.environ.get("SESSION","ASIA")'
+            echo '    dfl=df.copy()'
+            echo '    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)'
+            echo '    hr=dfl["dt_loc"].dt.hour'
+            echo '    if sname=="ASIA":'
+            echo '      m=(hr>=9)&(hr<17)'
+            echo '    elif sname=="EU":'
+            echo '      m=(hr>=17)|(hr<1)'
+            echo '    else:'
+            echo '      m=(hr>=1)&(hr<9)'
+            echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
+            echo '  with open("conf/config.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
+            echo '  if set(params.keys())<= {"grid"}:'
+            echo '    print("[WARN] Only grid flag parsed; params appear incomplete ->", params)'
+            echo '  else:'
+            echo '    print("[PARAMS.FLAT]", params)'
+            echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+          } > work/preflight_strict.py
+
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
+
 
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -460,10 +894,196 @@ jobs:
             conf/*.yml
             _out_4u/logs
 
+
   sessions:
     needs: validate_shas
     runs-on: ubuntu-latest
     steps:
+
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy pyyaml scikit-learn pytz
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          WORK=work
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+      - name: Install project deps
+        run: |
+          set -euo pipefail
+          REQ=""
+          for f in requirements.txt requirements-prod.txt requirements.in; do
+            [ -f "work/code/$f" ] && REQ="work/code/$f" && break
+            [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
+          done
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight & post-summarizer
+        run: |
+          set -euo pipefail
+          mkdir -p work conf
+
+          {
+            echo 'import os,sys,glob,json,re,yaml'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  req={"open_time","open","high","low","close","volume"}'
+            echo '  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    if pd.api.types.is_numeric_dtype(ot):'
+            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
+            echo '    else:'
+            echo '      dt=pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  out={"name": s}'
+            echo '  d={}'
+            echo '  if not s:'
+            echo '    return out,d'
+            echo '  toks=s.split("_")'
+            echo '  if toks and toks[0].lower()=="grid":'
+            echo '    d["grid"]=True'
+            echo '  pairs=re.findall(r"([a-zA-Z]+)([-+]?[0-9]+(?:\\.[0-9]+)?)", s)'
+            echo '  for k,v in pairs:'
+            echo '    k=k.lower(); v=float(v)'
+            echo '    d[k]=v'
+            echo '    if k in ("grid_p","p_grid","p"): d["p"]=v; d["grid_p"]=v'
+            echo '  out["params"]=d'
+            echo '  return out,d'
+            echo 'if __name__=="__main__":'
+            echo '  mode=os.environ.get("MODE","single")'
+            echo '  root="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=float(os.environ.get("FEES_BPS","7.5"))'
+            echo '  champ=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
+            echo '  csv=find_csv(root,patt)'
+            echo '  df=read_df(csv)'
+            echo '  out_csv="work/input.csv"'
+            echo '  if mode=="single":'
+            echo '    df.to_csv(out_csv,index=False)'
+            echo '  elif mode=="wfo":'
+            echo '    k=int(os.environ.get("K","4"))'
+            echo '    i=int(os.environ.get("I","0"))'
+            echo '    dt=df["dt_utc"]'
+            echo '    t0=dt.min(); t1=dt.max()'
+            echo '    edges=pd.date_range(t0,t1,periods=k+1)'
+            echo '    s=edges[i]; e=edges[i+1]'
+            echo '    m=(dt>=s)&(dt<e)'
+            echo '    df[m].to_csv(out_csv,index=False)'
+            echo '  elif mode=="session":'
+            echo '    sname=os.environ.get("SESSION","ASIA")'
+            echo '    dfl=df.copy()'
+            echo '    dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(tz)'
+            echo '    hr=dfl["dt_loc"].dt.hour'
+            echo '    if sname=="ASIA":'
+            echo '      m=(hr>=9)&(hr<17)'
+            echo '    elif sname=="EU":'
+            echo '      m=(hr>=17)|(hr<1)'
+            echo '    else:'
+            echo '      m=(hr>=1)&(hr<9)'
+            echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  cfg={"data_path": out_csv, "fee_bps": fee, "champion": champ}'
+            echo '  with open("conf/config.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(cfg, f, sort_keys=False)'
+            echo '  obj,params=parse_champion(champ)'
+            echo '  with open("conf/params.nested.yml","w") as f:'
+            echo '    yaml.safe_dump(obj, f, sort_keys=False)'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(params, f, sort_keys=False)'
+            echo '  if set(params.keys())<= {"grid"}:'
+            echo '    print("[WARN] Only grid flag parsed; params appear incomplete ->", params)'
+            echo '  else:'
+            echo '    print("[PARAMS.FLAT]", params)'
+            echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
+          } > work/preflight_strict.py
+
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
+
 
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
