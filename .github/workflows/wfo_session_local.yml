@@ -53,16 +53,16 @@ jobs:
           echo "[PIN] validating SHAs by fetching commits..."
           mkdir -p _pincheck && cd _pincheck
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${ env.CHECKOUT_SHA }"
-          [ "$(git cat-file -t "${ env.CHECKOUT_SHA }")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
+          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${ env.SETUP_PYTHON_SHA }"
-          [ "$(git cat-file -t "${ env.SETUP_PYTHON_SHA }")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
+          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${ env.UPLOAD_ARTIFACT_SHA }"
-          [ "$(git cat-file -t "${ env.UPLOAD_ARTIFACT_SHA }")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
+          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
@@ -86,11 +86,11 @@ jobs:
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/single" "_out_4u/run"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
-          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
-          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
+          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/single" "_out_4u/run"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
@@ -164,10 +164,10 @@ jobs:
         run: |
           set -euo pipefail
           export MODE=single
-          export CSV_GLOB="${ inputs.CSV_GLOB }"
-          export FEES_BPS="${ inputs.FEES_BPS }"
-          export TZ="${ inputs.TZ }"
-          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
+          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
+          export FEES_BPS="${{ inputs.FEES_BPS }}"
+          export TZ="${{ inputs.TZ }}"
+          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           python work/preflight_strict.py || { echo "::error::Preflight failed"; exit 3; }
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
@@ -214,11 +214,11 @@ jobs:
           pip install --upgrade pip
           pip install pandas numpy scikit-learn pyyaml pytz
           WORK=work
-          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/wfo"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
-          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
-          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
+          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/wfo"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
@@ -291,11 +291,11 @@ jobs:
       - name: Run WFO splits
         run: |
           set -euo pipefail
-          export CSV_GLOB="${ inputs.CSV_GLOB }"
-          export FEES_BPS="${ inputs.FEES_BPS }"
-          export TZ="${ inputs.TZ }"
-          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
-          K="${ inputs.SPLITS }"
+          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
+          export FEES_BPS="${{ inputs.FEES_BPS }}"
+          export TZ="${{ inputs.TZ }}"
+          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
+          K="${{ inputs.SPLITS }}"
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
           [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
@@ -347,11 +347,11 @@ jobs:
           pip install --upgrade pip
           pip install pandas numpy scikit-learn pyyaml pytz
           WORK=work
-          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/sessions"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
-          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
-          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
+          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/sessions"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Write preflight to work/
         run: |
           set -euo pipefail
@@ -424,10 +424,10 @@ jobs:
       - name: Run sessions
         run: |
           set -euo pipefail
-          export CSV_GLOB="${ inputs.CSV_GLOB }"
-          export FEES_BPS="${ inputs.FEES_BPS }"
-          export TZ="${ inputs.TZ }"
-          export CHAMPION_CONFIG="${ inputs.CHAMPION_CONFIG }"
+          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
+          export FEES_BPS="${{ inputs.FEES_BPS }}"
+          export TZ="${{ inputs.TZ }}"
+          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           EP=""
           [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
           [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
