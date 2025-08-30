@@ -76,12 +76,9 @@ jobs:
           cd ..
           echo "[PIN] ok"
 
-  setup_shared:
+  single_run:
     needs: validate_shas
     runs-on: ubuntu-latest
-    outputs:
-      code_zip_path: ${{ steps.paths.outputs.code_zip_path }}
-      data_zip_path: ${{ steps.paths.outputs.data_zip_path }}
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -89,42 +86,27 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Install base deps
-        run: |
-          set -euo pipefail
-          python -V
-          pip install --upgrade pip
-          pip install pandas numpy scikit-learn pyyaml pytz
       - name: Prepare workspace
-        id: paths
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data"
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
+          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
           cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
-          echo "code_zip_path=${WORK}/code.zip" >> "$GITHUB_OUTPUT"
-          echo "data_zip_path=${WORK}/data.zip" >> "$GITHUB_OUTPUT"
-
-  single_run:
-    needs: setup_shared
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.11"
-      - name: Restore workspace & unzip
-        run: |
-          set -euo pipefail
-          WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/single" "_out_4u/logs"
-          cp -f "${{ needs.setup_shared.outputs.code_zip_path }}" "${WORK}/code.zip"
-          cp -f "${{ needs.setup_shared.outputs.data_zip_path }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
+
       - name: Install project deps (requirements or fallback)
         run: |
           set -euo pipefail
@@ -140,6 +122,7 @@ jobs:
             echo "[DEPS] Installing common libs"
             pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
           fi
+
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -166,12 +149,6 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
-            echo 'def write_cfg(path,data_path,fee_bps,champion):'
-            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
-            echo '  with open(path,"w") as f:'
-            echo '    f.write("data_path: \"" + data_path + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
-            echo '    f.write("champion_config: \"" + champion + "\"\n")'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -228,25 +205,28 @@ jobs:
           else
             EP="$EP_INPUT"
           fi
-          echo "[RUN] entrypoint=$EP"
           export MODE=single
           export CSV_GLOB="${{ inputs.CSV_GLOB }}"
           export FEES_BPS="${{ inputs.FEES_BPS }}"
           export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           python work/preflight_strict.py
-          if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" $ARGS || true; fi
+          echo "[RUN] entrypoint=$EP args=$ARGS"
+          if [ -n "$EP" ]; then set +e; PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" $ARGS > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt; RC=$?; set -e; echo "[RC]=$RC"; fi
           mkdir -p work/out/single
           for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
             hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/"$f" || true
           done
-      - name: Upload single
+      - name: Upload single artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: single_results
-          path: work/out/single
+          path: |
+            work/out/single
+            _out_4u/logs
+
 
   wfo:
-    needs: setup_shared
+    needs: validate_shas
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (pinned)
@@ -255,15 +235,27 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Restore workspace & unzip
+      - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/wfo"
-          cp -f "${{ needs.setup_shared.outputs.code_zip_path }}" "${WORK}/code.zip"
-          cp -f "${{ needs.setup_shared.outputs.data_zip_path }}" "${WORK}/data.zip"
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
+          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
+
       - name: Install project deps (requirements or fallback)
         run: |
           set -euo pipefail
@@ -272,7 +264,14 @@ jobs:
             [ -f "work/code/$f" ] && REQ="work/code/$f" && break
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
-          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta; fi
+          if [ -n "$REQ" ]; then
+            echo "[DEPS] Installing from $REQ"
+            pip install -r "$REQ"
+          else
+            echo "[DEPS] Installing common libs"
+            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
+          fi
+
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -299,12 +298,6 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
-            echo 'def write_cfg(path,data_path,fee_bps,champion):'
-            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
-            echo '  with open(path,"w") as f:'
-            echo '    f.write("data_path: \"" + data_path + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
-            echo '    f.write("champion_config: \"" + champion + "\"\n")'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -363,20 +356,23 @@ jobs:
             echo "[WFO] split $i/$((K-1))"
             export MODE=wfo; export K="$K"; export I="$i"
             python work/preflight_strict.py
-            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" || true; fi
+            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true; fi
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
             for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
               hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && mv -f "$hit" "$out/$f" || true
             done
           done
-      - name: Upload WFO
+      - name: Upload WFO artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wfo_results
-          path: work/out/wfo
+          path: |
+            work/out/wfo
+            _out_4u/logs
+
 
   sessions:
-    needs: setup_shared
+    needs: validate_shas
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (pinned)
@@ -385,15 +381,27 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Restore workspace & unzip
+      - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/sessions"
-          cp -f "${{ needs.setup_shared.outputs.code_zip_path }}" "${WORK}/code.zip"
-          cp -f "${{ needs.setup_shared.outputs.data_zip_path }}" "${WORK}/data.zip"
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
+          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
+          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
+            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
+            ls -alh
+            exit 2
+          fi
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
+
       - name: Install project deps (requirements or fallback)
         run: |
           set -euo pipefail
@@ -402,7 +410,14 @@ jobs:
             [ -f "work/code/$f" ] && REQ="work/code/$f" && break
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
-          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta; fi
+          if [ -n "$REQ" ]; then
+            echo "[DEPS] Installing from $REQ"
+            pip install -r "$REQ"
+          else
+            echo "[DEPS] Installing common libs"
+            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
+          fi
+
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -429,12 +444,6 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
-            echo 'def write_cfg(path,data_path,fee_bps,champion):'
-            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
-            echo '  with open(path,"w") as f:'
-            echo '    f.write("data_path: \"" + data_path + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
-            echo '    f.write("champion_config: \"" + champion + "\"\n")'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -493,14 +502,17 @@ jobs:
             echo "[SESSION] $S"
             export MODE=session; export SESSION="$S"
             python work/preflight_strict.py
-            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" || true; fi
+            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true; fi
             out="work/out/sessions/${S}"; mkdir -p "$out"
             for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
               hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && mv -f "$hit" "$out/$f" || true
             done
           done
-      - name: Upload sessions
+      - name: Upload session artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bundle_results
-          path: work/out/sessions
+          path: |
+            work/out/sessions
+            _out_4u/logs
+
