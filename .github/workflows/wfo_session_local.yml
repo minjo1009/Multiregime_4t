@@ -38,16 +38,6 @@ on:
         required: false
         default: "Asia/Seoul"
         type: string
-      ENTRYPOINT:
-        description: "Python path to run (e.g., work/code/run_4u.py). Leave 'auto' to autodetect."
-        required: false
-        default: "auto"
-        type: string
-      ENTRY_ARGS:
-        description: "Extra CLI args for ENTRYPOINT (appended after required ones)"
-        required: false
-        default: ""
-        type: string
 
 jobs:
   validate_shas:
@@ -91,7 +81,7 @@ jobs:
           set -euo pipefail
           python -V
           pip install --upgrade pip
-          pip install pandas numpy scikit-learn pyyaml pytz
+          pip install pandas numpy pyyaml scikit-learn pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
@@ -101,7 +91,6 @@ jobs:
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
-          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
       - name: Install project deps
         run: |
           set -euo pipefail
@@ -110,19 +99,15 @@ jobs:
             [ -f "work/code/$f" ] && REQ="work/code/$f" && break
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
-          if [ -n "$REQ" ]; then
-            pip install -r "$REQ"
-          else
-            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
-          fi
-      - name: Write preflight
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight (config+params)
         run: |
           set -euo pipefail
           mkdir -p work conf
           {
-            echo 'import os,sys,glob,json'
+            echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
-            echo 'import pathlib'
+            echo 'from pathlib import Path'
             echo 'def find_csv(root,patt):'
             echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
             echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
@@ -141,6 +126,21 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  d={"name": s, "params": {}}'
+            echo '  if not s: return d'
+            echo '  tokens=s.split("_")'
+            echo '  if tokens and tokens[0].lower()=="grid":'
+            echo '    d["params"]["grid"]=True'
+            echo '  import re'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  for t in tokens:'
+            echo '    m=pat.fullmatch(t)'
+            echo '    if m:'
+            echo '      k,v=m.group(1).lower(),float(m.group(2))'
+            echo '      d["params"][k]=v'
+            echo '      if k=="grid_p": d["params"]["p"]=v'
+            echo '  return d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -174,40 +174,33 @@ jobs:
             echo '    else:'
             echo '      m=(hr>=1)&(hr<9)'
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
-            echo '  else:'
-            echo '    raise SystemExit("unknown MODE")'
-            echo '  pathlib.Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    f.write("data_path: \"" + out_csv + "\"\n")'
             echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion_config: \"" + champ + "\"\n")'
+            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '  import yaml'
+            echo '  pdict=parse_champion(champ)'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
       - name: Run single
         run: |
           set -euo pipefail
-          EP_INPUT="${{ inputs.ENTRYPOINT }}"
-          ARGS="${{ inputs.ENTRY_ARGS }}"
-          if [ "$EP_INPUT" = "auto" ]; then
-            EP=""
-            [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
-            [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
-            [ -z "$EP" ] && [ -f work/code/run.py ] && EP="work/code/run.py"
-            [ -z "$EP" ] && [ -f work/code/backtest/runner.py ] && EP="work/code/backtest/runner.py"
-          else
-            EP="$EP_INPUT"
-          fi
+          EP=""
+          [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
+          [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
+          [ -z "$EP" ] && [ -f work/code/run.py ] && EP="work/code/run.py"
+          [ -z "$EP" ] && [ -f work/code/backtest/runner.py ] && EP="work/code/backtest/runner.py"
           export MODE=single
           export CSV_GLOB="${{ inputs.CSV_GLOB }}"
           export FEES_BPS="${{ inputs.FEES_BPS }}"
           export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           python work/preflight_strict.py
-          mkdir -p work/out/single
-          # IMPORTANT: pass required CLI flags expected by run_4u.py
-          if [ -n "$EP" ]; then             PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"               --data-root work               --csv-glob "input.csv"               --outdir work/out/single               --params "${{ inputs.CHAMPION_CONFIG }}"               $ARGS               > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true;           fi
-          for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
-            hit="$(find work/out/single -maxdepth 1 -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && echo "[HARVEST] $hit" || true
-          done
+          outdir="work/out/single"; mkdir -p "$outdir"
+          if [ -n "$EP" ]; then             PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"               --data-root work               --csv-glob "input.csv"               --outdir "$outdir"               --params "conf/params.effective.yml"               > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true;           fi
       - name: Upload single artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -232,7 +225,7 @@ jobs:
           set -euo pipefail
           python -V
           pip install --upgrade pip
-          pip install pandas numpy scikit-learn pyyaml pytz
+          pip install pandas numpy pyyaml scikit-learn pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
@@ -242,7 +235,6 @@ jobs:
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
-          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
       - name: Install project deps
         run: |
           set -euo pipefail
@@ -251,19 +243,15 @@ jobs:
             [ -f "work/code/$f" ] && REQ="work/code/$f" && break
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
-          if [ -n "$REQ" ]; then
-            pip install -r "$REQ"
-          else
-            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
-          fi
-      - name: Write preflight
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight (config+params)
         run: |
           set -euo pipefail
           mkdir -p work conf
           {
-            echo 'import os,sys,glob,json'
+            echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
-            echo 'import pathlib'
+            echo 'from pathlib import Path'
             echo 'def find_csv(root,patt):'
             echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
             echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
@@ -282,6 +270,21 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  d={"name": s, "params": {}}'
+            echo '  if not s: return d'
+            echo '  tokens=s.split("_")'
+            echo '  if tokens and tokens[0].lower()=="grid":'
+            echo '    d["params"]["grid"]=True'
+            echo '  import re'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  for t in tokens:'
+            echo '    m=pat.fullmatch(t)'
+            echo '    if m:'
+            echo '      k,v=m.group(1).lower(),float(m.group(2))'
+            echo '      d["params"][k]=v'
+            echo '      if k=="grid_p": d["params"]["p"]=v'
+            echo '  return d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -315,15 +318,18 @@ jobs:
             echo '    else:'
             echo '      m=(hr>=1)&(hr<9)'
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
-            echo '  else:'
-            echo '    raise SystemExit("unknown MODE")'
-            echo '  pathlib.Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    f.write("data_path: \"" + out_csv + "\"\n")'
             echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion_config: \"" + champ + "\"\n")'
+            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '  import yaml'
+            echo '  pdict=parse_champion(champ)'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
       - name: Run WFO splits
         run: |
           set -euo pipefail
@@ -341,7 +347,7 @@ jobs:
             export MODE=wfo; export K="$K"; export I="$i"
             python work/preflight_strict.py
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
-            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "${{ inputs.CHAMPION_CONFIG }}"                 > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true;             fi
+            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true;             fi
           done
       - name: Upload WFO artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -367,7 +373,7 @@ jobs:
           set -euo pipefail
           python -V
           pip install --upgrade pip
-          pip install pandas numpy scikit-learn pyyaml pytz
+          pip install pandas numpy pyyaml scikit-learn pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
@@ -377,7 +383,6 @@ jobs:
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
-          echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
       - name: Install project deps
         run: |
           set -euo pipefail
@@ -386,19 +391,15 @@ jobs:
             [ -f "work/code/$f" ] && REQ="work/code/$f" && break
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
-          if [ -n "$REQ" ]; then
-            pip install -r "$REQ"
-          else
-            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
-          fi
-      - name: Write preflight
+          if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
+      - name: Write preflight (config+params)
         run: |
           set -euo pipefail
           mkdir -p work conf
           {
-            echo 'import os,sys,glob,json'
+            echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
-            echo 'import pathlib'
+            echo 'from pathlib import Path'
             echo 'def find_csv(root,patt):'
             echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
             echo '  if not g: raise SystemExit("CSVDetect: no csv in " + root)'
@@ -417,6 +418,21 @@ jobs:
             echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
             echo '  df["dt_utc"]=dt'
             echo '  return df'
+            echo 'def parse_champion(s):'
+            echo '  d={"name": s, "params": {}}'
+            echo '  if not s: return d'
+            echo '  tokens=s.split("_")'
+            echo '  if tokens and tokens[0].lower()=="grid":'
+            echo '    d["params"]["grid"]=True'
+            echo '  import re'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  for t in tokens:'
+            echo '    m=pat.fullmatch(t)'
+            echo '    if m:'
+            echo '      k,v=m.group(1).lower(),float(m.group(2))'
+            echo '      d["params"][k]=v'
+            echo '      if k=="grid_p": d["params"]["p"]=v'
+            echo '  return d'
             echo 'if __name__=="__main__":'
             echo '  mode=os.environ.get("MODE","single")'
             echo '  root="work/data"'
@@ -450,15 +466,18 @@ jobs:
             echo '    else:'
             echo '      m=(hr>=1)&(hr<9)'
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
-            echo '  else:'
-            echo '    raise SystemExit("unknown MODE")'
-            echo '  pathlib.Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
             echo '    f.write("data_path: \"" + out_csv + "\"\n")'
             echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion_config: \"" + champ + "\"\n")'
+            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '  import yaml'
+            echo '  pdict=parse_champion(champ)'
+            echo '  with open("conf/params.effective.yml","w") as f:'
+            echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
       - name: Run sessions
         run: |
           set -euo pipefail
@@ -476,7 +495,7 @@ jobs:
             export MODE=session; export SESSION="$S"
             python work/preflight_strict.py
             out="work/out/sessions/${S}"; mkdir -p "$out"
-            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "${{ inputs.CHAMPION_CONFIG }}"                 > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true;             fi
+            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true;             fi
           done
       - name: Upload session artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
