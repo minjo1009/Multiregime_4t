@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: 'Path or URL to V2 code zip (repo root file name allowed)'
         required: true
-        default: strategy_v2_codepack_v2.1.2.zip
+        default: strategy_v2_codepack_v2.1.3.zip
       DATA_ZIP:
         description: 'Path or URL to data zip (repo root file name allowed)'
         required: true
@@ -56,7 +56,7 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params (no heredoc; base64 -> tools/patch.py)
+      - name: Patch params (inline python)
         env:
           OFI_THR: "${{ matrix.ofi_thr }}"
           P_THR_TR: "${{ matrix.pthr_tr }}"
@@ -65,13 +65,24 @@ jobs:
           R_LO: "${{ matrix.r_lo }}"
           T_HI: "${{ matrix.t_hi }}"
           COOL: "${{ matrix.cooldown }}"
-          B64: "CmltcG9ydCBvcywgeWFtbCwganNvbgpwPSd0bXAvdHJhZGUvY29uZi9wYXJhbXMudjIueW1sJwp3aXRoIG9wZW4ocCwncicpIGFzIGY6IGNmZz15YW1sLnNhZmVfbG9hZChmKQpjZmcuc2V0ZGVmYXVsdCgnb3JkZXJmbG93Jyx7fSlbJ29maV90aHInXT1mbG9hdChvcy5lbnZpcm9uWydPRklfVEhSJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pLnNldGRlZmF1bHQoJ3BfdGhyJyx7fSlbJ3RyZW5kJ109ZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSkKY2ZnLnNldGRlZmF1bHQoJ2V4aXQnLHt9KQpjZmdbJ2V4aXQnXVsndHBfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnVFBfQVRSJ10pOyBjZmdbJ2V4aXQnXVsnc2xfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pCmNmZy5zZXRkZWZhdWx0KCdyZWdpbWUnLHt9KQpjZmdbJ3JlZ2ltZSddWydyYW5nZV9sb19wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydSX0xPJ10pOyBjZmdbJ3JlZ2ltZSddWyd0cmVuZF9oaV9wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydUX0hJJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pWydjb29sZG93bl9iYXJzJ109aW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpCndpdGggb3BlbihwLCd3JykgYXMgZjogeWFtbC5zYWZlX2R1bXAoY2ZnLGYsc29ydF9rZXlzPUZhbHNlKQojIGFsc28gcGVyc2lzdCBwYXJhbXMgZm9yIGNvbGxlY3RvcgpwYXJhbXNfb3V0ID0gewogICdvZmlfdGhyJzogZmxvYXQob3MuZW52aXJvblsnT0ZJX1RIUiddKSwKICAncHRyJzogZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSksCiAgJ3RwX2F0cic6IGZsb2F0KG9zLmVudmlyb25bJ1RQX0FUUiddKSwKICAnc2xfYXRyJzogZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pLAogICdyX2xvJzogZmxvYXQob3MuZW52aXJvblsnUl9MTyddKSwKICAndF9oaSc6IGZsb2F0KG9zLmVudmlyb25bJ1RfSEknXSksCiAgJ2Nvb2xkb3duJzogaW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpLAp9Cm9zLm1ha2VkaXJzKCdfb3V0XzR1L3J1bicsIGV4aXN0X29rPVRydWUpCndpdGggb3BlbignX291dF80dS9ydW4vcGFyYW1zLmpzb24nLCd3JykgYXMgZjoKICBqc29uLmR1bXAocGFyYW1zX291dCwgZiwgaW5kZW50PTIpCg=="
         run: |
           set -euo pipefail
-          mkdir -p tools
-          echo "$B64" > tools/p.b64
-          python -c "import base64; open('tools/patch.py','wb').write(base64.b64decode(open('tools/p.b64','rb').read()))"
-          python tools/patch.py
+          python - <<'PY'
+import os, yaml, json
+p='tmp/trade/conf/params.v2.yml'
+with open(p,'r') as f: cfg=yaml.safe_load(f)
+cfg.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR'])
+cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TR'])
+cfg.setdefault('exit',{})
+cfg['exit']['tp_atr']=float(os.environ['TP_ATR']); cfg['exit']['sl_atr']=float(os.environ['SL_ATR'])
+cfg.setdefault('regime',{})
+cfg['regime']['range_lo_pctile']=float(os.environ['R_LO']); cfg['regime']['trend_hi_pctile']=float(os.environ['T_HI'])
+cfg.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOL']))
+with open(p,'w') as f: yaml.safe_dump(cfg,f,sort_keys=False)
+params_out = {'ofi_thr': float(os.environ['OFI_THR']),'ptr': float(os.environ['P_THR_TR']),'tp_atr': float(os.environ['TP_ATR']),'sl_atr': float(os.environ['SL_ATR']),'r_lo': float(os.environ['R_LO']),'t_hi': float(os.environ['T_HI']),'cooldown': int(float(os.environ['COOL']))}
+os.makedirs('_out_4u/run', exist_ok=True)
+open('_out_4u/run/params.json','w').write(json.dumps(params_out, indent=2))
+PY
           echo '---- params.v2.yml ----'; cat tmp/trade/conf/params.v2.yml
 
       - name: Preflight strict
@@ -94,6 +105,17 @@ jobs:
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
+      - name: Grid metrics (write json)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import json, os
+s = json.load(open('_out_4u/run/summary.json')) if os.path.exists('_out_4u/run/summary.json') else {}
+keys=['cum_pnl_close_based','avg_gatep','trend_frac','range_frac','entries','exits']
+m = {k:s.get(k) for k in keys}
+open('_out_4u/run/grid_metrics.json','w').write(json.dumps(m, indent=2))
+PY
+
       - name: Upload tiny metrics artifact (per-matrix)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
@@ -107,22 +129,46 @@ jobs:
     needs: grid
     runs-on: ubuntu-latest
     steps:
-      - name: Download all grid metrics
-        uses: actions/download-artifact@v4
+      - name: Download all grid metrics (pinned SHA)
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           pattern: grid-metrics-*
           merge-multiple: false
           path: metrics
 
-      - name: Aggregate & publish Top10 (no heredoc; base64 -> tools/aggregate.py)
-        env:
-          B64: "CmltcG9ydCBvcywganNvbiwgZ2xvYiwgcGFuZGFzIGFzIHBkCnJvb3QgPSAnbWV0cmljcycKcmVjcyA9IFtdCmZvciBkIGluIGdsb2IuZ2xvYihvcy5wYXRoLmpvaW4ocm9vdCwgJyonKSk6CiAgICBnbSA9IG9zLnBhdGguam9pbihkLCAnZ3JpZF9tZXRyaWNzLmpzb24nKQogICAgcGogPSBvcy5wYXRoLmpvaW4oZCwgJ3BhcmFtcy5qc29uJykKICAgIG0gPSB7fQogICAgaWYgb3MucGF0aC5leGlzdHMoZ20pOgogICAgICAgIHRyeTogbSA9IGpzb24ubG9hZChvcGVuKGdtKSkKICAgICAgICBleGNlcHQ6IG0gPSB7fQogICAgcCA9IHt9CiAgICBpZiBvcy5wYXRoLmV4aXN0cyhwaik6CiAgICAgICAgdHJ5OiBwID0ganNvbi5sb2FkKG9wZW4ocGopKQogICAgICAgIGV4Y2VwdDogcCA9IHt9CiAgICByID0ge30KICAgIHIudXBkYXRlKHApOyByLnVwZGF0ZShtKQogICAgclsnYXJ0aWZhY3QnXSA9IG9zLnBhdGguYmFzZW5hbWUoZCkKICAgIHJlY3MuYXBwZW5kKHIpCgpkZiA9IHBkLkRhdGFGcmFtZShyZWNzKQppZiBub3QgZGYuZW1wdHk6CiAgICBvcmRlciA9IFsnb2ZpX3RocicsJ3B0cicsJ3RwX2F0cicsJ3NsX2F0cicsJ3JfbG8nLCd0X2hpJywnY29vbGRvd24nLCdjdW1fcG5sX2Nsb3NlX2Jhc2VkJywnYXZnX2dhdGVwJywndHJlbmRfZnJhYycsJ3JhbmdlX2ZyYWMnLCdlbnRyaWVzJywnZXhpdHMnLCdhcnRpZmFjdCddCiAgICBjb2xzID0gW2MgZm9yIGMgaW4gb3JkZXIgaWYgYyBpbiBkZi5jb2x1bW5zXSArIFtjIGZvciBjIGluIGRmLmNvbHVtbnMgaWYgYyBub3QgaW4gb3JkZXJdCiAgICBkZiA9IGRmW2NvbHNdCmRmLnRvX2NzdignZ3JpZF9hZ2dyZWdhdGUuY3N2JywgaW5kZXg9RmFsc2UpCnRvcCA9IGRmLnNvcnRfdmFsdWVzKFsnY3VtX3BubF9jbG9zZV9iYXNlZCcsJ2F2Z19nYXRlcCddLCBhc2NlbmRpbmc9W0ZhbHNlLCBGYWxzZV0pLmhlYWQoMTApCnRvcC50b19jc3YoJ2dyaWRfdG9wMTAuY3N2JywgaW5kZXg9RmFsc2UpCmJlc3QgPSB0b3AuaGVhZCgxKS50b19kaWN0KG9yaWVudD0ncmVjb3JkcycpCmpzb24uZHVtcChiZXN0LCBvcGVuKCdiZXN0X2NvbmZpZy5qc29uJywndycpLCBpbmRlbnQ9MikKCiMgV3JpdGUgR2l0SHViIHJ1biBzdW1tYXJ5IChtYXJrZG93bikgd2l0aG91dCBleHRlcm5hbCBkZXBzCmRlZiBtZF90YWJsZShkZik6CiAgICBpZiBkZi5lbXB0eToKICAgICAgICByZXR1cm4gIk5vIHJlc3VsdHMuIgogICAgY29scyA9IGxpc3QoZGYuY29sdW1ucykKICAgIGxpbmVzID0gW10KICAgIGxpbmVzLmFwcGVuZCgnfCcgKyAnfCcuam9pbihjb2xzKSArICd8JykKICAgIGxpbmVzLmFwcGVuZCgnfCcgKyAnfCcuam9pbihbJy0tLSddKmxlbihjb2xzKSkgKyAnfCcpCiAgICBmb3IgXywgcm93IGluIGRmLml0ZXJyb3dzKCk6CiAgICAgICAgdmFscyA9IFtzdHIocm93LmdldChjLCcnKSkgZm9yIGMgaW4gY29sc10KICAgICAgICBsaW5lcy5hcHBlbmQoJ3wnICsgJ3wnLmpvaW4odmFscykgKyAnfCcpCiAgICByZXR1cm4gJ1xcbicuam9pbihsaW5lcykKCndpdGggb3Blbihvcy5lbnZpcm9uLmdldCgnR0lUSFVCX1NURVBfU1VNTUFSWScsJ1NVTU1BUlkubWQnKSwgJ2EnKSBhcyBmOgogICAgZi53cml0ZSgnIyBHcmlkIFRvcCAxMFxcblxcbicpCiAgICBmLndyaXRlKG1kX3RhYmxlKHRvcCkpCg=="
+      - name: Aggregate & publish Top10
         run: |
           set -euo pipefail
-          mkdir -p tools
-          echo "$B64" > tools/a.b64
-          python -c "import base64; open('tools/aggregate.py','wb').write(base64.b64decode(open('tools/a.b64','rb').read()))"
-          python tools/aggregate.py
+          python - <<'PY'
+import os, json, glob, pandas as pd
+root = 'metrics'
+recs = []
+for d in glob.glob(os.path.join(root, '*')):
+    gm = os.path.join(d, 'grid_metrics.json')
+    pj = os.path.join(d, 'params.json')
+    m = json.load(open(gm)) if os.path.exists(gm) else {}
+    p = json.load(open(pj)) if os.path.exists(pj) else {}
+    r={}; r.update(p); r.update(m); r['artifact']=os.path.basename(d); recs.append(r)
+df = pd.DataFrame(recs)
+if not df.empty:
+    order = ['ofi_thr','ptr','tp_atr','sl_atr','r_lo','t_hi','cooldown','cum_pnl_close_based','avg_gatep','trend_frac','range_frac','entries','exits','artifact']
+    cols = [c for c in order if c in df.columns] + [c for c in df.columns if c not in order]
+    df = df[cols]
+df.to_csv('grid_aggregate.csv', index=False)
+top = df.sort_values(['cum_pnl_close_based','avg_gatep'], ascending=[False, False]).head(10)
+top.to_csv('grid_top10.csv', index=False)
+best = top.head(1).to_dict(orient='records')
+json.dump(best, open('best_config.json','w'), indent=2)
+# Summary table
+def md_table(df):
+    if df.empty: return "No results."
+    cols=list(df.columns); L=[]
+    L.append('|'+'|'.join(cols)+'|'); L.append('|'+'|'.join(['---']*len(cols))+'|')
+    for _,row in df.iterrows():
+        vals=[str(row.get(c,'')) for c in cols]; L.append('|'+'|'.join(vals)+'|')
+    return '\n'.join(L)
+open(os.environ.get('GITHUB_STEP_SUMMARY','SUMMARY.md'),'a').write('# Grid Top 10\n\n'+md_table(top))
+PY
 
       - name: Upload consolidated tables
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
