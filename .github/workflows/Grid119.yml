@@ -3,11 +3,26 @@ name: Grid119L
 on:
   workflow_dispatch:
     inputs:
-      CODE_ZIP:   { description: 'code zip at repo root', required: true, default: trade_v1.1.9.3.zip }
-      DATA_ZIP:   { description: 'data zip at repo root', required: true, default: ETHUSDT_1min_2020_2025.zip }
-      CSV_FILE:   { description: 'csv filename after unzip', required: true, default: ETHUSDT_1min_2020_2025.csv }
-      MAX_RATIO:  { description: 'max n_trades/n_rows', required: true, default: "0.35" }
-      FEES:       { description: 'roundtrip fee (e.g., 0.0004)', required: true, default: "0.0004" }
+      CODE_ZIP:
+        description: code zip at repo root
+        required: true
+        default: trade_v1.1.9.3.zip
+      DATA_ZIP:
+        description: data zip at repo root
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_FILE:
+        description: csv filename after unzip
+        required: true
+        default: ETHUSDT_1min_2020_2025.csv
+      MAX_RATIO:
+        description: max n_trades/n_rows (e.g., 0.35)
+        required: true
+        default: "0.35"
+      FEES:
+        description: roundtrip fee (e.g., 0.0004)
+        required: true
+        default: "0.0004"
 
 jobs:
   grid:
@@ -20,7 +35,7 @@ jobs:
         SL:   [0.0015, 0.0018, 0.0020, 0.0022]
         HOLD: [4, 6, 8]
         GAP:  [3, 5, 8]
-        THRS: [[4.0,3.8,3.5],[4.5,4.2,3.8]]
+        THRS: ["4.0,3.8,3.5","4.5,4.2,3.8"]
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
@@ -84,10 +99,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          US="${{ matrix.THRS[0] }}"; EU="${{ matrix.THRS[1] }}"; AS="${{ matrix.THRS[2] }}"
-          TAG="tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_gap${{ matrix.GAP }}_us${US}_eu${EU}_as${AS}"
+          IFS=',' read -r US EU ASIA <<< "${{ matrix.THRS }}"
+          TAG="tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_gap${{ matrix.GAP }}_us${US}_eu${EU}_as${ASIA}"
           OUT_DIR="${{ env.OUT_BASE }}/$TAG"
-          echo "RUN_TAG=$TAG"    >> "$GITHUB_ENV"
+          echo "RUN_TAG=$TAG"     >> "$GITHUB_ENV"
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
           jq -n --argjson n "${N_ROWS}" '{n_rows:$n}' > "${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
@@ -99,20 +114,21 @@ jobs:
           mkdir -p "$RUN_DIR/conf"
           CONF="$RUN_DIR/conf/config.effective.yml"
           : > "$CONF"
-          printf '%s\n' 'thr_by_session:'                        >> "$CONF"
-          printf '%s\n' "  US: ${{ matrix.THRS[0] }}"            >> "$CONF"
-          printf '%s\n' "  EU: ${{ matrix.THRS[1] }}"            >> "$CONF"
-          printf '%s\n' "  ASIA: ${{ matrix.THRS[2] }}"          >> "$CONF"
-          printf '%s\n' "tp_pct: ${{ matrix.TP }}"               >> "$CONF"
-          printf '%s\n' "sl_pct: ${{ matrix.SL }}"               >> "$CONF"
-          printf '%s\n' "hold_bars: ${{ matrix.HOLD }}"          >> "$CONF"
-          printf '%s\n' "z_window: 288"                          >> "$CONF"
-          printf '%s\n' "long_only: true"                        >> "$CONF"
-          printf '%s\n' "pred_pos_means_long: false"             >> "$CONF"
-          printf '%s\n' "mcc_mode: trade_vs_not"                 >> "$CONF"
-          printf '%s\n' "mcc_sample: all_bars"                   >> "$CONF"
-          printf '%s\n' "xor_tp_sl: true"                        >> "$CONF"
-          printf '%s\n' "min_gap_bars: ${{ matrix.GAP }}"        >> "$CONF"
+          IFS=',' read -r US EU ASIA <<< "${{ matrix.THRS }}"
+          printf '%s\n' 'thr_by_session:'               >> "$CONF"
+          printf '%s\n' "  US: ${US}"                   >> "$CONF"
+          printf '%s\n' "  EU: ${EU}"                   >> "$CONF"
+          printf '%s\n' "  ASIA: ${ASIA}"               >> "$CONF"
+          printf '%s\n' "tp_pct: ${{ matrix.TP }}"      >> "$CONF"
+          printf '%s\n' "sl_pct: ${{ matrix.SL }}"      >> "$CONF"
+          printf '%s\n' "hold_bars: ${{ matrix.HOLD }}" >> "$CONF"
+          printf '%s\n' "z_window: 288"                 >> "$CONF"
+          printf '%s\n' "long_only: true"               >> "$CONF"
+          printf '%s\n' "pred_pos_means_long: false"    >> "$CONF"
+          printf '%s\n' "mcc_mode: trade_vs_not"        >> "$CONF"
+          printf '%s\n' "mcc_sample: all_bars"          >> "$CONF"
+          printf '%s\n' "xor_tp_sl: true"               >> "$CONF"
+          printf '%s\n' "min_gap_bars: ${{ matrix.GAP }}" >> "$CONF"
           printf '%s\n' "fees_roundtrip: ${{ github.event.inputs.FEES }}" >> "$CONF"
           sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
 
@@ -184,10 +200,8 @@ jobs:
             nr=$(jq -r '.n_rows' "$pfj")
             ratio=$(awk -v nt="$nt" -v nr="$nr" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
             US=$(jq -r '.thr_by_session.US // empty' "$gj"); EU=$(jq -r '.thr_by_session.EU // empty' "$gj"); AS=$(jq -r '.thr_by_session.ASIA // empty' "$gj")
-            # monthly geom calc
             python - <<PY
-import pandas as pd, json, sys
-import numpy as np
+import pandas as pd, json, sys, numpy as np
 from pathlib import Path
 dir_path = Path(r"""$dir""")
 fees = float(r"""$FEES""")
@@ -205,7 +219,6 @@ PY
             geom=$(tail -n1)
             echo "$tag,$tp,$sl,$hold,${tag#*_gap}","$US","$EU","$AS","$hit","$pf","$mcc","$nt","$ratio","$geom" >> leaderboard.csv
           done
-          # stage gates
           awk -F, 'NR==1 || ($13!="" && $13!="NaN" && $12!="" && $12!="NaN" && $12<=0.35 && $10>=1.5 && $9>=0.65 && $11>=0.5)' leaderboard.csv > top_stage1.csv
           awk -F, 'NR==1 || ($13!="" && $13!="NaN" && $12!="" && $12!="NaN" && $12<=0.35 && $10>=1.8 && $9>=0.70 && $11>=0.70)' leaderboard.csv > top_stage2.csv
           { head -n1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k10,10nr -k9,9nr -k11,11nr; } > leaderboard.sorted.csv
