@@ -53,16 +53,16 @@ jobs:
           echo "[PIN] validating SHAs by fetching commits..."
           mkdir -p _pincheck && cd _pincheck
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
-          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "${ env.CHECKOUT_SHA }"
+          [ "$(git cat-file -t "${ env.CHECKOUT_SHA }")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
-          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "${ env.SETUP_PYTHON_SHA }"
+          [ "$(git cat-file -t "${ env.SETUP_PYTHON_SHA }")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
-          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${ env.UPLOAD_ARTIFACT_SHA }"
+          [ "$(git cat-file -t "${ env.UPLOAD_ARTIFACT_SHA }")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
@@ -87,8 +87,8 @@ jobs:
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -100,7 +100,7 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
-      - name: Write preflight (config+params)
+      - name: Write preflight & post-summarizer
         run: |
           set -euo pipefail
           mkdir -p work conf
@@ -185,7 +185,71 @@ jobs:
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'data={}'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
 
+__POST__
       - name: Run single
         run: |
           set -euo pipefail
@@ -201,6 +265,12 @@ jobs:
           python work/preflight_strict.py
           outdir="work/out/single"; mkdir -p "$outdir"
           if [ -n "$EP" ]; then             PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"               --data-root work               --csv-glob "input.csv"               --outdir "$outdir"               --params "conf/params.effective.yml"               > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true;           fi
+      - name: Post-summarize single (cost-adjusted)
+        run: |
+          set -euo pipefail
+          export OUTDIR="work/out/single"
+          export FEES_BPS="${{ inputs.FEES_BPS }}"
+          python work/post_summarize.py
       - name: Upload single artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -231,8 +301,8 @@ jobs:
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -244,7 +314,7 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
-      - name: Write preflight (config+params)
+      - name: Write preflight & post-summarizer
         run: |
           set -euo pipefail
           mkdir -p work conf
@@ -329,7 +399,71 @@ jobs:
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'data={}'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
 
+__POST__
       - name: Run WFO splits
         run: |
           set -euo pipefail
@@ -348,6 +482,7 @@ jobs:
             python work/preflight_strict.py
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
             if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true;             fi
+            export OUTDIR="$out"; export FEES_BPS="${{ inputs.FEES_BPS }}"; python work/post_summarize.py || true
           done
       - name: Upload WFO artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -379,8 +514,8 @@ jobs:
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -392,7 +527,7 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then pip install -r "$REQ"; else pip install --upgrade numpy scipy numba statsmodels orjson python-json-logger ta finta; fi
-      - name: Write preflight (config+params)
+      - name: Write preflight & post-summarizer
         run: |
           set -euo pipefail
           mkdir -p work conf
@@ -477,7 +612,71 @@ jobs:
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+          {
+            echo 'import os,json,glob,math'
+            echo 'import pandas as pd'
+            echo 'from pathlib import Path'
+            echo 'fees_bps=float(os.environ.get("FEES_BPS","7.5"))'
+            echo 'roundtrip=2*fees_bps/10000.0'
+            echo 'outdir=Path(os.environ.get("OUTDIR","work/out/single"))'
+            echo 'sc=outdir/"summary_cost.json"'
+            echo 'sj=outdir/"summary.json"'
+            echo 'tr=outdir/"trades.csv"'
+            echo 'if sc.exists():'
+            echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
+            echo '  raise SystemExit(0)'
+            echo 'data={}'
+            echo 'def write(d):'
+            echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
+            echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
+            echo 'if tr.exists():'
+            echo '  try:'
+            echo '    df=pd.read_csv(tr)'
+            echo '    cand=["pnl_pct","ret_pct","return_pct","pnl_percent","ret_percent","ret","pnl","pnl_dec","return_dec"]'
+            echo '    col=None'
+            echo '    for c in cand:'
+            echo '      if c in df.columns: col=c; break'
+            echo '    if col is None:'
+            echo '      raise RuntimeError("No known PnL column in trades.csv")'
+            echo '    r=df[col].astype(float).dropna()'
+            echo '    med=r.abs().median() if len(r)>0 else 0.0'
+            echo '    scale="decimal"'
+            echo '    if med>1.0:'
+            echo '      r=r/100.0; scale="percent->decimal"'
+            echo '    r_adj=r - roundtrip'
+            echo '    d={"entries": int(len(r)), "avg_pnl_per_trade": float(r.mean()*100.0), "avg_pnl_per_trade_after_fee": float(r_adj.mean()*100.0), "cum_pnl": float(r.sum()), "cum_pnl_cost_adj": float(r_adj.sum()), "fee_roundtrip_bps": 2*fees_bps, "unit_scale": scale, "source": "trades.csv"}'
+            echo '    write(d); raise SystemExit(0)'
+            echo '  except Exception as e:'
+            echo '    print("[POST] trades.csv parse failed:", e)'
+            echo 'if sj.exists():'
+            echo '  try:'
+            echo '    d=json.loads(sj.read_text(encoding="utf-8"))'
+            echo '  except Exception:'
+            echo '    d={}'
+            echo '  entries=int(d.get("entries") or 0)'
+            echo '  avg=d.get("avg_pnl_per_trade") or d.get("avg_pnl_per_trade_pct")'
+            echo '  if avg is not None:'
+            echo '    try:'
+            echo '      avg=float(avg)'
+            echo '      avg_after=avg - (2*fees_bps/100.0)'
+            echo '      cum=avg/100.0 * entries'
+            echo '      cum_adj=avg_after/100.0 * entries'
+            echo '      dd={"entries": entries, "avg_pnl_per_trade": avg, "avg_pnl_per_trade_after_fee": avg_after, "cum_pnl": cum, "cum_pnl_cost_adj": cum_adj, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "percent(avg from summary)", "source": "summary.json(avg)"}'
+            echo '      write(dd); raise SystemExit(0)'
+            echo '    except Exception as e:'
+            echo '      print("[POST] avg-based fallback failed:", e)'
+            echo '  cum=d.get("cum_pnl_close_based") or d.get("cum_pnl")'
+            echo '  try: cum=float(cum) if cum is not None else None'
+            echo '  except Exception: cum=None'
+            echo '  if cum is not None and entries>0:'
+            echo '    avg_dec = cum/entries'
+            echo '    avg_after_dec = avg_dec - (2*fees_bps/10000.0)'
+            echo '    dd={"entries": entries, "avg_pnl_per_trade": avg_dec*100.0, "avg_pnl_per_trade_after_fee": avg_after_dec*100.0, "cum_pnl": cum, "cum_pnl_cost_adj": avg_after_dec*entries, "fee_roundtrip_bps": 2*fees_bps, "unit_scale": "proxy from cum/entries (decimal)", "source": "summary.json(proxy)", "_warning":"proxy may be inaccurate if cum units != decimal"}'
+            echo '    write(dd); raise SystemExit(0)'
+            echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
+          } > work/post_summarize.py
 
+__POST__
       - name: Run sessions
         run: |
           set -euo pipefail
@@ -496,6 +695,7 @@ jobs:
             python work/preflight_strict.py
             out="work/out/sessions/${S}"; mkdir -p "$out"
             if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true;             fi
+            export OUTDIR="$out"; export FEES_BPS="${{ inputs.FEES_BPS }}"; python work/post_summarize.py || true
           done
       - name: Upload session artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
