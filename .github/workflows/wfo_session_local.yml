@@ -45,15 +45,28 @@ jobs:
     env:
       CHECKOUT_SHA: "08c6903cd8c0fde910a37f88322edcfb5dd907a8"
       SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
+      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e75b540449e92b4886f43607fa02"
     steps:
       - name: Validate pinned SHAs exist
         run: |
           set -euo pipefail
-          echo "[PIN] validating SHAs..."
-          git ls-remote https://github.com/actions/checkout | grep -E "^${CHECKOUT_SHA}" >/dev/null || { echo "::error::checkout SHA not found"; exit 2; }
-          git ls-remote https://github.com/actions/setup-python | grep -E "^${SETUP_PYTHON_SHA}" >/dev/null || { echo "::error::setup-python SHA not found"; exit 2; }
-          git ls-remote https://github.com/actions/upload-artifact | grep -E "^${UPLOAD_ARTIFACT_SHA}" >/dev/null || { echo "::error::upload-artifact SHA not found"; exit 2; }
+          echo "[PIN] validating SHAs by fetching commits..."
+          mkdir -p _pincheck && cd _pincheck
+          # checkout
+          git -c init.defaultBranch=main init checkout && cd checkout
+          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
+          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          cd ..
+          # setup-python
+          git -c init.defaultBranch=main init setup_python && cd setup_python
+          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
+          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          cd ..
+          # upload-artifact
+          git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
+          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          cd ..
           echo "[PIN] ok"
 
   single_run:
@@ -62,7 +75,7 @@ jobs:
     env:
       CHECKOUT_SHA: "08c6903cd8c0fde910a37f88322edcfb5dd907a8"
       SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
+      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e75b540449e92b4886f43607fa02"
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -184,7 +197,7 @@ jobs:
           cd work/out
           zip -qr ../single_results.zip single
       - name: Upload artifact (pinned)
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: single_results
           path: work/single_results.zip
@@ -196,7 +209,7 @@ jobs:
     env:
       CHECKOUT_SHA: "08c6903cd8c0fde910a37f88322edcfb5dd907a8"
       SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
+      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e75b540449e92b4886f43607fa02"
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -319,7 +332,7 @@ jobs:
           cd work/out
           zip -qr ../wfo_results.zip wfo
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: wfo_results
           path: work/wfo_results.zip
@@ -331,7 +344,7 @@ jobs:
     env:
       CHECKOUT_SHA: "08c6903cd8c0fde910a37f88322edcfb5dd907a8"
       SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
+      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e75b540449e92b4886f43607fa02"
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -451,7 +464,7 @@ jobs:
           cd work
           zip -qr bundle_results.zip out
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bundle_results
           path: work/bundle_results.zip
