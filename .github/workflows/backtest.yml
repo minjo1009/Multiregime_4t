@@ -15,19 +15,17 @@ on:
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
 
-      # Consolidated tunables (<=10 inputs total)
       PARAMS:
-        description: 'key=value pairs (comma/semicolon separated). e.g. ofi_thr=0.25,p_thr_trend=0.65,cooldown=10,tp_atr=0.90,sl_atr=0.50,min_hold=5,r_lo=0.40,t_hi=0.60'
+        description: 'key=value (comma/semicolon). e.g. ofi_thr=0.25,p_thr_trend=0.65,cooldown=10,tp_atr=0.90,sl_atr=0.50,min_hold=5,r_lo=0.40,t_hi=0.60'
         required: false
         default: "ofi_thr=0.25,p_thr_trend=0.65,cooldown=10,tp_atr=0.90,sl_atr=0.50,min_hold=5,r_lo=0.40,t_hi=0.60"
 
-      # Optional costs
       FEES_BPS:
-        description: 'fees per side (bps), e.g. 10 = 0.10%'
+        description: 'fees per side (bps). Enter 10 for 0.10%'
         required: false
         default: "0"
       SLIP_BPS:
-        description: 'slippage per side (bps)'
+        description: 'slippage per side (bps). Enter 0 if none'
         required: false
         default: "0"
 
@@ -58,12 +56,12 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params (from PARAMS string; one-liner)
+      - name: Patch params (from PARAMS; safe one-liner)
         env:
           PARAMS: "${{ github.event.inputs.PARAMS }}"
         run: |
           set -euo pipefail
-          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); kv={}; raw=os.environ.get('PARAMS',''); for token in [t for t in raw.replace(';',',').split(',') if t.strip()]:     k,v=[x.strip() for x in token.split('=',1)]; kv[k]=v; def fget(k,d):     try: return float(kv.get(k,d))     except: return float(d) def iget(k,d):     try: return int(float(kv.get(k,d)))     except: return int(float(d)) c.setdefault('orderflow',{})['ofi_thr']=fget('ofi_thr',0.25); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=fget('p_thr_trend',0.65); c.setdefault('entry',{})['cooldown_bars']=iget('cooldown',10); c.setdefault('exit',{})['tp_atr']=fget('tp_atr',0.90); c['exit']['sl_atr']=fget('sl_atr',0.50); c['exit']['min_hold']=iget('min_hold',5); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=fget('r_lo',0.40); c['regime']['trend_hi_pctile']=fget('t_hi',0.60); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
+          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); raw=os.environ.get('PARAMS',''); toks=[t for t in raw.replace(';',',').split(',') if '=' in t]; kv=dict((t.split('=',1)[0].strip(), t.split('=',1)[1].strip()) for t in toks); f=lambda k,d: float(kv.get(k,d)); ig=lambda k,d: int(float(kv.get(k,d))); c.setdefault('orderflow',{})['ofi_thr']=f('ofi_thr',0.25); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=f('p_thr_trend',0.65); c.setdefault('entry',{})['cooldown_bars']=ig('cooldown',10); c.setdefault('exit',{})['tp_atr']=f('tp_atr',0.90); c['exit']['sl_atr']=f('sl_atr',0.50); c['exit']['min_hold']=ig('min_hold',5); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=f('r_lo',0.40); c['regime']['trend_hi_pctile']=f('t_hi',0.60); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
           echo '---- params.v2.yml ----'
           cat tmp/trade/conf/params.v2.yml
 
@@ -87,14 +85,14 @@ jobs:
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: (Optional) Cost-adjust summary
+      - name: (Optional) Cost-adjust summary (per-side bps)
         if: ${{ github.event.inputs.FEES_BPS != '0' || github.event.inputs.SLIP_BPS != '0' }}
         env:
           FEES_BPS: "${{ github.event.inputs.FEES_BPS }}"
           SLIP_BPS: "${{ github.event.inputs.SLIP_BPS }}"
         run: |
           set -euo pipefail
-          python -c "import os,json; s=json.load(open('_out_4u/run/summary.json')); entries=int(s.get('entries',0)); fee=float(os.environ.get('FEES_BPS','0')); slip=float(os.environ.get('SLIP_BPS','0')); rt=2.0*(fee+slip)/10000.0; s['cost_model']={'fees_bps_per_side':fee,'slip_bps_per_side':slip,'roundtrip_cost':rt}; s['cum_pnl_cost_adj']=float(s.get('cum_pnl_close_based',0.0))-entries*rt; open('_out_4u/run/summary_cost.json','w').write(json.dumps(s,indent=2))"
+          python -c "import os,json; s=json.load(open('_out_4u/run/summary.json')); entries=int(s.get('entries',0)); fee_bps=float(os.environ.get('FEES_BPS','0')); slip_bps=float(os.environ.get('SLIP_BPS','0')); rt=2.0*(fee_bps+slip_bps)/10000.0; s['cost_model']={'fees_bps_per_side':fee_bps,'slip_bps_per_side':slip_bps,'roundtrip_cost':rt,'note':'cost is % of notional; returns-based pnl assumes full notional per trade'}; s['cum_pnl_cost_adj']=float(s.get('cum_pnl_close_based',0.0))-entries*rt; open('_out_4u/run/summary_cost.json','w').write(json.dumps(s,indent=2))"
 
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
