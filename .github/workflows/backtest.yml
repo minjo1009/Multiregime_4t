@@ -15,41 +15,13 @@ on:
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
 
-      # ---- Tunable strategy params (defaults = Top1b suggestion) ----
-      OFI_THR:
-        description: 'orderflow.ofi_thr'
+      # Consolidated tunables (<=10 inputs total)
+      PARAMS:
+        description: 'key=value pairs (comma/semicolon separated). e.g. ofi_thr=0.25,p_thr_trend=0.65,cooldown=10,tp_atr=0.90,sl_atr=0.50,min_hold=5,r_lo=0.40,t_hi=0.60'
         required: false
-        default: "0.25"
-      P_THR_TREND:
-        description: 'entry.p_thr.trend'
-        required: false
-        default: "0.65"
-      COOLDOWN_BARS:
-        description: 'entry.cooldown_bars'
-        required: false
-        default: "10"
-      TP_ATR:
-        description: 'exit.tp_atr'
-        required: false
-        default: "0.90"
-      SL_ATR:
-        description: 'exit.sl_atr'
-        required: false
-        default: "0.50"
-      MIN_HOLD:
-        description: 'exit.min_hold (bars)'
-        required: false
-        default: "5"
-      R_LO:
-        description: 'regime.range_lo_pctile'
-        required: false
-        default: "0.40"
-      T_HI:
-        description: 'regime.trend_hi_pctile'
-        required: false
-        default: "0.60"
+        default: "ofi_thr=0.25,p_thr_trend=0.65,cooldown=10,tp_atr=0.90,sl_atr=0.50,min_hold=5,r_lo=0.40,t_hi=0.60"
 
-      # ---- Optional costs ----
+      # Optional costs
       FEES_BPS:
         description: 'fees per side (bps), e.g. 10 = 0.10%'
         required: false
@@ -86,19 +58,12 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params (tunable inputs; one-liner)
+      - name: Patch params (from PARAMS string; one-liner)
         env:
-          OFI_THR: "${{ github.event.inputs.OFI_THR }}"
-          P_THR_TREND: "${{ github.event.inputs.P_THR_TREND }}"
-          COOLDOWN_BARS: "${{ github.event.inputs.COOLDOWN_BARS }}"
-          TP_ATR: "${{ github.event.inputs.TP_ATR }}"
-          SL_ATR: "${{ github.event.inputs.SL_ATR }}"
-          MIN_HOLD: "${{ github.event.inputs.MIN_HOLD }}"
-          R_LO: "${{ github.event.inputs.R_LO }}"
-          T_HI: "${{ github.event.inputs.T_HI }}"
+          PARAMS: "${{ github.event.inputs.PARAMS }}"
         run: |
           set -euo pipefail
-          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); c.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR']); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TREND']); c.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOLDOWN_BARS'])); c.setdefault('exit',{})['tp_atr']=float(os.environ['TP_ATR']); c['exit']['sl_atr']=float(os.environ['SL_ATR']); c['exit']['min_hold']=int(float(os.environ['MIN_HOLD'])); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=float(os.environ['R_LO']); c['regime']['trend_hi_pctile']=float(os.environ['T_HI']); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
+          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); kv={}; raw=os.environ.get('PARAMS',''); for token in [t for t in raw.replace(';',',').split(',') if t.strip()]:     k,v=[x.strip() for x in token.split('=',1)]; kv[k]=v; def fget(k,d):     try: return float(kv.get(k,d))     except: return float(d) def iget(k,d):     try: return int(float(kv.get(k,d)))     except: return int(float(d)) c.setdefault('orderflow',{})['ofi_thr']=fget('ofi_thr',0.25); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=fget('p_thr_trend',0.65); c.setdefault('entry',{})['cooldown_bars']=iget('cooldown',10); c.setdefault('exit',{})['tp_atr']=fget('tp_atr',0.90); c['exit']['sl_atr']=fget('sl_atr',0.50); c['exit']['min_hold']=iget('min_hold',5); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=fget('r_lo',0.40); c['regime']['trend_hi_pctile']=fget('t_hi',0.60); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
           echo '---- params.v2.yml ----'
           cat tmp/trade/conf/params.v2.yml
 
@@ -118,7 +83,7 @@ jobs:
           for c in "tmp/trade/run_4u.py" "tmp/trade/backtest/run_4u.py" "tmp/trade/backtest/runner.py"; do
             if [ -f "$c" ]; then ENTRY="$c"; break; fi
           done
-          if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
+          if [ -z "$ENTRY" ]; then echo 'No entrypoint found'; exit 1; fi
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
