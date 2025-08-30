@@ -1,4 +1,4 @@
-name: backtest119-grid
+name: Grid119
 
 on:
   workflow_dispatch:
@@ -32,16 +32,18 @@ jobs:
       DATA_DIR: tmp/data
       OUT_BASE: _out_119
       PYVER: '3.11'
+
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with: { python-version: ${{ env.PYVER }} }
+        with:
+          python-version: ${{ env.PYVER }}
 
-      # ✅ FIXED: use single var 'pair' + 'set -- $pair'
       - name: Guard SHAs
         shell: bash
         run: |
