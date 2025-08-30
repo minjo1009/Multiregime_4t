@@ -1,0 +1,217 @@
+name: Smoke119
+
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: Repo path to code zip (root)
+        required: true
+        default: trade_v1.1.9.zip
+      DATA_ZIP:
+        description: Repo path to data zip (root)
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_FILE:
+        description: CSV filename after unzip
+        required: true
+        default: ETHUSDT_1min_2020_2025.csv
+      TP:
+        description: take-profit pct (e.g., 0.0035)
+        required: true
+        default: "0.0035"
+      SL:
+        description: stop-loss pct (e.g., 0.0018)
+        required: true
+        default: "0.0018"
+      HOLD:
+        description: hold bars
+        required: true
+        default: "6"
+      THR_US:
+        description: z-thr US
+        required: true
+        default: "4.0"
+      THR_EU:
+        description: z-thr EU
+        required: true
+        default: "3.8"
+      THR_ASIA:
+        description: z-thr ASIA
+        required: true
+        default: "3.5"
+      STRICT_GUARD:
+        description: 'true면 과밀/불일치 시 실패, false면 경고만'
+        required: true
+        default: "false"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      RUN_DIR: tmp/trade
+      DATA_DIR: tmp/data
+      OUT_DIR: _out_119/smoke
+      PYVER: '3.11'
+
+    steps:
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYVER }}
+
+      - name: Resolve ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          res(){ local in="$1" out="$2" p=""; local base="$(basename "$in")";
+            if [[ -f "$in" ]] ; then p="${GITHUB_WORKSPACE}/$in";
+            else p="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"; fi
+            [[ -n "$p" && -f "$p" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
+            echo "${out}=${p}" >> "$GITHUB_ENV"; echo "[resolved] $in -> $p";
+          }
+          res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
+          res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
+
+      - name: Unpack code/data & locate runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          unzip -q "$CODE_ZIP_ABS" -d "$RUN_DIR"
+          unzip -q "$DATA_ZIP_ABS" -d "$DATA_DIR"
+          RUN_PY="$(find "$RUN_DIR" -maxdepth 4 -type f -name 'run_4u.py' -print -quit || true)"
+          [[ -n "$RUN_PY" ]] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
+          echo "RUN_PY=$RUN_PY" >> "$GITHUB_ENV"
+          echo "OUT_DIR_ABS=${GITHUB_WORKSPACE}/${OUT_DIR}" >> "$GITHUB_ENV"
+
+      - name: CSV preflight (required columns + n_rows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="${GITHUB_WORKSPACE}/${DATA_DIR}/${{ github.event.inputs.CSV_FILE }}"
+          if [[ ! -f "$CSV" ]]; then
+            F="$(find "$DATA_DIR" -type f -name '${{ github.event.inputs.CSV_FILE }}' -print -quit || true)"
+            [[ -n "$F" ]] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${F}"
+          fi
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+          HDR="$(head -n1 "$CSV")"
+          for c in open_time open high low close volume; do
+            echo "$HDR" | grep -q "\b$c\b" || { echo "::error::missing column: $c"; exit 75; }
+          done
+          NROWS=$(($(wc -l < "$CSV") - 1))
+          echo "N_ROWS=$NROWS" >> "$GITHUB_ENV"
+          jq -n --arg path "$CSV" --arg hdr "$HDR" --argjson rows "$NROWS" '{path:$path, header:$hdr, n_rows:$rows}' \
+            > "${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
+
+      - name: Write conf.effective.yml (printf only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR/conf"
+          CONF="$RUN_DIR/conf/config.effective.yml"
+          : > "$CONF"
+          printf '%s\n' 'thr_by_session:'           >> "$CONF"
+          printf '%s\n' "  US: ${{ github.event.inputs.THR_US }}"    >> "$CONF"
+          printf '%s\n' "  EU: ${{ github.event.inputs.THR_EU }}"    >> "$CONF"
+          printf '%s\n' "  ASIA: ${{ github.event.inputs.THR_ASIA }}" >> "$CONF"
+          printf '%s\n' "tp_pct: ${{ github.event.inputs.TP }}"      >> "$CONF"
+          printf '%s\n' "sl_pct: ${{ github.event.inputs.SL }}"      >> "$CONF"
+          printf '%s\n' "hold_bars: ${{ github.event.inputs.HOLD }}" >> "$CONF"
+          sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
+
+      - name: Install deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip >/dev/null
+          pip install pandas numpy pyyaml >/dev/null
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq; fi
+
+      - name: Run engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$RUN_DIR"
+          python "$RUN_PY" --data_path "$CSV_PATH" --out_dir "${OUT_DIR_ABS}"
+
+      - name: Write diag_post.py (printf; no heredoc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          D="${GITHUB_WORKSPACE}/diag_post.py"
+          : > "$D"
+          printf '%s\n' "import os, json, math, pandas as pd, numpy as np, pathlib" >> "$D"
+          printf '%s\n' "out = pathlib.Path(os.environ['OUT_DIR_ABS'])" >> "$D"
+          printf '%s\n' "s = json.loads((out/'summary.json').read_text())" >> "$D"
+          printf '%s\n' "pre = json.loads((out/'preflight.json').read_text()) if (out/'preflight.json').exists() else {}" >> "$D"
+          printf '%s\n' "rows = pre.get('n_rows') or s.get('n_rows')" >> "$D"
+          printf '%s\n' "trp = out/'trades.csv'; pnl=None; hit_t=None; pf_t=None" >> "$D"
+          printf '%s\n' "if trp.exists():" >> "$D"
+          printf '%s\n' "    df = pd.read_csv(trp)" >> "$D"
+          printf '%s\n' "    col = None" >> "$D"
+          printf '%s\n' "    for c in ['PnL','pnl','ret','pnl_pct']: " >> "$D"
+          printf '%s\n' "        if c in df.columns: col=c; break" >> "$D"
+          printf '%s\n' "    if col is not None:" >> "$D"
+          printf '%s\n' "        pnl = df[col].astype(float).values" >> "$D"
+          printf '%s\n' "        pos = pnl[pnl>0].sum(); neg = -pnl[pnl<0].sum()" >> "$D"
+          printf '%s\n' "        pf_t = (pos/neg) if neg>0 else None" >> "$D"
+          printf '%s\n' "        hit_t = float((pnl>0).mean()) if pnl.size>0 else None" >> "$D"
+          printf '%s\n' "ratio = (s.get('n_trades')/rows) if rows and rows>0 else None" >> "$D"
+          printf '%s\n' "flags = []" >> "$D"
+          printf '%s\n' "if ratio is not None and ratio>0.60: flags.append('DENSE_RUN')" >> "$D"
+          printf '%s\n' "if s.get('mcc') is not None and s.get('hit_rate') is not None and s['mcc']>0.7 and s['hit_rate']<0.45: flags.append('SIGN_MAPPING_SUSPECT')" >> "$D"
+          printf '%s\n' "if hit_t is not None and s.get('hit_rate') is not None and abs(hit_t - s['hit_rate'])>0.05: flags.append('HIT_MISMATCH')" >> "$D"
+          printf '%s\n' "if pf_t is not None and s.get('profit_factor') is not None and s['profit_factor'] is not None:" >> "$D"
+          printf '%s\n' "    if s['profit_factor']>=0 and pf_t>=0 and abs(pf_t - s['profit_factor'])>0.10: flags.append('PF_MISMATCH')" >> "$D"
+          printf '%s\n' "diag = {" >> "$D"
+          printf '%s\n' "  'n_rows': rows, 'n_trades': s.get('n_trades'), 'ratio': ratio," >> "$D"
+          printf '%s\n' "  'hit_rate_summary': s.get('hit_rate'), 'hit_rate_trades': hit_t," >> "$D"
+          printf '%s\n' "  'pf_summary': s.get('profit_factor'), 'pf_trades': pf_t," >> "$D"
+          printf '%s\n' "  'mcc': s.get('mcc'), 'flags': flags" >> "$D"
+          printf '%s\n' "}" >> "$D"
+          printf '%s\n' "(out/'diag.json').write_text(json.dumps(diag, indent=2))" >> "$D"
+          printf '%s\n' "print(json.dumps(diag, indent=2))" >> "$D"
+
+      - name: Run diagnostics & gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "${GITHUB_WORKSPACE}/diag_post.py" | tee /tmp/diag.json
+          NEED_FAIL="false"
+          HAS_FLAG=$(jq -r '.flags|join(",")' "${OUT_DIR_ABS}/diag.json")
+          echo "[flags] ${HAS_FLAG}"
+          if echo "${HAS_FLAG}" | grep -q "SIGN_MAPPING_SUSPECT"; then
+            echo "::warning::SIGN_MAPPING_SUSPECT"
+            [[ "${{ github.event.inputs.STRICT_GUARD }}" == "true" ]] && NEED_FAIL="true"
+          fi
+          if echo "${HAS_FLAG}" | grep -q "DENSE_RUN"; then
+            echo "::warning::DENSE_RUN (n_trades_ratio>0.60)"
+            [[ "${{ github.event.inputs.STRICT_GUARD }}" == "true" ]] && NEED_FAIL="true"
+          fi
+          if echo "${HAS_FLAG}" | grep -q "HIT_MISMATCH"; then
+            echo "::warning::HIT_MISMATCH (summary vs trades.csv)"
+          fi
+          if echo "${HAS_FLAG}" | grep -q "PF_MISMATCH"; then
+            echo "::warning::PF_MISMATCH (summary vs trades.csv)"
+          fi
+          if [[ "$NEED_FAIL" == "true" ]]; then
+            exit 79
+          fi
+
+      - name: Emit to Job Summary (no artifacts)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## Smoke119 Diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**diag.json**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "${OUT_DIR_ABS}/diag.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
