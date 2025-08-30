@@ -1,19 +1,28 @@
-name: Backtest-STRICT-NO-CHECKOUT
+name: Backtest-V2-Top1
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'Path or URL to code zip (repo root file name allowed)'
+        description: 'V2 코드 zip (repo 루트 파일명 가능)'
         required: true
-        default: codepack_v1.1.8_baseline.zip
+        default: strategy_v2_codepack_v2.1.3.zip
       DATA_ZIP:
-        description: 'Path or URL to data zip (repo root file name allowed)'
+        description: '데이터 zip (repo 루트 파일명 가능)'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
-        description: 'CSV glob (e.g. **/*ETHUSDT*1min*2020*2025*.csv)'
+        description: 'CSV glob'
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      FEES_BPS:
+        description: '거래수수료(한쪽, bps). 예: 4 = 0.04%'
+        required: false
+        default: "0"
+      SLIP_BPS:
+        description: '슬리피지(한쪽, bps). 예: 5 = 0.05%'
+        required: false
+        default: "0"
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
@@ -22,9 +31,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip || true
-          pip install pandas numpy pyyaml || true
+          pip install pandas numpy pyyaml numba || true
 
-      - name: Acquire code/data (local / URL / repo raw)
+      - name: Acquire code/data (file / URL / repo raw)
         env:
           CODE_ZIP: "${{ github.event.inputs.CODE_ZIP }}"
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
@@ -32,40 +41,59 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u/run
           # CODE_ZIP
-          CSRC=""
-          if [ -f "$CODE_ZIP" ]; then
-            CSRC="$CODE_ZIP"
-          elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then
-            echo "Downloading code from URL: $CODE_ZIP"
-            curl -fL "$CODE_ZIP" -o tmp/trade/code.zip
-            CSRC="tmp/trade/code.zip"
-          else
-            RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"
-            echo "Trying repo raw URL: $RCODE"
-            curl -fL "$RCODE" -o tmp/trade/code.zip
-            CSRC="tmp/trade/code.zip"
-          fi
+          if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP"; \
+          elif echo "$CODE_ZIP" | grep -qiE '^https\?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; \
+          else RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
           unzip -q "$CSRC" -d tmp/trade
+
           # DATA_ZIP
-          DSRC=""
-          if [ -f "$DATA_ZIP" ]; then
-            DSRC="$DATA_ZIP"
-          elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then
-            echo "Downloading data from URL: $DATA_ZIP"
-            curl -fL "$DATA_ZIP" -o tmp/data/data.zip
-            DSRC="tmp/data/data.zip"
-          else
-            RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"
-            echo "Trying repo raw URL: $RDATA"
-            curl -fL "$RDATA" -o tmp/data/data.zip
-            DSRC="tmp/data/data.zip"
-          fi
+          if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP"; \
+          elif echo "$DATA_ZIP" | grep -qiE '^https\?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; \
+          else RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
           unzip -q "$DSRC" -d tmp/data
 
-      - name: Preflight strict
+          # namespace guards
+          touch tmp/trade/strategy/__init__.py || true
+          touch tmp/trade/strategy/v2/__init__.py || true
+
+      - name: Patch params to TOP1
+        env:
+          OFI_THR: "0.25"
+          P_THR_TR: "0.60"
+          TP_ATR: "0.90"
+          SL_ATR: "0.50"
+          R_LO: "0.40"
+          T_HI: "0.60"
+          COOL: "5"
         run: |
           set -euo pipefail
-          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
+          python - <<'PY'
+import os, yaml, json
+p='tmp/trade/conf/params.v2.yml'
+with open(p,'r') as f: cfg=yaml.safe_load(f)
+
+# --- TOP1 파라미터 반영 ---
+cfg.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR'])
+cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TR'])
+cfg.setdefault('exit',{})
+cfg['exit']['tp_atr']=float(os.environ['TP_ATR'])
+cfg['exit']['sl_atr']=float(os.environ['SL_ATR'])
+cfg.setdefault('regime',{})
+cfg['regime']['range_lo_pctile']=float(os.environ['R_LO'])
+cfg['regime']['trend_hi_pctile']=float(os.environ['T_HI'])
+cfg.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOL']))
+
+with open(p,'w') as f: yaml.safe_dump(cfg,f,sort_keys=False)
+print("Patched params.v2.yml -> TOP1")
+PY
+          echo '---- params.v2.yml ----'; cat tmp/trade/conf/params.v2.yml
+
+      - name: Preflight strict
+        env:
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
+        run: |
+          set -euo pipefail
+          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run
 
       - name: Detect entrypoint and run
         env:
@@ -73,23 +101,41 @@ jobs:
         run: |
           set -euo pipefail
           ENTRY=""
-          for c in "tmp/trade/run_4u.py" "tmp/trade/backtest/run_4u.py" "tmp/trade/run.py" "tmp/trade/backtest/runner.py"; do
+          for c in "tmp/trade/run_4u.py" "tmp/trade/backtest/run_4u.py" "tmp/trade/backtest/runner.py"; do
             if [ -f "$c" ]; then ENTRY="$c"; break; fi
           done
           if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
           echo "ENTRY=$ENTRY"
-          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run || true
-          [ -f _out_4u/run/gating_debug.json ] || echo "{}" > _out_4u/run/gating_debug.json
-          [ -f _out_4u/run/summary.json ] || echo "{}" > _out_4u/run/summary.json
-          [ -f _out_4u/run/preds_test.csv ] || echo "open_time,signal,score" > _out_4u/run/preds_test.csv
-          [ -f _out_4u/run/trades.csv ] || echo "open_time,side,price,qty" > _out_4u/run/trades.csv
+          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
+
+      - name: (Optional) Cost-adjust summary
+        if: ${{ inputs.FEES_BPS != '0' || inputs.SLIP_BPS != '0' }}
+        env:
+          FEES_BPS: "${{ github.event.inputs.FEES_BPS }}"
+          SLIP_BPS: "${{ github.event.inputs.SLIP_BPS }}"
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+import os, json
+s = json.load(open('_out_4u/run/summary.json'))
+entries = int(s.get('entries',0))
+fee_bps = float(os.environ.get('FEES_BPS','0'))
+slip_bps = float(os.environ.get('SLIP_BPS','0'))
+# 한쪽 비용(bps) 합 → 왕복 2회 적용
+roundtrip_cost = 2.0*(fee_bps + slip_bps)/10000.0
+s['cost_model'] = {'fees_bps_per_side': fee_bps, 'slip_bps_per_side': slip_bps, 'roundtrip_cost'] if True else None
+s['cum_pnl_cost_adj'] = float(s.get('cum_pnl_close_based',0.0)) - entries*roundtrip_cost
+open('_out_4u/run/summary_cost.json','w').write(json.dumps(s, indent=2))
+print("Wrote _out_4u/run/summary_cost.json")
+PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
-          name: backtest-artifacts
+          name: "backtest-top1"
           path: |
             _out_4u/run/gating_debug.json
             _out_4u/run/summary.json
+            _out_4u/run/summary_cost.json
             _out_4u/run/preds_test.csv
             _out_4u/run/trades.csv
