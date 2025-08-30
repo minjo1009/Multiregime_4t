@@ -100,6 +100,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p work
           mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
@@ -231,6 +232,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p work
           mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
@@ -367,6 +369,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p work
           mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
