@@ -29,9 +29,9 @@ jobs:
         ofi_thr: [0.15, 0.20, 0.25]
         pthr_tr: [0.60, 0.65]
         tp_atr: [0.70, 0.90]
-        r_lo: [0.30, 0.35, 0.40]   # new
-        t_hi: [0.60, 0.65, 0.70]   # new
-        cooldown: [3, 5, 10]       # new
+        r_lo: [0.30, 0.35, 0.40]
+        t_hi: [0.60, 0.65, 0.70]
+        cooldown: [3, 5, 10]
     steps:
       - name: Install deps (pandas, numpy, pyyaml, numba)
         run: |
@@ -56,7 +56,7 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params (add regime percentiles & cooldown)
+      - name: Patch params (no heredoc; base64 -> tools/patch.py)
         env:
           OFI_THR: "${{ matrix.ofi_thr }}"
           P_THR_TR: "${{ matrix.pthr_tr }}"
@@ -65,19 +65,13 @@ jobs:
           R_LO: "${{ matrix.r_lo }}"
           T_HI: "${{ matrix.t_hi }}"
           COOL: "${{ matrix.cooldown }}"
+          B64: "CmltcG9ydCBvcywgeWFtbApwPSd0bXAvdHJhZGUvY29uZi9wYXJhbXMudjIueW1sJwp3aXRoIG9wZW4ocCwncicpIGFzIGY6IGNmZz15YW1sLnNhZmVfbG9hZChmKQpjZmcuc2V0ZGVmYXVsdCgnb3JkZXJmbG93Jyx7fSlbJ29maV90aHInXT1mbG9hdChvcy5lbnZpcm9uWydPRklfVEhSJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pLnNldGRlZmF1bHQoJ3BfdGhyJyx7fSlbJ3RyZW5kJ109ZmxvYXQob3MuZW52aXJvblsnUF9USFJfVFInXSkKY2ZnLnNldGRlZmF1bHQoJ2V4aXQnLHt9KQpjZmdbJ2V4aXQnXVsndHBfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnVFBfQVRSJ10pOyBjZmdbJ2V4aXQnXVsnc2xfYXRyJ109ZmxvYXQob3MuZW52aXJvblsnU0xfQVRSJ10pCmNmZy5zZXRkZWZhdWx0KCdyZWdpbWUnLHt9KQpjZmdbJ3JlZ2ltZSddWydyYW5nZV9sb19wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydSX0xPJ10pOyBjZmdbJ3JlZ2ltZSddWyd0cmVuZF9oaV9wY3RpbGUnXT1mbG9hdChvcy5lbnZpcm9uWydUX0hJJ10pCmNmZy5zZXRkZWZhdWx0KCdlbnRyeScse30pWydjb29sZG93bl9iYXJzJ109aW50KGZsb2F0KG9zLmVudmlyb25bJ0NPT0wnXSkpCndpdGggb3BlbihwLCd3JykgYXMgZjogeWFtbC5zYWZlX2R1bXAoY2ZnLGYsc29ydF9rZXlzPUZhbHNlKQo="
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, yaml
-p='tmp/trade/conf/params.v2.yml'
-with open(p,'r') as f: cfg=yaml.safe_load(f)
-cfg.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR'])
-cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TR'])
-cfg['exit']['tp_atr']=float(os.environ['TP_ATR']); cfg['exit']['sl_atr']=float(os.environ['SL_ATR'])
-cfg.setdefault('regime',{})['range_lo_pctile']=float(os.environ['R_LO']); cfg['regime']['trend_hi_pctile']=float(os.environ['T_HI'])
-cfg.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOL']))
-with open(p,'w') as f: yaml.safe_dump(cfg,f,sort_keys=False)
-PY
+          mkdir -p tools
+          echo "$B64" > tools/p.b64
+          python -c "import base64; open('tools/patch.py','wb').write(base64.b64decode(open('tools/p.b64','rb').read()))"
+          python tools/patch.py
           echo '---- params.v2.yml ----'; cat tmp/trade/conf/params.v2.yml
 
       - name: Preflight strict
@@ -100,16 +94,15 @@ PY
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: Grid metrics (entries/exits aware)
+      - name: Grid metrics (no heredoc; base64 -> tools/metrics.py)
+        env:
+          B64: "CmltcG9ydCBqc29uLCBvcwpzID0ganNvbi5sb2FkKG9wZW4oJ19vdXRfNHUvcnVuL3N1bW1hcnkuanNvbicpKSBpZiBvcy5wYXRoLmV4aXN0cygnX291dF80dS9ydW4vc3VtbWFyeS5qc29uJykgZWxzZSB7fQprZXlzPVsnY3VtX3BubF9jbG9zZV9iYXNlZCcsJ2F2Z19nYXRlcCcsJ3RyZW5kX2ZyYWMnLCdyYW5nZV9mcmFjJywnZW50cmllcycsJ2V4aXRzJ10KbSA9IHtrOnMuZ2V0KGspIGZvciBrIGluIGtleXN9Cmpzb24uZHVtcChtLCBvcGVuKCdfb3V0XzR1L3J1bi9ncmlkX21ldHJpY3MuanNvbicsJ3cnKSwgaW5kZW50PTIpCg=="
         run: |
           set -euo pipefail
-          python - <<'PY'
-import json, os
-s = json.load(open('_out_4u/run/summary.json')) if os.path.exists('_out_4u/run/summary.json') else {}
-keys=['cum_pnl_close_based','avg_gatep','trend_frac','range_frac','entries','exits']
-m = {k:s.get(k) for k in keys}
-json.dump(m, open('_out_4u/run/grid_metrics.json','w'), indent=2)
-PY
+          mkdir -p tools
+          echo "$B64" > tools/m.b64
+          python -c "import base64; open('tools/metrics.py','wb').write(base64.b64decode(open('tools/m.b64','rb').read()))"
+          python tools/metrics.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
