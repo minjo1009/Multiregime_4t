@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'V2 코드 zip (repo 루트 파일명 가능)'
+        description: 'V2 code zip (repo root filename ok)'
         required: true
         default: strategy_v2_codepack_v2.1.3.zip
       DATA_ZIP:
-        description: '데이터 zip (repo 루트 파일명 가능)'
+        description: 'Data zip (repo root filename ok)'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -15,11 +15,11 @@ on:
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       FEES_BPS:
-        description: '거래수수료(한쪽, bps). 예: 4 = 0.04%'
+        description: 'fees per side (bps), e.g. 4 = 0.04%'
         required: false
         default: "0"
       SLIP_BPS:
-        description: '슬리피지(한쪽, bps). 예: 5 = 0.05%'
+        description: 'slippage per side (bps), e.g. 5 = 0.05%'
         required: false
         default: "0"
 
@@ -39,24 +39,22 @@ jobs:
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
-          mkdir -p tmp/trade tmp/data _out_4u/run
+          mkdir -p tmp/trade tmp/data _out_4u/run tools
           # CODE_ZIP
           if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP"; \
           elif echo "$CODE_ZIP" | grep -qiE '^https\?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; \
           else RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
           unzip -q "$CSRC" -d tmp/trade
-
           # DATA_ZIP
           if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP"; \
           elif echo "$DATA_ZIP" | grep -qiE '^https\?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; \
           else RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
           unzip -q "$DSRC" -d tmp/data
-
           # namespace guards
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params to TOP1
+      - name: Patch params to TOP1 (no heredoc)
         env:
           OFI_THR: "0.25"
           P_THR_TR: "0.60"
@@ -67,26 +65,16 @@ jobs:
           COOL: "5"
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, yaml, json
-p='tmp/trade/conf/params.v2.yml'
-with open(p,'r') as f: cfg=yaml.safe_load(f)
-
-# --- TOP1 파라미터 반영 ---
-cfg.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR'])
-cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TR'])
-cfg.setdefault('exit',{})
-cfg['exit']['tp_atr']=float(os.environ['TP_ATR'])
-cfg['exit']['sl_atr']=float(os.environ['SL_ATR'])
-cfg.setdefault('regime',{})
-cfg['regime']['range_lo_pctile']=float(os.environ['R_LO'])
-cfg['regime']['trend_hi_pctile']=float(os.environ['T_HI'])
-cfg.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOL']))
-
-with open(p,'w') as f: yaml.safe_dump(cfg,f,sort_keys=False)
-print("Patched params.v2.yml -> TOP1")
-PY
-          echo '---- params.v2.yml ----'; cat tmp/trade/conf/params.v2.yml
+          python -c "import os,sys,yaml; p='tmp/trade/conf/params.v2.yml'; \
+cfg=yaml.safe_load(open(p)); \
+cfg.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR']); \
+cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TR']); \
+cfg.setdefault('exit',{}); cfg['exit']['tp_atr']=float(os.environ['TP_ATR']); cfg['exit']['sl_atr']=float(os.environ['SL_ATR']); \
+cfg.setdefault('regime',{}); cfg['regime']['range_lo_pctile']=float(os.environ['R_LO']); cfg['regime']['trend_hi_pctile']=float(os.environ['T_HI']); \
+cfg.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOL'])); \
+yaml.safe_dump(cfg, open(p,'w'), sort_keys=False)"
+          echo '---- params.v2.yml ----'
+          cat tmp/trade/conf/params.v2.yml
 
       - name: Preflight strict
         env:
@@ -95,7 +83,7 @@ PY
           set -euo pipefail
           python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run
 
-      - name: Detect entrypoint and run
+      - name: Detect entrypoint and run (V2.1.3)
         env:
           CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
         run: |
@@ -108,28 +96,20 @@ PY
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: (Optional) Cost-adjust summary
+      - name: (Optional) Cost-adjust summary (no heredoc)
         if: ${{ inputs.FEES_BPS != '0' || inputs.SLIP_BPS != '0' }}
         env:
           FEES_BPS: "${{ github.event.inputs.FEES_BPS }}"
           SLIP_BPS: "${{ github.event.inputs.SLIP_BPS }}"
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, json
-s = json.load(open('_out_4u/run/summary.json'))
-entries = int(s.get('entries',0))
-fee_bps = float(os.environ.get('FEES_BPS','0'))
-slip_bps = float(os.environ.get('SLIP_BPS','0'))
-# 한쪽 비용(bps) 합 → 왕복 2회 적용
-roundtrip_cost = 2.0*(fee_bps + slip_bps)/10000.0
-s['cost_model'] = {'fees_bps_per_side': fee_bps, 'slip_bps_per_side': slip_bps, 'roundtrip_cost'] if True else None
-s['cum_pnl_cost_adj'] = float(s.get('cum_pnl_close_based',0.0)) - entries*roundtrip_cost
-open('_out_4u/run/summary_cost.json','w').write(json.dumps(s, indent=2))
-print("Wrote _out_4u/run/summary_cost.json")
-PY
+          python -c "import os,json; s=json.load(open('_out_4u/run/summary.json')); \
+entries=int(s.get('entries',0)); fee=float(os.environ.get('FEES_BPS','0')); slip=float(os.environ.get('SLIP_BPS','0')); \
+rt=2.0*(fee+slip)/10000.0; s['cost_model']={'fees_bps_per_side':fee,'slip_bps_per_side':slip,'roundtrip_cost':rt}; \
+s['cum_pnl_cost_adj']=float(s.get('cum_pnl_close_based',0.0))-entries*rt; \
+open('_out_4u/run/summary_cost.json','w').write(json.dumps(s,indent=2))"
 
-      - name: Upload artifacts
+      - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
           name: "backtest-top1"
