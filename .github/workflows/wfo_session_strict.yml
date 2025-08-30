@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP_URL:
-        description: "URL to code zip"
+        description: "URL to code zip (e.g., strategy_v2_codepack_v2.1.3.zip raw URL)"
         required: true
         type: string
       DATA_ZIP_URL:
-        description: "URL to data zip"
+        description: "URL to data zip (e.g., ETHUSDT_1min_2020_2025.zip raw URL)"
         required: true
         type: string
       CSV_GLOB:
