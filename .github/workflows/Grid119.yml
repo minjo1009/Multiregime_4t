@@ -34,22 +34,26 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      - name: Checkout
+      - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
-      - name: Setup Python
+      - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
-      # ▼▼▼ 여기 두 줄의 SHA는 'find-action-shas' 결과로 교체 ▼▼▼
-      - name: Resolve allowed SHAs (echo only)
+      - name: Guard SHAs (upload/download)
         shell: bash
         run: |
-          echo "UPLOAD_SHA=<PASTE_UPLOAD_ARTIFACT_SHA_HERE>"
-          echo "DOWNLOAD_SHA=<PASTE_DOWNLOAD_ARTIFACT_SHA_HERE>"
+          set -euo pipefail
+          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02
+          DNL=d3f86a106a0bac45b974a628896c90dbdf5c8093
+          git ls-remote https://github.com/actions/upload-artifact "$UPL" | grep -q "$UPL" || { echo "::error::upload-artifact SHA not found"; exit 61; }
+          git ls-remote https://github.com/actions/download-artifact "$DNL" | grep -q "$DNL" || { echo "::error::download-artifact SHA not found"; exit 61; }
+          [[ ${#UPL} -eq 40 && ${#DNL} -eq 40 ]] || { echo "::error::not full-length SHA"; exit 62; }
+          echo "[ok] action SHAs verified"
 
       - name: Resolve ZIPs
         shell: bash
@@ -92,6 +96,7 @@ jobs:
           done
           NROWS=$(($(wc -l < "$CSV") - 1))
           echo "N_ROWS=$NROWS" >> "$GITHUB_ENV"
+          echo "[csv] $CSV"
           echo "[rows] $NROWS"
 
       - name: Params & OUT_DIR (per-matrix combo)
@@ -110,6 +115,7 @@ jobs:
           echo "RUN_TAG=$TAG"   >> "$GITHUB_ENV"
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          echo "[tag] $TAG"
 
       - name: Write conf/config.effective.yml (printf; no heredoc)
         shell: bash
@@ -149,15 +155,15 @@ jobs:
           set -euo pipefail
           S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
           test -s "$S" || { echo "::error::summary.json missing"; exit 78; }
-          jq -e '(.placeholders|not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null) and (.mcc!=null)' "$S" >/dev/null \
+          jq -e '((.placeholders // false) | not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null) and (.mcc!=null)' "$S" >/dev/null \
             || { echo "::error::invalid summary (placeholders or null metrics)"; cat "$S"; exit 78; }
           nt=$(jq -r '.n_trades' "$S"); nr="${N_ROWS}"
           ratio=$(awk -v nt="$nt" -v nr="$nr" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
           echo "[ratio] n_trades/n_rows=$ratio"
           awk -v r="$ratio" 'BEGIN{exit !(r<=0.60)}' || { echo "::error::n_trades_ratio>0.60"; exit 79; }
 
-      - name: Upload per-run artifact
-        uses: actions/upload-artifact@<PASTE_UPLOAD_ARTIFACT_SHA_HERE>
+      - name: Upload per-run artifact (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_${{ env.RUN_TAG }}
           path: |
@@ -170,8 +176,8 @@ jobs:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@<PASTE_DOWNLOAD_ARTIFACT_SHA_HERE>
+      - name: Download all artifacts (pinned)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: all_runs
 
@@ -200,8 +206,8 @@ jobs:
           awk -F, 'NR==1 || ($9>=1.2 && $8>=0.55 && $11>=50)' leaderboard.sorted.csv > top_candidates_stage1.csv
           awk -F, 'NR==1 || ($9>=1.5 && $8>=0.65 && $10>=0.5)' leaderboard.sorted.csv > top_candidates_stage2.csv
 
-      - name: Upload leaderboards
-        uses: actions/upload-artifact@<PASTE_UPLOAD_ARTIFACT_SHA_HERE>
+      - name: Upload leaderboards (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest119_grid_results
           path: |
