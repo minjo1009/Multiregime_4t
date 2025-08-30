@@ -23,22 +23,27 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        TP:  [0.0025, 0.0030, 0.0035, 0.0042]
-        SL:  [0.0015, 0.0018, 0.0020, 0.0022]
-        HOLD:[4,6,8]
-        THRS: [[3.5,3.3,3.0],[4.0,3.8,3.5]]
+        TP:   [0.0025, 0.0030, 0.0035, 0.0042]
+        SL:   [0.0015, 0.0018, 0.0020, 0.0022]
+        HOLD: [4, 6, 8]
+        THRS: [[3.5, 3.3, 3.0], [4.0, 3.8, 3.5]]
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_BASE: _out_119
       PYVER: '3.11'
     steps:
+      # pinned checkout (v5.0.0)
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
 
+      # pinned setup-python (v5.6.0)
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with: { python-version: ${{ env.PYVER }} }
+        with:
+          python-version: ${{ env.PYVER }}
 
       - name: Resolve ZIPs
         shell: bash
@@ -53,26 +58,26 @@ jobs:
           res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
           res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
 
-      - name: Unpack
+      - name: Unpack code/data & locate runner
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUN_DIR" "$DATA_DIR" "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}"
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "${GITHUB_WORKSPACE}/${OUT_BASE}"
           unzip -q "$CODE_ZIP_ABS" -d "$RUN_DIR"
           unzip -q "$DATA_ZIP_ABS" -d "$DATA_DIR"
           RUN_PY="$(find "$RUN_DIR" -maxdepth 3 -type f -name 'run_4u.py' -print -quit || true)"
-          [[ -n "$RUN_PY" ]] || { echo "::error::run_4u.py not found"; exit 67; }
+          [[ -n "$RUN_PY" ]] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
           echo "RUN_PY=$RUN_PY" >> "$GITHUB_ENV"
 
-      - name: CSV path + preflight
+      - name: CSV path + preflight (required columns, n_rows)
         shell: bash
         run: |
           set -euo pipefail
-          CSV="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
+          CSV="${GITHUB_WORKSPACE}/${DATA_DIR}/${{ github.event.inputs.CSV_FILE }}"
           if [[ ! -f "$CSV" ]]; then
-            CSV="$(find "$DATA_DIR" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
-            [[ -n "$CSV" ]] || { echo "::error::CSV not found"; exit 64; }
-            CSV="${GITHUB_WORKSPACE}/${CSV}"
+            CSV_FOUND="$(find "$DATA_DIR" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
+            [[ -n "$CSV_FOUND" ]] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${CSV_FOUND}"
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
           HDR="$(head -n1 "$CSV")"
@@ -81,23 +86,26 @@ jobs:
           done
           NROWS=$(($(wc -l < "$CSV") - 1))
           echo "N_ROWS=$NROWS" >> "$GITHUB_ENV"
+          echo "[csv] $CSV"
           echo "[rows] $NROWS"
 
-      - name: Params & OUT_DIR
+      - name: Params & OUT_DIR (per-matrix combo)
         shell: bash
         run: |
           set -euo pipefail
           US="${{ matrix.THRS[0] }}"; EU="${{ matrix.THRS[1] }}"; AS="${{ matrix.THRS[2] }}"
-          echo "TP=${{ matrix.TP }}" >> "$GITHUB_ENV"
-          echo "SL=${{ matrix.SL }}" >> "$GITHUB_ENV"
+          echo "TP=${{ matrix.TP }}"   >> "$GITHUB_ENV"
+          echo "SL=${{ matrix.SL }}"   >> "$GITHUB_ENV"
           echo "HOLD=${{ matrix.HOLD }}" >> "$GITHUB_ENV"
           echo "THR_US=$US" >> "$GITHUB_ENV"; echo "THR_EU=$EU" >> "$GITHUB_ENV"; echo "THR_ASIA=$AS" >> "$GITHUB_ENV"
           TAG="tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_us${US}_eu${EU}_as${AS}"
-          OUT_DIR="${{ env.OUT_BASE }}/$TAG"
-          echo "RUN_TAG=$TAG" >> "$GITHUB_ENV"; echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
-          mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"; echo "[tag] $TAG"
+          OUT_DIR="${OUT_BASE}/$TAG"
+          echo "RUN_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
+          mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          echo "[tag] $TAG"
 
-      - name: Write config.effective
+      - name: Write conf/config.effective.yml (printf; no heredoc)
         shell: bash
         run: |
           set -euo pipefail
@@ -114,7 +122,7 @@ jobs:
           printf '%s\n' "z_window: 288"              >> "$CONF"
           sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
 
-      - name: Install deps
+      - name: Install deps (pip + jq)
         shell: bash
         run: |
           set -euo pipefail
@@ -122,31 +130,30 @@ jobs:
           pip install pandas numpy pyyaml >/dev/null
           if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq; fi
 
-      - name: Run backtest
+      - name: Run backtest (v1.1.9p1 engine expected)
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_PY" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: Guards (placeholders/null + n_trades_ratio)
+      - name: Guards (placeholders/null forbid + n_trades_ratio ≤ 0.60)
         shell: bash
         run: |
           set -euo pipefail
           S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
           test -s "$S" || { echo "::error::summary.json missing"; exit 78; }
+          # placeholders 금지 + 핵심지표 존재
           jq -e '(.placeholders|not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null) and (.mcc!=null)' "$S" >/dev/null \
             || { echo "::error::invalid summary (placeholders or null metrics)"; cat "$S"; exit 78; }
-          nt=$(jq -r '.n_trades' "$S"); nr="${N_ROWS}"
-          ratio=$(python - <<'PY'
-import sys; nt=float(sys.argv[1]); nr=float(sys.argv[2]); print(f"{nt/nr:.6f}")
-PY
-          "$nt" "$nr")
-          echo "[ratio] $ratio"
+          nt=$(jq -r '.n_trades' "$S")
+          nr="${N_ROWS}"
+          ratio=$(awk -v nt="$nt" -v nr="$nr" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
+          echo "[ratio] n_trades/n_rows=$ratio"
           awk -v r="$ratio" 'BEGIN{exit !(r<=0.60)}' || { echo "::error::n_trades_ratio>0.60"; exit 79; }
 
-      - name: Upload per-run
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Upload per-run artifact
+        uses: actions/upload-artifact@d2ed200cea19851ea45389830aaa64b10fdeb890
         with:
           name: out_${{ env.RUN_TAG }}
           path: |
@@ -185,18 +192,18 @@ PY
             echo "$tag,$tp,$sl,$hold,$thr_US,$thr_EU,$thr_ASIA,$hit,$pf,$mcc,$nt" >> leaderboard.csv
           done < <(find all_runs -type f -name summary.json -print0)
 
-          # sort by PF, then WIN, then MCC
           { head -n 1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.sorted.csv
 
-          # gates
+          # Gate 1 (보수)
           awk -F, 'NR==1 || ($9>=1.2 && $8>=0.55 && $11>=50)' leaderboard.sorted.csv > top_candidates_stage1.csv
+          # Gate 2 (목표 근사)
           awk -F, 'NR==1 || ($9>=1.5 && $8>=0.65 && $10>=0.5)' leaderboard.sorted.csv > top_candidates_stage2.csv
 
           echo "== Top 10 (by PF,WIN,MCC) =="
           ( head -n 1 leaderboard.sorted.csv; tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed "s/^/  /"
 
       - name: Upload leaderboards
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@d2ed200cea19851ea45389830aaa64b10fdeb890
         with:
           name: backtest119_grid_results
           path: |
