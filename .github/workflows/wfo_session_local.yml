@@ -43,6 +43,11 @@ on:
         required: false
         default: "auto"
         type: string
+      ENTRY_ARGS:
+        description: "Extra CLI args for ENTRYPOINT (e.g., --config conf/config.effective.yml)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   validate_shas:
@@ -87,7 +92,7 @@ jobs:
           python -V
           pip install --upgrade pip
           pip install pandas numpy scikit-learn pyyaml pytz
-      - name: Prepare workspace from repo files
+      - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
@@ -98,91 +103,84 @@ jobs:
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
           echo "[TREE] work/code:"
           find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
-      - name: Write preflight to work/
+      - name: Preflight
         run: |
           set -euo pipefail
-          mkdir -p work
-          {
-            echo 'import os,sys,glob,json'
-            echo 'import pandas as pd'
-            echo 'def find_csv(root,patt):'
-            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
-            echo '  if not g: raise SystemExit("CSVDetect: no csv")'
-            echo '  return g[0]'
-            echo 'def read_df(path):'
-            echo '  df=pd.read_csv(path)'
-            echo '  cols={"open_time","open","high","low","close","volume"}'
-            echo '  if not cols.issubset(df.columns):'
-            echo '    raise SystemExit("Preflight: missing columns")'
-            echo '  ot=df["open_time"]'
-            echo '  try:'
-            echo '    if pd.api.types.is_numeric_dtype(ot):'
-            echo '      dt=pd.to_datetime(ot,unit="ms",utc=True)'
-            echo '    else:'
-            echo '      dt=pd.to_datetime(ot,utc=True)'
-            echo '  except Exception:'
-            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
-            echo '  df["dt_utc"]=dt'
-            echo '  return df'
-            echo 'def write_cfg(path,data_path,fee_bps,champion):'
-            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
-            echo '  with open(path,"w") as f:'
-            echo '    f.write("data_path: \"" + data_path + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
-            echo '    f.write("champion_config: \"" + champion + "\"\n")'
-            echo 'if __name__=="__main__":'
-            echo '  root_csv="work/data"'
-            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
-            echo '  fee=os.environ.get("FEES_BPS","7.5")'
-            echo '  tz=os.environ.get("TZ","Asia/Seoul")'
-            echo '  champion=os.environ.get("CHAMPION_CONFIG","")'
-            echo '  out_csv="work/input.csv"'
-            echo '  p=find_csv(root_csv,patt)'
-            echo '  df=read_df(p)'
-            echo '  df.to_csv(out_csv,index=False)'
-            echo '  write_cfg("conf/config.effective.yml",out_csv,fee,champion)'
-          } > work/preflight_strict.py
-      - name: Single run
+          python - <<'PY'
+import os,sys,glob,json,pandas as pd, pathlib
+def find_csv(root,patt):
+  g=glob.glob(os.path.join(root,patt),recursive=True)
+  if not g: raise SystemExit("CSVDetect: no csv")
+  return g[0]
+def read_df(path):
+  df=pd.read_csv(path)
+  req={"open_time","open","high","low","close","volume"}
+  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")
+  ot=df["open_time"]
+  try:
+    dt=pd.to_datetime(ot,unit="ms",utc=True) if pd.api.types.is_numeric_dtype(ot) else pd.to_datetime(ot,utc=True)
+  except Exception:
+    dt=pd.to_datetime(ot,utc=True,errors="coerce")
+  df["dt_utc"]=dt
+  return df
+root="work/data"; patt=os.environ.get("CSV_GLOB","**/*.csv")
+fee=os.environ.get("FEES_BPS","7.5"); champ=os.environ.get("CHAMPION_CONFIG","")
+csv=find_csv(root,patt); df=read_df(csv)
+out_csv="work/input.csv"; df.to_csv(out_csv,index=False)
+pathlib.Path("conf").mkdir(parents=True,exist_ok=True)
+open("conf/config.effective.yml","w").write(f"data_path: '{out_csv}'\nfee_bps: {fee}\nchampion_config: '{champ}'\n")
+print("[PREFLIGHT] csv:", csv, "rows:", len(df))
+PY
+      - name: Run (with ENTRYPOINT/ARGS)
         run: |
           set -euo pipefail
-          export CSV_GLOB="${{ inputs.CSV_GLOB }}"
-          export FEES_BPS="${{ inputs.FEES_BPS }}"
-          export TZ="${{ inputs.TZ }}"
-          export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
-          python work/preflight_strict.py || { echo "::error::Preflight failed"; exit 3; }
           EP_INPUT="${{ inputs.ENTRYPOINT }}"
-          if [ "$EP_INPUT" != "auto" ]; then
-            EP="$EP_INPUT"
-          else
+          ARGS="${{ inputs.ENTRY_ARGS }}"
+          if [ "$EP_INPUT" = "auto" ]; then
             EP=""
             [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
             [ -z "$EP" ] && [ -f work/code/backtest/run_4u.py ] && EP="work/code/backtest/run_4u.py"
             [ -z "$EP" ] && [ -f work/code/run.py ] && EP="work/code/run.py"
             [ -z "$EP" ] && [ -f work/code/backtest/runner.py ] && EP="work/code/backtest/runner.py"
+          else
+            EP="$EP_INPUT"
           fi
-          echo "[RUN] entrypoint=$EP"
+          echo "[RUN] entrypoint=$EP args=$ARGS"
           if [ -n "$EP" ]; then
             set +e
-            PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" > _out_4u/logs/single_stdout.txt 2> _out_4u/logs/single_stderr.txt
+            PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" $ARGS > _out_4u/logs/single_stdout.txt 2> _out_4u/logs/single_stderr.txt
             RC=$?
             set -e
             echo "[RUN] rc=$RC"
           else
-            echo "::warning::No entrypoint found; skipping run"
+            echo "::warning::No entrypoint; skipping run"
           fi
-          mkdir -p _out_4u/run work/out/single
-          [ -f summary.json ] && cp summary.json work/out/single/ || echo "{}" > work/out/single/summary.json
-          [ -f gating_debug.json ] && cp gating_debug.json work/out/single/ || echo "{}" > work/out/single/gating_debug.json
-          [ -f preds_test.csv ] && cp preds_test.csv work/out/single/ || printf "" > work/out/single/preds_test.csv
-          [ -f trades.csv ] && cp trades.csv work/out/single/ || printf "" > work/out/single/trades.csv
-          [ -f summary_cost.json ] && cp summary_cost.json work/out/single/ || true
-      - name: Zip single & logs
+      - name: Harvest outputs (recursive)
         run: |
           set -euo pipefail
-          cd work/out
-          zip -qr ../single_results.zip single
-          cd ../..
+          mkdir -p work/out/single
+          # Copy best-effort files if found anywhere under repo
+          for name in summary_cost.json summary.json gating_debug.json; do
+            hit="$(find . -type f -name "$name" | head -n 1 || true)"
+            if [ -n "$hit" ]; then
+              echo "[HARVEST] $name <- $hit"
+              cp -f "$hit" "work/out/single/$name"
+            fi
+          done
+          # trades/preds (allow any prefix)
+          hit="$(find . -type f -name 'trades.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/trades.csv || true
+          hit="$(find . -type f -name 'preds_test.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/preds_test.csv || true
+          # If still nothing, create placeholders
+          [ -f work/out/single/summary.json ] || echo "{}" > work/out/single/summary.json
+          [ -f work/out/single/gating_debug.json ] || echo "{}" > work/out/single/gating_debug.json
+          [ -f work/out/single/trades.csv ] || printf "" > work/out/single/trades.csv
+          [ -f work/out/single/preds_test.csv ] || printf "" > work/out/single/preds_test.csv
+      - name: Zip artifacts
+        run: |
+          set -euo pipefail
+          cd work/out && zip -qr ../single_results.zip single && cd ../..
           zip -qr work/logs_single.zip _out_4u/logs
+          zip -qr work/debug_workspace.zip work
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -190,6 +188,5 @@ jobs:
           path: |
             work/single_results.zip
             work/logs_single.zip
+            work/debug_workspace.zip
           if-no-files-found: warn
-
-  # wfo & sessions jobs remain as before (auto-detect entrypoint only, or allow overriding similarly as above)
