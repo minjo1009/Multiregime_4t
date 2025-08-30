@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: 'Path or URL to code zip'
+        description: 'Path or URL to code zip (repo root file name allowed)'
         required: true
         default: codepack_v1.1.8_baseline.zip
       DATA_ZIP:
-        description: 'Path or URL to data zip'
+        description: 'Path or URL to data zip (repo root file name allowed)'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -23,7 +23,8 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip || true
           pip install pandas numpy pyyaml || true
-      - name: Acquire CODE_ZIP and DATA_ZIP
+
+      - name: Acquire code/data (local / URL / repo raw)
         env:
           CODE_ZIP: "${{ github.event.inputs.CODE_ZIP }}"
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
@@ -35,35 +36,37 @@ jobs:
           if [ -f "$CODE_ZIP" ]; then
             CSRC="$CODE_ZIP"
           elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then
-            echo "Downloading CODE_ZIP from URL: $CODE_ZIP"
+            echo "Downloading code from URL: $CODE_ZIP"
             curl -fL "$CODE_ZIP" -o tmp/trade/code.zip
             CSRC="tmp/trade/code.zip"
-          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}" ]; then
-            CSRC="${{ github.workspace }}/${{ github.event.inputs.CODE_ZIP }}"
           else
-            echo "CODE_ZIP not found as file or URL: $CODE_ZIP"
-            exit 1
+            RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"
+            echo "Trying repo raw URL: $RCODE"
+            curl -fL "$RCODE" -o tmp/trade/code.zip
+            CSRC="tmp/trade/code.zip"
           fi
+          unzip -q "$CSRC" -d tmp/trade
           # DATA_ZIP
           DSRC=""
           if [ -f "$DATA_ZIP" ]; then
             DSRC="$DATA_ZIP"
           elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then
-            echo "Downloading DATA_ZIP from URL: $DATA_ZIP"
+            echo "Downloading data from URL: $DATA_ZIP"
             curl -fL "$DATA_ZIP" -o tmp/data/data.zip
             DSRC="tmp/data/data.zip"
-          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" ]; then
-            DSRC="${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}"
           else
-            echo "DATA_ZIP not found as file or URL: $DATA_ZIP"
-            exit 1
+            RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"
+            echo "Trying repo raw URL: $RDATA"
+            curl -fL "$RDATA" -o tmp/data/data.zip
+            DSRC="tmp/data/data.zip"
           fi
-          unzip -q "$CSRC" -d tmp/trade || (echo "Unzip failed for $CSRC" && exit 1)
-          unzip -q "$DSRC" -d tmp/data || (echo "Unzip failed for $DSRC" && exit 1)
+          unzip -q "$DSRC" -d tmp/data
+
       - name: Preflight strict
         run: |
           set -euo pipefail
           python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
+
       - name: Detect entrypoint and run
         env:
           CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
@@ -80,6 +83,7 @@ jobs:
           [ -f _out_4u/run/summary.json ] || echo "{}" > _out_4u/run/summary.json
           [ -f _out_4u/run/preds_test.csv ] || echo "open_time,signal,score" > _out_4u/run/preds_test.csv
           [ -f _out_4u/run/trades.csv ] || echo "open_time,side,price,qty" > _out_4u/run/trades.csv
+
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:

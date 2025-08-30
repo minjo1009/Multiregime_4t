@@ -2,12 +2,8 @@ name: Precheck-STRICT-NO-CHECKOUT
 on:
   workflow_dispatch:
     inputs:
-      CODE_ZIP:
-        description: 'Path or URL to code zip (optional)'
-        required: false
-        default: codepack_v1.1.8_baseline.zip
       DATA_ZIP:
-        description: 'Path or URL to data zip'
+        description: 'Path or URL to data zip (repo root file name allowed)'
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_GLOB:
@@ -23,12 +19,13 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip || true
           pip install pandas numpy pyyaml || true
-      - name: Acquire DATA_ZIP and prepare
+
+      - name: Acquire data zip (local / URL / repo raw)
         env:
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
-          mkdir -p tmp/data _out_4u/run
+          mkdir -p tmp/data _out_4u/run tools
           SRC=""
           if [ -f "$DATA_ZIP" ]; then
             SRC="$DATA_ZIP"
@@ -36,47 +33,32 @@ jobs:
             echo "Downloading DATA_ZIP from URL: $DATA_ZIP"
             curl -fL "$DATA_ZIP" -o tmp/data/data.zip
             SRC="tmp/data/data.zip"
-          elif [ -f "${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}" ]; then
-            SRC="${{ github.workspace }}/${{ github.event.inputs.DATA_ZIP }}"
           else
-            echo "DATA_ZIP not found as file or URL: $DATA_ZIP"
-            exit 1
+            RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"
+            echo "Trying repo raw URL: $RAW"
+            curl -fL "$RAW" -o tmp/data/data.zip
+            SRC="tmp/data/data.zip"
           fi
-          unzip -q "$SRC" -d tmp/data || (echo "Unzip failed for $SRC" && exit 1)
+          unzip -q "$SRC" -d tmp/data
+
+      - name: Acquire preflight_strict.py from repo raw
+        run: |
+          set -euo pipefail
+          curl -fL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/preflight_strict.py" -o tools/preflight_strict.py
+
+      - name: Ensure artifacts exist
+        run: |
+          set -euo pipefail
           echo "{}" > _out_4u/run/gating_debug.json
           echo "{}" > _out_4u/run/summary.json
           echo "open_time,signal,score" > _out_4u/run/preds_test.csv
           echo "open_time,side,price,qty" > _out_4u/run/trades.csv
-      - name: Write preflight_strict.py (inline, no heredoc)
-        run: |
-          set -euo pipefail
-          cat > preflight_strict.py <<'PYX'
-import argparse, json, os, glob
-import pandas as pd
-REQ=["open_time","open","high","low","close","volume"]
-ap=argparse.ArgumentParser()
-ap.add_argument("--data-root", required=True)
-ap.add_argument("--csv-glob", default="**/*.csv")
-ap.add_argument("--outdir", required=True)
-a=ap.parse_args()
-os.makedirs(a.outdir, exist_ok=True)
-pat=a.csv_glob if a.csv_glob else "**/*.csv"
-paths=glob.glob(os.path.join(a.data_root, pat), recursive=True)
-if not paths: raise SystemExit(f"No CSV found under {a.data_root} with pattern {pat}")
-pref=[p for p in paths if "ETHUSDT" in os.path.basename(p).upper()]; csv=(pref or paths)[0]
-df=pd.read_csv(csv, nrows=2000)
-miss=[c for c in REQ if c not in df.columns]
-rep={"csv_path":csv,"rows_read":int(len(df)),"missing":miss,"required":REQ,"status":"ok" if not miss else "fail"}
-with open(os.path.join(a.outdir,"summary.json"),"w") as f: json.dump(rep,f,indent=2)
-open(os.path.join(a.outdir,"gating_debug.json"),"a").close()
-open(os.path.join(a.outdir,"preds_test.csv"),"a").close()
-open(os.path.join(a.outdir,"trades.csv"),"a").close()
-if miss: raise SystemExit(f"Missing required columns: {miss}")
-PYX
+
       - name: Run preflight
         run: |
           set -euo pipefail
-          python preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
+          python tools/preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
+
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
