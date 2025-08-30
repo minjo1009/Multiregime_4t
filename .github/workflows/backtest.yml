@@ -15,11 +15,11 @@ on:
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       FEES_BPS:
-        description: 'fees per side (bps), e.g. 4 = 0.04%'
+        description: 'fees per side (bps), e.g. 10 = 0.10%'
         required: false
         default: "0"
       SLIP_BPS:
-        description: 'slippage per side (bps), e.g. 5 = 0.05%'
+        description: 'slippage per side (bps), e.g. 0 = 0%'
         required: false
         default: "0"
 
@@ -50,7 +50,7 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params to TOP1 (one-liner; no heredoc/no backslashes)
+      - name: Patch params to TOP1 (one-liner; no heredoc/backslashes)
         run: |
           set -euo pipefail
           python -c "import yaml; p='tmp/trade/conf/params.v2.yml'; cfg=yaml.safe_load(open(p)); cfg.setdefault('orderflow',{})['ofi_thr']=0.25; cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=0.60; cfg.setdefault('exit',{}); cfg['exit']['tp_atr']=0.90; cfg['exit']['sl_atr']=0.50; cfg.setdefault('regime',{}); cfg['regime']['range_lo_pctile']=0.40; cfg['regime']['trend_hi_pctile']=0.60; cfg.setdefault('entry',{})['cooldown_bars']=5; yaml.safe_dump(cfg, open(p,'w'), sort_keys=False)"
