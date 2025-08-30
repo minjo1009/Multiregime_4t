@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: 'Path or URL to V2 code zip (repo root file name allowed)'
         required: true
-        default: strategy_v2_codepack_v2.0.zip
+        default: strategy_v2_codepack_v2.0.1.zip
       DATA_ZIP:
         description: 'Path or URL to data zip (repo root file name allowed)'
         required: true
@@ -15,10 +15,6 @@ on:
         description: 'CSV glob (e.g. **/*ETHUSDT*1min*2020*2025*.csv)'
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
-      PARAMS_PATH:
-        description: 'Params path inside code zip'
-        required: false
-        default: conf/params.v2.yml
 
 jobs:
   backtest:
@@ -43,6 +39,9 @@ jobs:
           # DATA_ZIP
           if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP";           elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip";           else RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
           unzip -q "$DSRC" -d tmp/data
+          # guard for namespace packages
+          touch tmp/trade/strategy/__init__.py || true
+          touch tmp/trade/strategy/v2/__init__.py || true
 
       - name: Preflight strict
         env:
@@ -54,7 +53,6 @@ jobs:
       - name: Detect entrypoint and run (V2)
         env:
           CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
-          PARAMS_PATH: "${{ github.event.inputs.PARAMS_PATH }}"
         run: |
           set -euo pipefail
           ENTRY=""
@@ -63,7 +61,7 @@ jobs:
           done
           if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
           echo "ENTRY=$ENTRY"
-          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params "$PARAMS_PATH"
+          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
