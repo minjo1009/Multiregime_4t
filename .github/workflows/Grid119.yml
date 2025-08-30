@@ -44,14 +44,14 @@ jobs:
         with:
           python-version: ${{ env.PYVER }}
 
-      - name: Guard SHAs (upload/download)
+      - name: Verify action SHAs (list refs then grep)
         shell: bash
         run: |
           set -euo pipefail
-          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02
-          DNL=d3f86a106a0bac45b974a628896c90dbdf5c8093
-          git ls-remote https://github.com/actions/upload-artifact "$UPL" | grep -q "$UPL" || { echo "::error::upload-artifact SHA not found"; exit 61; }
-          git ls-remote https://github.com/actions/download-artifact "$DNL" | grep -q "$DNL" || { echo "::error::download-artifact SHA not found"; exit 61; }
+          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02  # upload-artifact v4
+          DNL=d3f86a106a0bac45b974a628896c90dbdf5c8093  # download-artifact v4
+          git ls-remote https://github.com/actions/upload-artifact   | grep -q "$UPL" || { echo "::error::upload-artifact commit not found"; exit 61; }
+          git ls-remote https://github.com/actions/download-artifact | grep -q "$DNL" || { echo "::error::download-artifact commit not found"; exit 61; }
           [[ ${#UPL} -eq 40 && ${#DNL} -eq 40 ]] || { echo "::error::not full-length SHA"; exit 62; }
           echo "[ok] action SHAs verified"
 
@@ -60,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           res(){ local in="$1" out="$2" p=""; local base="$(basename "$in")";
-            if [[ -f "$in" ]]; then p="${GITHUB_WORKSPACE}/$in";
+            if [[ -f "$in" ]] ; then p="${GITHUB_WORKSPACE}/$in";
             else p="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"; fi
             [[ -n "$p" && -f "$p" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
             echo "${out}=${p}" >> "$GITHUB_ENV"; echo "[resolved] $in -> $p";
@@ -115,7 +115,6 @@ jobs:
           echo "RUN_TAG=$TAG"   >> "$GITHUB_ENV"
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
-          echo "[tag] $TAG"
 
       - name: Write conf/config.effective.yml (printf; no heredoc)
         shell: bash
