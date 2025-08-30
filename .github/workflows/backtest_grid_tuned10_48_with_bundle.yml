@@ -1,0 +1,149 @@
+name: Backtest-Grid-Tuned10-48
+on:
+  workflow_dispatch:
+    inputs:
+      CODE_ZIP:
+        description: 'V2 code zip (repo root filename ok)'
+        required: true
+        default: strategy_v2_codepack_v2.1.3.zip
+      DATA_ZIP:
+        description: 'Data zip (repo root filename ok)'
+        required: true
+        default: ETHUSDT_1min_2020_2025.zip
+      CSV_GLOB:
+        description: 'CSV glob'
+        required: false
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      FEES_BPS:
+        description: 'fees per side (bps). 10 = 0.10%'
+        required: false
+        default: "10"
+      SLIP_BPS:
+        description: 'slippage per side (bps)'
+        required: false
+        default: "0"
+
+jobs:
+  grid:
+    name: "grid p${{ matrix.p_thr_trend }} tp${{ matrix.tp_atr }} sl${{ matrix.sl_atr }} cd${{ matrix.cooldown }} mh${{ matrix.min_hold }} ofi${{ matrix.ofi_thr }} thi${{ matrix.t_hi }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        p_thr_trend: [0.82, 0.83]
+        tp_atr: [2.0, 2.1, 2.2]
+        sl_atr: [0.45, 0.50]
+        cooldown: [32, 34]
+        min_hold: [11, 12]
+        ofi_thr: [0.42]
+        t_hi: [0.74]
+
+    steps:
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip || true
+          pip install pandas numpy pyyaml numba || true
+
+      - name: Acquire code/data (file / URL / repo raw)
+        env:
+          CODE_ZIP: "${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/trade tmp/data _out_4u/run tools
+          # CODE_ZIP
+          if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP";           elif echo "$CODE_ZIP" | grep -qiE '^https\?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip";           else RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
+          unzip -q "$CSRC" -d tmp/trade
+          # DATA_ZIP
+          if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP";           elif echo "$DATA_ZIP" | grep -qiE '^https\?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip";           else RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
+          unzip -q "$DSRC" -d tmp/data
+          # namespace guards
+          touch tmp/trade/strategy/__init__.py || true
+          touch tmp/trade/strategy/v2/__init__.py || true
+
+      - name: Patch params (from matrix; one-liner)
+        env:
+          OFI_THR: "${{ matrix.ofi_thr }}"
+          P_THR_TREND: "${{ matrix.p_thr_trend }}"
+          COOLDOWN_BARS: "${{ matrix.cooldown }}"
+          TP_ATR: "${{ matrix.tp_atr }}"
+          SL_ATR: "${{ matrix.sl_atr }}"
+          MIN_HOLD: "${{ matrix.min_hold }}"
+          R_LO: "0.40"
+          T_HI: "${{ matrix.t_hi }}"
+        run: |
+          set -euo pipefail
+          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); c.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR']); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TREND']); c.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOLDOWN_BARS'])); c.setdefault('exit',{})['tp_atr']=float(os.environ['TP_ATR']); c['exit']['sl_atr']=float(os.environ['SL_ATR']); c['exit']['min_hold']=int(float(os.environ['MIN_HOLD'])); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=float(os.environ['R_LO']); c['regime']['trend_hi_pctile']=float(os.environ['T_HI']); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
+          echo '---- params.v2.yml ----'
+          cat tmp/trade/conf/params.v2.yml
+
+      - name: Preflight strict
+        env:
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
+        run: |
+          set -euo pipefail
+          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run
+
+      - name: Detect entrypoint and run
+        env:
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
+        run: |
+          set -euo pipefail
+          ENTRY=""
+          for c in "tmp/trade/run_4u.py" "tmp/trade/backtest/run_4u.py" "tmp/trade/backtest/runner.py"; do
+            if [ -f "$c" ]; then ENTRY="$c"; break; fi
+          done
+          if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
+          echo "ENTRY=$ENTRY"
+          python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
+
+      - name: Cost-adjust summary (per-side bps)
+        env:
+          FEES_BPS: "${{ github.event.inputs.FEES_BPS }}"
+          SLIP_BPS: "${{ github.event.inputs.SLIP_BPS }}"
+        run: |
+          set -euo pipefail
+          python -c "import os,json; s=json.load(open('_out_4u/run/summary.json')); entries=int(s.get('entries',0)); fee=float(os.environ.get('FEES_BPS','0')); slip=float(os.environ.get('SLIP_BPS','0')); rt=2.0*(fee+slip)/10000.0; s['cost_model']={'fees_bps_per_side':fee,'slip_bps_per_side':slip,'roundtrip_cost':rt}; s['cum_pnl_cost_adj']=float(s.get('cum_pnl_close_based',0.0))-entries*rt; open('_out_4u/run/summary_cost.json','w').write(json.dumps(s,indent=2))"
+
+      - name: Upload artifacts (small, pinned)
+        uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
+        with:
+          name: "grid_p${{ matrix.p_thr_trend }}_tp${{ matrix.tp_atr }}_sl${{ matrix.sl_atr }}_cd${{ matrix.cooldown }}_mh${{ matrix.min_hold }}_ofi${{ matrix.ofi_thr }}_thi${{ matrix.t_hi }}"
+          path: |
+            _out_4u/run/summary.json
+            _out_4u/run/summary_cost.json
+            _out_4u/run/gating_debug.json
+          retention-days: 14
+
+  bundle:
+    name: "bundle all grid artifacts"
+    runs-on: ubuntu-latest
+    needs: grid
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Aggregate grid_* artifacts into one ZIP (via REST API)
+        env:
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -c "import os,urllib.request,json,io,zipfile,glob,sys,pathlib; repo=os.environ['REPO']; run=os.environ['RUN']; tok=os.environ['TOKEN']; u=f'https://api.github.com/repos/{repo}/actions/runs/{run}/artifacts?per_page=100'; req=urllib.request.Request(u, headers={'Authorization':f'Bearer {tok}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}); data=json.loads(urllib.request.urlopen(req).read().decode()); pathlib.Path('bundle/raw').mkdir(parents=True, exist_ok=True); pathlib.Path('bundle/extracted').mkdir(parents=True, exist_ok=True); count=0; for a in data.get('artifacts',[]):     name=a.get('name','');     if not name.startswith('grid_'): continue;     aid=a['id']; dl=f'https://api.github.com/repos/{repo}/actions/artifacts/{aid}/zip';     r2=urllib.request.Request(dl, headers={'Authorization':f'Bearer {tok}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'});     zbytes=urllib.request.urlopen(r2).read(); open(f'bundle/raw/{name}.zip','wb').write(zbytes);     zf=zipfile.ZipFile(io.BytesIO(zbytes)); zf.extractall(f'bundle/extracted/{name}'); count+=1; open('bundle/count.txt','w').write(str(count))"
+      - name: Build summary.csv
+        run: |
+          set -euo pipefail
+          python -c "import json,glob,os; rows=[]; from pathlib import Path; for d in sorted(Path('bundle/extracted').glob('grid_*')):     s=d/'summary.json'; sc=d/'summary_cost.json';     S={}; SC={};     try: S=json.load(open(s));     except: pass;     try: SC=json.load(open(sc));     except: pass;     rows.append((d.name, S.get('entries'), S.get('cum_pnl_close_based'), SC.get('cum_pnl_cost_adj'), S.get('avg_gatep'))); open('bundle/summary.csv','w').write('config,entries,cum_pnl,cum_pnl_cost_adj,avg_gatep\n'+'\n'.join([','.join(['' if x is None else str(x) for x in r]) for r in rows]))"
+      - name: Create single ZIP
+        run: |
+          set -euo pipefail
+          zip -r grid_bundle_${{ github.run_id }}.zip bundle
+      - name: Upload bundle (pinned SHA)
+        uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
+        with:
+          name: grid_bundle_${{ github.run_id }}
+          path: grid_bundle_${{ github.run_id }}.zip
+          retention-days: 30
