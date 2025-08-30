@@ -27,24 +27,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/data _out_4u/run
-          if [ -n "${ github.event.inputs.DATA_ZIP }" ]; then unzip -q "${ github.event.inputs.DATA_ZIP }" -d tmp/data || true; fi
+          if [ -n "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true; fi
           echo "{}" > _out_4u/run/gating_debug.json
           echo "{}" > _out_4u/run/summary.json
           echo "open_time,signal,score" > _out_4u/run/preds_test.csv
           echo "open_time,side,price,qty" > _out_4u/run/trades.csv
-      - name: Write preflight_strict.py via base64 (ASCII only)
+      - name: Write preflight_strict.py (base64, no heredoc)
         env:
           PY_B64: "aW1wb3J0IGFyZ3BhcnNlLCBqc29uLCBvcywgZ2xvYiwgcGFuZGFzIGFzIHBkClJFUT1bIm9wZW5fdGltZSIsIm9wZW4iLCJoaWdoIiwibG93IiwiY2xvc2UiLCJ2b2x1bWUiXQphcD1hcmdwYXJzZS5Bcmd1bWVudFBhcnNlcigpOyBhcC5hZGRfYXJndW1lbnQoIi0tZGF0YS1yb290IixyZXF1aXJlZD1UcnVlKTsgYXAuYWRkX2FyZ3VtZW50KCItLWNzdi1nbG9iIixkZWZhdWx0PSIqKi8qLmNzdiIpOyBhcC5hZGRfYXJndW1lbnQoIi0tb3V0ZGlyIixyZXF1aXJlZD1UcnVlKTsgYT1hcC5wYXJzZV9hcmdzKCkKb3MubWFrZWRpcnMoYS5vdXRkaXIsIGV4aXN0X29rPVRydWUpCnBhdD1hLmNzdl9nbG9iIGlmIGEuY3N2X2dsb2IgZWxzZSAiKiovKi5jc3YiCnBhdGhzPWdsb2IuZ2xvYihvcy5wYXRoLmpvaW4oYS5kYXRhX3Jvb3QsIHBhdCksIHJlY3Vyc2l2ZT1UcnVlKQppZiBub3QgcGF0aHM6IHJhaXNlIFN5c3RlbUV4aXQoZiJObyBDU1YgZm91bmQgdW5kZXIge2EuZGF0YV9yb290fSB3aXRoIHBhdHRlcm4ge3BhdH0iKQpwcmVmPVtwIGZvciBwIGluIHBhdGhzIGlmICJFVEhVU0RUIiBpbiBvcy5wYXRoLmJhc2VuYW1lKHApLnVwcGVyKCldOyBjc3Y9KHByZWYgb3IgcGF0aHMpWzBdCmRmPXBkLnJlYWRfY3N2KGNzdiwgbnJvd3M9MjAwMCkKbWlzcz1bYyBmb3IgYyBpbiBSRVEgaWYgYyBub3QgaW4gZGYuY29sdW1uc10KcmVwPXsiY3N2X3BhdGgiOmNzdiwicm93c19yZWFkIjppbnQobGVuKGRmKSksIm1pc3NpbmciOm1pc3MsInJlcXVpcmVkIjpSRVEsInN0YXR1cyI6Im9rIiBpZiBub3QgbWlzcyBlbHNlICJmYWlsIn0Kd2l0aCBvcGVuKG9zLnBhdGguam9pbihhLm91dGRpciwic3VtbWFyeS5qc29uIiksInciKSBhcyBmOiBqc29uLmR1bXAocmVwLGYsaW5kZW50PTIpCm9wZW4ob3MucGF0aC5qb2luKGEub3V0ZGlyLCJnYXRpbmdfZGVidWcuanNvbiIpLCJhIikuY2xvc2UoKQpvcGVuKG9zLnBhdGguam9pbihhLm91dGRpciwicHJlZHNfdGVzdC5jc3YiKSwiYSIpLmNsb3NlKCkKb3Blbihvcy5wYXRoLmpvaW4oYS5vdXRkaXIsInRyYWRlcy5jc3YiKSwiYSIpLmNsb3NlKCkKaWYgbWlzczogcmFpc2UgU3lzdGVtRXhpdChmIk1pc3NpbmcgcmVxdWlyZWQgY29sdW1uczoge21pc3N9IikK"
         run: |
           set -euo pipefail
-          echo "$PY_B64" | python - <<'PY'
-import sys,base64
-open('preflight_strict.py','wb').write(base64.b64decode(sys.stdin.read().encode('ascii')))
-PY
+          python -c "import os,base64; open('preflight_strict.py','wb').write(base64.b64decode(os.environ['PY_B64'].encode('ascii')))"
       - name: Run preflight
         run: |
           set -euo pipefail
-          python preflight_strict.py --data-root tmp/data --csv-glob "${ github.event.inputs.CSV_GLOB }" --outdir _out_4u/run
+          python preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:

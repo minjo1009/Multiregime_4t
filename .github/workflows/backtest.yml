@@ -27,15 +27,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u/run
-          unzip -q "${ github.event.inputs.CODE_ZIP }" -d tmp/trade
-          unzip -q "${ github.event.inputs.DATA_ZIP }" -d tmp/data || true
+          unzip -q "${{ github.event.inputs.CODE_ZIP }}" -d tmp/trade
+          unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true
       - name: Preflight strict
         run: |
           set -euo pipefail
-          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${ github.event.inputs.CSV_GLOB }" --outdir _out_4u/run
+          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
       - name: Detect entrypoint and run
         env:
-          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
         run: |
           set -euo pipefail
           ENTRY=""
@@ -45,7 +45,6 @@ jobs:
           if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run || true
-          # Ensure artifacts exist
           [ -f _out_4u/run/gating_debug.json ] || echo "{}" > _out_4u/run/gating_debug.json
           [ -f _out_4u/run/summary.json ] || echo "{}" > _out_4u/run/summary.json
           [ -f _out_4u/run/preds_test.csv ] || echo "open_time,signal,score" > _out_4u/run/preds_test.csv
