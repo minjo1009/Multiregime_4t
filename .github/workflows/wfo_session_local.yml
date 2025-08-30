@@ -63,16 +63,16 @@ jobs:
           echo "[PIN] validating SHAs by fetching commits..."
           mkdir -p _pincheck && cd _pincheck
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
-          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "${ env.CHECKOUT_SHA }"
+          [ "$(git cat-file -t "${ env.CHECKOUT_SHA }")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
-          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "${ env.SETUP_PYTHON_SHA }"
+          [ "$(git cat-file -t "${ env.SETUP_PYTHON_SHA }")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
-          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${ env.UPLOAD_ARTIFACT_SHA }"
+          [ "$(git cat-file -t "${ env.UPLOAD_ARTIFACT_SHA }")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
@@ -96,46 +96,63 @@ jobs:
         run: |
           set -euo pipefail
           WORK=work
-          mkdir -p "${WORK}/code" "${WORK}/data" "${WORK}/out/single" "_out_4u/run" "_out_4u/logs"
-          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
-          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
-          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
-          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          mkdir -p "${ env.WORK }/code" "${ env.WORK }/data" "${ env.WORK }/out/single" "_out_4u/run" "_out_4u/logs"
+          cp -f "${ inputs.CODE_ZIP_PATH }" "${ env.WORK }/code.zip"
+          cp -f "${ inputs.DATA_ZIP_PATH }" "${ env.WORK }/data.zip"
+          unzip -q "${ env.WORK }/code.zip" -d "${ env.WORK }/code"
+          unzip -q "${ env.WORK }/data.zip" -d "${ env.WORK }/data"
           echo "[TREE] work/code:"
           find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
-      - name: Preflight
+      - name: Write preflight (safe echo)
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os,sys,glob,json,pandas as pd, pathlib
-def find_csv(root,patt):
-  g=glob.glob(os.path.join(root,patt),recursive=True)
-  if not g: raise SystemExit("CSVDetect: no csv")
-  return g[0]
-def read_df(path):
-  df=pd.read_csv(path)
-  req={"open_time","open","high","low","close","volume"}
-  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")
-  ot=df["open_time"]
-  try:
-    dt=pd.to_datetime(ot,unit="ms",utc=True) if pd.api.types.is_numeric_dtype(ot) else pd.to_datetime(ot,utc=True)
-  except Exception:
-    dt=pd.to_datetime(ot,utc=True,errors="coerce")
-  df["dt_utc"]=dt
-  return df
-root="work/data"; patt=os.environ.get("CSV_GLOB","**/*.csv")
-fee=os.environ.get("FEES_BPS","7.5"); champ=os.environ.get("CHAMPION_CONFIG","")
-csv=find_csv(root,patt); df=read_df(csv)
-out_csv="work/input.csv"; df.to_csv(out_csv,index=False)
-pathlib.Path("conf").mkdir(parents=True,exist_ok=True)
-open("conf/config.effective.yml","w").write(f"data_path: '{out_csv}'\nfee_bps: {fee}\nchampion_config: '{champ}'\n")
-print("[PREFLIGHT] csv:", csv, "rows:", len(df))
-PY
+          mkdir -p work conf
+          {
+            echo 'import os,sys,glob,json'
+            echo 'import pandas as pd'
+            echo 'import pathlib'
+            echo 'def find_csv(root,patt):'
+            echo '  g=glob.glob(os.path.join(root,patt),recursive=True)'
+            echo '  if not g: raise SystemExit("CSVDetect: no csv")'
+            echo '  return g[0]'
+            echo 'def read_df(path):'
+            echo '  df=pd.read_csv(path)'
+            echo '  req={"open_time","open","high","low","close","volume"}'
+            echo '  if not req.issubset(df.columns): raise SystemExit("Preflight: missing columns")'
+            echo '  ot=df["open_time"]'
+            echo '  try:'
+            echo '    dt=pd.to_datetime(ot,unit="ms",utc=True) if pd.api.types.is_numeric_dtype(ot) else pd.to_datetime(ot,utc=True)'
+            echo '  except Exception:'
+            echo '    dt=pd.to_datetime(ot,utc=True,errors="coerce")'
+            echo '  df["dt_utc"]=dt'
+            echo '  return df'
+            echo 'def write_cfg(path,data_path,fee_bps,champion):'
+            echo '  os.makedirs(os.path.dirname(path),exist_ok=True)'
+            echo '  with open(path,"w") as f:'
+            echo '    f.write("data_path: \"" + data_path + "\"\n")'
+            echo '    f.write("fee_bps: " + str(fee_bps) + "\n")'
+            echo '    f.write("champion_config: \"" + champion + "\"\n")'
+            echo 'if __name__=="__main__":'
+            echo '  root="work/data"'
+            echo '  patt=os.environ.get("CSV_GLOB","**/*.csv")'
+            echo '  fee=os.environ.get("FEES_BPS","7.5")'
+            echo '  champ=os.environ.get("CHAMPION_CONFIG","")'
+            echo '  csv=find_csv(root,patt)'
+            echo '  df=read_df(csv)'
+            echo '  out_csv="work/input.csv"'
+            echo '  df.to_csv(out_csv,index=False)'
+            echo '  pathlib.Path("conf").mkdir(parents=True,exist_ok=True)'
+            echo '  with open("conf/config.effective.yml","w") as f:'
+            echo '    f.write(f"data_path: '{out_csv}\\n")'
+            echo '    f.write(f"fee_bps: {fee}\\n")'
+            echo '    f.write(f"champion_config: '{champ}'\\n")'
+            echo '  print("[PREFLIGHT] csv:", csv, "rows:", len(df))'
+          } > work/preflight_strict.py
       - name: Run (with ENTRYPOINT/ARGS)
         run: |
           set -euo pipefail
-          EP_INPUT="${{ inputs.ENTRYPOINT }}"
-          ARGS="${{ inputs.ENTRY_ARGS }}"
+          EP_INPUT="${ inputs.ENTRYPOINT }"
+          ARGS="${ inputs.ENTRY_ARGS }"
           if [ "$EP_INPUT" = "auto" ]; then
             EP=""
             [ -f work/code/run_4u.py ] && EP="work/code/run_4u.py"
@@ -159,7 +176,6 @@ PY
         run: |
           set -euo pipefail
           mkdir -p work/out/single
-          # Copy best-effort files if found anywhere under repo
           for name in summary_cost.json summary.json gating_debug.json; do
             hit="$(find . -type f -name "$name" | head -n 1 || true)"
             if [ -n "$hit" ]; then
@@ -167,10 +183,8 @@ PY
               cp -f "$hit" "work/out/single/$name"
             fi
           done
-          # trades/preds (allow any prefix)
           hit="$(find . -type f -name 'trades.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/trades.csv || true
           hit="$(find . -type f -name 'preds_test.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/preds_test.csv || true
-          # If still nothing, create placeholders
           [ -f work/out/single/summary.json ] || echo "{}" > work/out/single/summary.json
           [ -f work/out/single/gating_debug.json ] || echo "{}" > work/out/single/gating_debug.json
           [ -f work/out/single/trades.csv ] || printf "" > work/out/single/trades.csv
