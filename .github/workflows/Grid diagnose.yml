@@ -1,14 +1,14 @@
-name: diagnose-multigrid-v1.1.9
+name: diagnose119
 
 on:
   workflow_dispatch:
     inputs:
       CODE_ZIP:
-        description: Repo path to code zip
+        description: Repo path to code zip (root)
         required: true
         default: trade_v1.1.9.zip
       DATA_ZIP:
-        description: Repo path to data zip
+        description: Repo path to data zip (root)
         required: true
         default: ETHUSDT_1min_2020_2025.zip
       CSV_FILE:
@@ -17,264 +17,137 @@ on:
         default: ETHUSDT_1min_2020_2025.csv
 
 jobs:
-  grid:
+  diag:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix:
-        THR:   [3.2, 3.8]
-        TP:    [0.0038]
-        SL:    [0.0022]
-        HOLD:  [6, 8]
-        FILTER: [ema, none]
-        BE:    [0, 5]
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
-      OUT_DIR: _out_4u/run
+      OUT_DIR: _out_119/diag
       PYVER: '3.11'
-
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
 
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
-      - name: Resolve ZIPs (root or nested)
+      - name: Verify action SHAs (list refs then grep)
         shell: bash
         run: |
           set -euo pipefail
-          resolve() {
-            local in="$1" outvar="$2" path=""
-            if [[ -f "$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
-            elif [[ -f "${GITHUB_WORKSPACE}/$in" ]]; then path="${GITHUB_WORKSPACE}/$in"
-            else
-              local base="$(basename "$in")"
-              if [[ -f "${GITHUB_WORKSPACE}/$base" ]]; then path="${GITHUB_WORKSPACE}/$base"
-              else
-                path="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"
-              fi
-            fi
-            [[ -n "$path" && -f "$path" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
-            echo "${outvar}=${path}" >> "$GITHUB_ENV"
-            echo "[resolved] $in -> $path"
-          }
-          resolve "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
-          resolve "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
+          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact v4
+          git ls-remote https://github.com/actions/upload-artifact | grep -q "$UPL" \
+            || { echo "::error::upload-artifact commit not found in refs"; exit 61; }
+          [[ ${#UPL} -eq 40 ]] || { echo "::error::not full-length SHA"; exit 62; }
+          echo "[ok] upload-artifact SHA verified"
 
-      - name: Unpack code and data
+      - name: Resolve ZIPs
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${RUN_DIR}" "${DATA_DIR}" "${OUT_DIR}"
-          unzip -q "${CODE_ZIP_ABS}" -d "${RUN_DIR}"
-          unzip -q "${DATA_ZIP_ABS}" -d "${DATA_DIR}"
-          # run_4u.py가 하위폴더에 있으면 RUN_DIR 보정
-          if [ ! -f "${RUN_DIR}/run_4u.py" ]; then
-            CAND="$(find "${RUN_DIR}" -maxdepth 2 -type f -name 'run_4u.py' -print -quit || true)"
-            [ -n "$CAND" ] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
-            echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"
-            echo "[debug] RUN_DIR corrected -> $(dirname "$CAND")"
+          res(){ local in="$1" out="$2" p=""; local base="$(basename "$in")";
+            if [[ -f "$in" ]]; then p="${GITHUB_WORKSPACE}/$in";
+            else p="$(find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f -name "$base" -print -quit || true)"; fi
+            [[ -n "$p" && -f "$p" ]] || { echo "::error::ZIP not found: $in"; exit 66; }
+            echo "${out}=${p}" >> "$GITHUB_ENV"; echo "[resolved] $in -> $p";
+          }
+          res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
+          res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
+
+      - name: Unpack code & data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR" "$DATA_DIR" "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          unzip -q "$CODE_ZIP_ABS" -d "$RUN_DIR"
+          unzip -q "$DATA_ZIP_ABS" -d "$DATA_DIR"
+          RUN_PY="$(find "$RUN_DIR" -maxdepth 3 -type f -name 'run_4u.py' -print -quit || true)"
+          ENG_PY="$(find "$RUN_DIR" -maxdepth 5 -type f -path '*/backtest/engine.py' -print -quit || true)"
+          [[ -n "$RUN_PY" && -n "$ENG_PY" ]] || { echo "::error::runner or engine not found"; exit 67; }
+          echo "RUN_PY=$RUN_PY" >> "$GITHUB_ENV"
+          echo "ENG_PY=$ENG_PY" >> "$GITHUB_ENV"
+          CSV="${GITHUB_WORKSPACE}/${DATA_DIR}/${{ github.event.inputs.CSV_FILE }}"
+          if [[ ! -f "$CSV" ]]; then
+            CSV="$(find "$DATA_DIR" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
+            [[ -n "$CSV" ]] || { echo "::error::CSV not found"; exit 64; }
+            CSV="${GITHUB_WORKSPACE}/${CSV}"
           fi
-          echo "[debug] data files:"; find "${DATA_DIR}" -maxdepth 2 -type f -name '*.csv' -print || true
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+
+      - name: Preflight (headers + n_rows)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HDR="$(head -n1 "$CSV_PATH")"
+          for c in open_time open high low close volume; do
+            echo "$HDR" | grep -q "\b$c\b" || { echo "::error::missing column: $c"; exit 75; }
+          done
+          rows=$(($(wc -l < "$CSV_PATH") - 1))
+          jq -n --arg path "$CSV_PATH" --arg hdr "$HDR" --argjson rows "$rows" \
+            '{path:$path, header:$hdr, n_rows:$rows}' \
+            > "${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
+          cat "${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
+
+      - name: Force conf.effective.yml (printf; no heredoc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR/conf"
+          CONF="$RUN_DIR/conf/config.effective.yml"
+          : > "$CONF"
+          printf '%s\n' 'thr_by_session:'     >> "$CONF"
+          printf '%s\n' '  US: 4.0'           >> "$CONF"
+          printf '%s\n' '  EU: 3.8'           >> "$CONF"
+          printf '%s\n' '  ASIA: 3.5'         >> "$CONF"
+          printf '%s\n' 'tp_pct: 0.0035'      >> "$CONF"
+          printf '%s\n' 'sl_pct: 0.0018'      >> "$CONF"
+          printf '%s\n' 'hold_bars: 6'        >> "$CONF"
+          sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
+          jq -n --arg conf "$CONF" --arg run "$RUN_PY" --arg eng "$ENG_PY" \
+            '{conf_effective:$conf, run_py:$run, engine_py:$eng}' \
+            > "${GITHUB_WORKSPACE}/${OUT_DIR}/sysinfo.json"
 
       - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install -U pip
-          if [ -f "$RUN_DIR/requirements.txt" ]; then
-            pip install -r "$RUN_DIR/requirements.txt"
-          else
-            pip install pandas numpy pyyaml
-          fi
+          python -m pip install -U pip >/dev/null
+          pip install pandas numpy pyyaml >/dev/null
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq; fi
 
-      - name: Detect CSV (ABS)
-        shell: bash
-        run: |
-          set -euo pipefail
-          CSV="${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/${{ github.event.inputs.CSV_FILE }}"
-          if [ ! -f "$CSV" ]; then
-            F="$(find "${{ env.DATA_DIR }}" -type f -name "${{ github.event.inputs.CSV_FILE }}" -print -quit || true)"
-            [ -n "$F" ] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
-            CSV="${GITHUB_WORKSPACE}/${F}"
-          fi
-          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
-
-      - name: Schema discovery (grep engine for config keys)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ctx] RUN_DIR=$RUN_DIR"
-          KEYS='thr_by_session|thr|threshold|tp_pct|tp|sl_pct|sl|hold_bars|hold|allow_long|allow_short|fees_bps_per_leg|taker_bps|slippage_bps|beta|temp|calibration'
-          grep -R -nE "$KEYS" "$RUN_DIR/backtest" || true
-
-      # 1) Override: polyfill keys (effective.yml & config.yml 동시)
-      - name: Override effective config (polyfill keys)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ctx] RUN_DIR=$RUN_DIR"
-          python - "$RUN_DIR" "${{ matrix.THR }}" "${{ matrix.HOLD }}" "${{ matrix.TP }}" "${{ matrix.SL }}" "${{ matrix.FILTER }}" "${{ matrix.BE }}" <<'PY'
-          import os, sys, pathlib, yaml, hashlib
-          run_dir = pathlib.Path(sys.argv[1])
-          thr=float(sys.argv[2]); hold=int(sys.argv[3]); tp=float(sys.argv[4]); sl=float(sys.argv[5]); flt=sys.argv[6]; be=int(sys.argv[7])
-          conf = run_dir/'conf'; conf.mkdir(parents=True, exist_ok=True)
-          eff = conf/'config.effective.yml'
-          base = conf/'config.yml'
-          # 폴리필: 엔진이 어떤 이름을 쓰든 잡히도록 동의어 키 동시 기록
-          cfg = {
-            # threshold 계열
-            'thr_by_session': {'US':thr,'EU':thr,'ASIA':thr},
-            'thr': thr, 'threshold': thr,
-            # take-profit / stop-loss
-            'tp_pct': tp, 'tp': tp, 'take_profit': tp,
-            'sl_pct': sl, 'sl': sl, 'stop_loss': sl,
-            # hold 계열
-            'hold_bars': hold, 'hold': hold, 'holding_period': hold,
-            # 방향/수수료/보정
-            'allow_long': True, 'allow_short': True,
-            'fees_bps_per_leg': 3.0, 'taker_bps': 3.0, 'slippage_bps': 0.0,
-            'calibration': 'isotonic',
-            # 게이팅/온도
-            'beta': 1.6, 'temp': 6.0,
-            # 디버그 태그
-            '__debug_tag__': f"thr{thr}_h{hold}_tp{tp}_sl{sl}_f{flt}_be{be}"
-          }
-          if flt=='ema': cfg['filter_ema_50_200']=True
-          if be>0: cfg['breakeven_bars']=be; cfg['breakeven_lock_pct']=0.0
-          text = yaml.safe_dump(cfg, sort_keys=False).encode()
-          for p in (eff, base): p.write_bytes(text)
-          print("[override] wrote", eff, "and", base, "sha256:", hashlib.sha256(text).hexdigest())
-          PY
-          CONF_PATH="$RUN_DIR/conf/config.effective.yml"
-          echo "PRE_HASH=$(sha256sum "$CONF_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "[PRE] conf path = $(realpath "$CONF_PATH")"
-          sed -n '1,60p' "$CONF_PATH"
-
-      - name: Snapshot config to out_dir (pre-run)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SNAP_DIR="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          mkdir -p "$SNAP_DIR"
-          cp -f "$RUN_DIR/conf/config.effective.yml" "$SNAP_DIR/_cfg_snapshot.yml"
-          sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print $1}' > "$SNAP_DIR/_cfg_snapshot.sha256"
-          echo "[snap] wrote $SNAP_DIR/_cfg_snapshot.yml"
-
-      - name: Lock bridge & check skip-bridge code path (warn-only)
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[ctx] RUN_DIR=$RUN_DIR"
-          test -f "$RUN_DIR/VERSION.txt" && { echo "[version]"; head -n 1 "$RUN_DIR/VERSION.txt"; } || true
-          if [ -f "$RUN_DIR/backtest/exit_bridge.py" ]; then rm -f "$RUN_DIR/backtest/exit_bridge.py"; echo "[bridge] exit_bridge.py removed"; fi
-          if grep -q "pre-existing config.effective.yml" "$RUN_DIR/run_4u.py"; then
-            echo "[check] run_4u.py has skip-bridge logic"
-          else
-            echo "::warning::run_4u.py skip-bridge string not found (해시 검증으로 진행)"
-          fi
-
-      - name: Run backtest (tee log)
+      - name: Run 1.1.9
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
-          TAG="thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}"
-          mkdir -p "${GITHUB_WORKSPACE}/_diag"
-          python "$RUN_DIR/run_4u.py" --data_path "${{ env.CSV_PATH }}" --out_dir "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}" 2>&1 | tee "${GITHUB_WORKSPACE}/_diag/run_${TAG}.log"
-          ls -l "${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
+          python "$RUN_PY" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}" || true
 
-      - name: Post-run verify (hash compare + flexible value check)
+      - name: Validate summary vs preflight
         shell: bash
         run: |
           set -euo pipefail
-          CONF_PATH="$RUN_DIR/conf/config.effective.yml"
-          OUT="${GITHUB_WORKSPACE}/${{ env.OUT_DIR }}"
-          POST_HASH="$(sha256sum "$CONF_PATH" | awk '{print $1}')"
-          PRE_HASH="$(cat "$OUT/_cfg_snapshot.sha256")"
-          echo "[POST] conf path = $(realpath "$CONF_PATH")"
-          echo "[hash] PRE=$PRE_HASH POST=$POST_HASH"
-          if [ "$PRE_HASH" != "$POST_HASH" ]; then
-            echo "::error::override 파일이 실행 중 덮어쓰기 되었습니다 (경로/순서)."; exit 71
-          fi
-          SUM="$OUT/summary.json"; GATE="$OUT/gating_debug.json"
-          THR_EXPECT="${{ matrix.THR }}"; TP_EXPECT="${{ matrix.TP }}"; SL_EXPECT="${{ matrix.SL }}"
-          THR_JSON="$(jq -r '.thr_by_session.US // empty' "$GATE" 2>/dev/null || true)"
-          TP_JSON="$(jq -r '.tp_pct // empty' "$SUM" 2>/dev/null || true)"
-          SL_JSON="$(jq -r '.sl_pct // empty' "$SUM" 2>/dev/null || true)"
-          if [ -z "$THR_JSON" ] && [ -z "$TP_JSON" ] && [ -z "$SL_JSON" ]; then
-            echo "[info] outputs do not expose keys → schema 차이 가능. 스냅샷 해시 동일 → override 전달은 보장됨."
-          else
-            echo "[expected] thr=$THR_EXPECT tp=$TP_EXPECT sl=$SL_EXPECT"
-            echo "[actual  ] thr=$THR_JSON tp=$TP_JSON sl=$SL_JSON"
-            if [ "$THR_JSON" != "$THR_EXPECT" ] || [ "$TP_JSON" != "$TP_EXPECT" ] || [ "$SL_JSON" != "$SL_EXPECT" ]; then
-              echo "::error::outputs 키 값 불일치(스키마 이름/내부 재가공)."; exit 73
-            fi
-            echo "[ok] outputs reflect override"
-          fi
+          S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
+          P="${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
+          test -s "$S" || { echo "::error::summary.json missing"; exit 78; }
+          ok=$(jq -e '((.placeholders // false) == false) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null)' "$S" >/dev/null && echo ok || echo ng)
+          [[ "$ok" == "ok" ]] || { echo "::error::PLACEHOLDER_OR_NULL"; cat "$S"; exit 78; }
+          nt=$(jq -r '.n_trades' "$S")
+          rows=$(jq -r '.n_rows // empty' "$S"); [[ -n "$rows" ]] || rows=$(jq -r '.n_rows' "$P")
+          ratio=$(awk -v nt="$nt" -v nr="$rows" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
+          echo "[ratio] n_trades/n_rows=$ratio"
+          awk -v r="$ratio" 'BEGIN{exit !(r<0.95)}' || { echo "::error::TRADE_ROW_EQUIV n_trades >= 0.95 * n_rows"; exit 79; }
 
-      - name: Upload diagnostics/artifacts
+      - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: out_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}
+          name: diagnose119_outputs
           path: |
-            ${{ env.OUT_DIR }}/summary.json
-            ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/preds_test.csv
-            ${{ env.OUT_DIR }}/trades.csv
-            ${{ env.OUT_DIR }}/preflight.json
-            ${{ env.OUT_DIR }}/_cfg_snapshot.yml
-            ${{ env.OUT_DIR }}/_cfg_snapshot.sha256
-            _diag/run_thr${{ matrix.THR }}_tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_f${{ matrix.FILTER }}_be${{ matrix.BE }}.log
-
-  aggregate:
-    needs: [grid]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all run artifacts
-        uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          path: all_runs
-
-      - name: Uniqueness by snapshot hash (must differ across grid)
-        shell: bash
-        run: |
-          set -euo pipefail
-          MAP="$(find all_runs -type f -name '_cfg_snapshot.sha256' -maxdepth 4 | wc -l)"
-          echo "[count] snapshots: $MAP"
-          if [ "$MAP" -eq 0 ]; then
-            echo "::error::no snapshots found → artifact pathing issue"; exit 74
-          fi
-          SORTED="$(find all_runs -type f -name '_cfg_snapshot.sha256' -maxdepth 4 -exec cat {} + | sort | uniq -c)"
-          echo "[hashes]"
-          echo "$SORTED"
-          UNIQUE="$(echo "$SORTED" | awk '{print $2}' | sort -u | wc -l)"
-          echo "[unique hashes] $UNIQUE"
-          if [ "$UNIQUE" -le 1 ]; then
-            echo "::error::All runs used identical config snapshots → (1) override 값 동일, (2) 매트릭스 전달 실패, (3) 동일 파일로 덮어쓰기."; exit 70
-          else
-            echo "[ok] Config snapshots diversified across runs."
-          fi
-
-      - name: Table of (thr,tp,sl) from snapshots  # heredoc 대신 yq 사용
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install -U pip >/dev/null
-          pip install yq >/dev/null
-          echo -e "artifact\tthr_US\ttp_pct\tsl_pct\thold_bars\thash"
-          while IFS= read -r yml; do
-            hfile="${yml%_cfg_snapshot.yml}_cfg_snapshot.sha256"
-            artifact="$(echo "$yml" | awk -F/ '{for(i=1;i<=NF;i++){ if($i ~ /^out_thr/){print $i; exit} }}')"
-            thr="$(yq -r '.thr_by_session.US // ""' "$yml")"
-            tp="$(yq -r '.tp_pct // ""' "$yml")"
-            sl="$(yq -r '.sl_pct // ""' "$yml")"
-            hb="$(yq -r '.hold_bars // ""' "$yml")"
-            hash="$(cat "$hfile" 2>/dev/null || echo "")"
-            printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$artifact" "$thr" "$tp" "$sl" "$hb" "$hash"
-          done < <(find all_runs -type f -name '_cfg_snapshot.yml' -maxdepth 4)
+            _out_119/diag/preflight.json
+            _out_119/diag/summary.json
+            _out_119/diag/gating_debug.json
+            _out_119/diag/sysinfo.json
+          if-no-files-found: warn
