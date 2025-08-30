@@ -22,11 +22,25 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
+      matrix:
+        include:
+          # --- Percent 모드(고정 TP/SL) ---
+          - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
+          - {MODE: pct, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
+          - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
+          - {MODE: pct, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
+          # --- ATR 모드 자리(엔진 외부 환산 비활성; 동일 퍼센트로 실행) ---
+          - {MODE: atr, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
+          - {MODE: atr, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
+          - {MODE: atr, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
+          - {MODE: atr, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
+
     env:
       RUN_DIR: tmp/trade
       DATA_DIR: tmp/data
       OUT_BASE: _out_4u
       PYVER: '3.11'
+
     steps:
       # ✅ pinned (checkout v5.0.0)
       - name: "Checkout"
@@ -66,7 +80,6 @@ jobs:
             CAND="$(find "$RUN_DIR" -maxdepth 3 -type f -name 'run_4u.py' -print -quit || true)"
             [[ -n "$CAND" ]] || { echo "::error::run_4u.py not found in code zip"; exit 67; }
             echo "RUN_DIR=$(dirname "$CAND")" >> "$GITHUB_ENV"
-            echo "[debug] RUN_DIR -> $(dirname "$CAND")"
           fi
           echo "[debug] CSV files:"; find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' -print || true
 
@@ -77,7 +90,7 @@ jobs:
           python -m pip install -U pip >/dev/null
           pip install pandas numpy pyyaml >/dev/null
 
-      - name: "Detect CSV (ABS) + Preflight"
+      - name: "Detect CSV path (no python)"
         shell: bash
         run: |
           set -euo pipefail
@@ -87,76 +100,45 @@ jobs:
             [[ -n "$F" ]] || { echo "::error::CSV not found: ${{ github.event.inputs.CSV_FILE }}"; exit 64; }
             CSV="${GITHUB_WORKSPACE}/${F}"
           fi
-          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"; echo "[csv] $CSV"
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+          echo "[csv] $CSV"
 
-          cat > preflight.py <<'PY'
-import os, json, pandas as pd, numpy as np
-csv = os.environ['CSV_PATH']
-need = ['open_time','open','high','low','close','volume']
-df = pd.read_csv(csv, nrows=200000)
-missing = [c for c in need if c not in df.columns]
-max_ot = pd.to_numeric(df.get('open_time', pd.Series(dtype='float64')), errors='coerce').max()
-hint = 'ms' if (pd.notna(max_ot) and max_ot > 1e12) else 's'
-print(json.dumps({"path": csv,
-                  "rows_scanned": int(len(df)),
-                  "columns": list(df.columns),
-                  "missing": missing,
-                  "open_time_hint": hint}))
-PY
-          python preflight.py > "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
-          cat "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
-          miss=$(jq -r '.missing|length' "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json")
-          [[ "$miss" == "0" ]] || { echo "::error::Required columns missing"; exit 65; }
-
-      - name: "Set params & OUT_DIR (export matrix)"
+      - name: "Set params & OUT_DIR"
         shell: bash
         run: |
           set -euo pipefail
-          # matrix는 이동: strategy.include 는 아래 aggregate에서 필요 없어서 grid만 고정
-          echo "MODE=pct" >> "$GITHUB_ENV"  # v120 엔진은 단순; ATR외부계산 비활성. 필요시 확장.
-          # 조합 파라미터는 런 단일값으로 시작(원하면 strategy.matrix 추가)
-          echo "THR_US=4.0"   >> "$GITHUB_ENV"
-          echo "THR_EU=3.8"   >> "$GITHUB_ENV"
-          echo "THR_ASIA=3.5" >> "$GITHUB_ENV"
-          echo "HOLD=6"       >> "$GITHUB_ENV"
-          echo "BE=3"         >> "$GITHUB_ENV"
-          echo "FILTER=ema"   >> "$GITHUB_ENV"
-          echo "TP_EFF=0.0035" >> "$GITHUB_ENV"
-          echo "SL_EFF=0.0018" >> "$GITHUB_ENV"
-          TAG="mode${MODE}_us${THR_US}_eu${THR_EU}_as${THR_ASIA}_h${HOLD}_be${BE}_f${FILTER}"
+          echo "MODE=${{ matrix.MODE }}" >> "$GITHUB_ENV"
+          echo "THR_US=${{ matrix.THR_US }}" >> "$GITHUB_ENV"
+          echo "THR_EU=${{ matrix.THR_EU }}" >> "$GITHUB_ENV"
+          echo "THR_ASIA=${{ matrix.THR_ASIA }}" >> "$GITHUB_ENV"
+          echo "HOLD=${{ matrix.HOLD }}" >> "$GITHUB_ENV"
+          echo "BE=${{ matrix.BE }}" >> "$GITHUB_ENV"
+          echo "FILTER=${{ matrix.FILTER }}" >> "$GITHUB_ENV"
+          echo "TP_EFF=${{ matrix.TP }}" >> "$GITHUB_ENV"
+          echo "SL_EFF=${{ matrix.SL }}" >> "$GITHUB_ENV"
+          TAG="mode${{ matrix.MODE }}_us${{ matrix.THR_US }}_eu${{ matrix.THR_EU }}_as${{ matrix.THR_ASIA }}_h${{ matrix.HOLD }}_be${{ matrix.BE }}_f${{ matrix.FILTER }}"
           echo "RUN_TAG=$TAG" >> "$GITHUB_ENV"
           echo "OUT_DIR=${{ env.OUT_BASE }}/$TAG" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
           echo "[tag] $TAG"
 
-      - name: "Write conf/config.effective.yml (python; no heredoc)"
+      - name: "Write conf/config.effective.yml (printf only)"
         shell: bash
         run: |
           set -euo pipefail
-          cat > write_conf.py <<'PY'
-import os, json, pathlib, yaml, hashlib
-run_dir = os.environ['RUN_DIR']
-cfg = {
-  "thr_by_session": {
-    "US": float(os.environ["THR_US"]),
-    "EU": float(os.environ["THR_EU"]),
-    "ASIA": float(os.environ["THR_ASIA"]),
-  },
-  "tp_pct": float(os.environ["TP_EFF"]),
-  "sl_pct": float(os.environ["SL_EFF"]),
-  "hold_bars": int(os.environ["HOLD"]),
-  "allow_long": True,
-  "allow_short": True,
-}
-p = pathlib.Path(run_dir)/"conf"/"config.effective.yml"
-p.parent.mkdir(parents=True, exist_ok=True)
-text = yaml.safe_dump(cfg, sort_keys=False)
-p.write_text(text, encoding="utf-8")
-sha = hashlib.sha256(text.encode()).hexdigest()
-print(json.dumps({"wrote": str(p), "sha256": sha}))
-PY
-          python write_conf.py | tee _conf_write_log.json
-          jq -r '.sha256' _conf_write_log.json | awk '{print "[conf] sha256="$1}'
+          mkdir -p "$RUN_DIR/conf"
+          CONF="$RUN_DIR/conf/config.effective.yml"
+          : > "$CONF"
+          printf '%s\n' 'thr_by_session:'            >> "$CONF"
+          printf '%s\n' "  US: ${THR_US}"            >> "$CONF"
+          printf '%s\n' "  EU: ${THR_EU}"            >> "$CONF"
+          printf '%s\n' "  ASIA: ${THR_ASIA}"        >> "$CONF"
+          printf '%s\n' "tp_pct: ${TP_EFF}"          >> "$CONF"
+          printf '%s\n' "sl_pct: ${SL_EFF}"          >> "$CONF"
+          printf '%s\n' "hold_bars: ${HOLD}"         >> "$CONF"
+          printf '%s\n' "allow_long: true"           >> "$CONF"
+          printf '%s\n' "allow_short: true"          >> "$CONF"
+          sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
 
       - name: "Run backtest (v1.2.0)"
         shell: bash
@@ -184,8 +166,6 @@ PY
             ${{ env.OUT_DIR }}/summary.json
             ${{ env.OUT_DIR }}/trades.csv
             ${{ env.OUT_DIR }}/gating_debug.json
-            ${{ env.OUT_DIR }}/_*.json
-            ${{ env.OUT_DIR }}/*.log
           if-no-files-found: ignore
 
   aggregate:
@@ -213,13 +193,8 @@ PY
           while IFS= read -r -d '' s; do
             dir="$(dirname "$s")"; tag="$(basename "$dir")"
             gj="$dir/gating_debug.json"
-            if [[ -f "$gj" ]]; then
-              thr_US="$(jq -r '.thr_by_session.US // empty' "$gj")"
-              thr_EU="$(jq -r '.thr_by_session.EU // empty' "$gj")"
-              thr_AS="$(jq -r '.thr_by_session.ASIA // empty' "$gj")"
-            else
-              thr_US=""; thr_EU=""; thr_AS=""
-            fi
+            thr_US=""; thr_EU=""; thr_AS=""
+            [[ -f "$gj" ]] && thr_US="$(jq -r '.thr_by_session.US // empty' "$gj")" && thr_EU="$(jq -r '.thr_by_session.EU // empty' "$gj")" && thr_AS="$(jq -r '.thr_by_session.ASIA // empty' "$gj")"
             tp="$(jq -r '.tp_pct // empty' "$s")"
             sl="$(jq -r '.sl_pct // empty' "$s")"
             hold="$(jq -r '.hold_bars // empty' "$s")"
@@ -229,10 +204,8 @@ PY
             nt="$(jq -r '.n_trades // empty' "$s")"
             echo "$tag,$thr_US,$thr_EU,$thr_AS,$tp,$sl,$hold,$hit,$pf,$mcc,$nt" >> leaderboard.csv
           done < <(find all_runs -type f -name summary.json -print0)
-
           { head -n 1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.sorted.csv
-          echo "== Top 10 =="
-          ( head -n 1 leaderboard.sorted.csv && tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed 's/^/  /'
+          echo "== Top 10 =="; ( head -n 1 leaderboard.sorted.csv && tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed 's/^/  /'
 
       - name: "Upload leaderboard"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
