@@ -40,17 +40,17 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
-      - name: "Setup Python"
+      - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
-      - name: "Resolve ZIPs"
+      - name: Resolve ZIPs
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
           res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
           res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
 
-      - name: "Unpack code and data"
+      - name: Unpack code and data
         shell: bash
         run: |
           set -euo pipefail
@@ -80,15 +80,14 @@ jobs:
           fi
           echo "[debug] CSV files:"; find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' -print || true
 
-      - name: "Install deps"
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install -U pip >/dev/null
           pip install pandas numpy pyyaml >/dev/null
 
-      # ✅ 파이썬 here-doc 제거: 순수 bash/awk로 프리플라이트
-      - name: "Detect CSV (ABS) + Preflight"
+      - name: Detect CSV (ABS)
         shell: bash
         run: |
           set -euo pipefail
@@ -100,59 +99,7 @@ jobs:
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"; echo "[csv] $CSV"
 
-          hdr="$(head -n1 "$CSV" | tr -d '\r')"
-          # 컬럼 배열 추출
-          IFS=',' read -r -a COLS <<< "$(echo "$hdr" | sed 's/"//g')"
-          # 누락 컬럼 체크
-          REQ=(open_time open high low close volume)
-          MISSING=()
-          for c in "${REQ[@]}"; do
-            hit=""
-            for h in "${COLS[@]}"; do [[ "$h" == "$c" ]] && { hit="1"; break; }; done
-            [[ -z "$hit" ]] && MISSING+=("$c")
-          done
-
-          # open_time 힌트(초/밀리초) 추정
-          ot_idx=""
-          idx=1
-          for h in "${COLS[@]}"; do
-            if [[ "$h" == "open_time" ]]; then ot_idx="$idx"; break; fi
-            idx=$((idx+1))
-          done
-          HINT="unknown"
-          if [[ -n "$ot_idx" ]]; then
-            max_ot="$(awk -F, -v i="$ot_idx" 'NR>1 && NR<=100001 {gsub(/"/,"",$i); if($i+0>m)m=$i+0} END{if(m>0) printf "%.0f", m}' "$CSV")"
-            if [[ -n "$max_ot" ]]; then
-              if [[ "$max_ot" -gt 1000000000000 ]]; then HINT="ms"; else HINT="s"; fi
-            fi
-          fi
-
-          # JSON 파일 기록
-          outp="${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
-          printf '{' > "$outp"
-          printf '"path": "%s",' "$(echo "$CSV" | sed 's/"/\\"/g')" >> "$outp"
-          printf '"rows_scanned": %s,' "$(wc -l < "$CSV" | tr -d ' ')" >> "$outp"
-          printf '"columns": [' >> "$outp"
-          for i in "${!COLS[@]}"; do
-            [[ $i -gt 0 ]] && printf ',' >> "$outp"
-            printf '"%s"' "$(echo "${COLS[$i]}" | sed 's/"/\\"/g')" >> "$outp"
-          done
-          printf '],' >> "$outp"
-          printf '"missing": [' >> "$outp"
-          for i in "${!MISSING[@]}"; do
-            [[ $i -gt 0 ]] && printf ',' >> "$outp"
-            printf '"%s"' "${MISSING[$i]}" >> "$outp"
-          done
-          printf '],' >> "$outp"
-          printf '"open_time_hint": "%s"' "$HINT" >> "$outp"
-          printf '}\n' >> "$outp"
-
-          cat "$outp"
-          if [[ "${#MISSING[@]}" -gt 0 ]]; then
-            echo "::error::Required columns missing: ${MISSING[*]}"; exit 65;
-          fi
-
-      - name: "Set params & OUT_DIR"
+      - name: Set params & OUT_DIR
         shell: bash
         run: |
           set -euo pipefail
@@ -169,7 +116,7 @@ jobs:
           echo "OUT_DIR=${{ env.OUT_BASE }}/$TAG" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: "Override conf/config.effective.yml"
+      - name: Override conf/config.effective.yml
         shell: bash
         run: |
           set -euo pipefail
@@ -188,14 +135,14 @@ EOF
           echo "[conf] wrote $RUN_DIR/conf/config.effective.yml"
           sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print "[conf] sha256="$1}'
 
-      - name: "Run backtest (v1.2.0)"
+      - name: Run backtest (v1.2.0)
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: "Validate summary/trades (no placeholders, metrics present)"
+      - name: Validate summary/trades (no placeholders, metrics present)
         shell: bash
         run: |
           set -euo pipefail
@@ -206,7 +153,7 @@ EOF
             || { echo "::error::invalid summary"; cat "$S"; exit 79; }
           echo "[ok] metrics: hit_rate=$(jq -r .hit_rate "$S") pf=$(jq -r .profit_factor "$S") n=$(jq -r .n_trades "$S")"
 
-      - name: "Upload artifacts (per-run)"
+      - name: Upload artifacts (per-run)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_${{ env.RUN_TAG }}
@@ -222,12 +169,12 @@ EOF
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
-      - name: "Download all artifacts"
+      - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_runs
 
-      - name: "Ensure jq"
+      - name: Ensure jq
         shell: bash
         run: |
           set -euo pipefail
@@ -235,7 +182,7 @@ EOF
             sudo apt-get update -y && sudo apt-get install -y jq
           fi
 
-      - name: "Guard: expected run count"
+      - name: Guard: expected run count
         shell: bash
         run: |
           set -euo pipefail
@@ -244,7 +191,7 @@ EOF
           echo "[guard] expected=$EXPECT found=$FOUND"
           [ "$FOUND" -eq "$EXPECT" ] || { echo "::error::per-run artifacts missing"; exit 74; }
 
-      - name: "Build leaderboard.csv"
+      - name: Build leaderboard.csv
         shell: bash
         run: |
           set -euo pipefail
@@ -273,7 +220,7 @@ EOF
           echo "== Top 10 =="
           ( head -n 1 leaderboard.sorted.csv && tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed 's/^/  /'
 
-      - name: "Upload leaderboard"
+      - name: Upload leaderboard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest12_grid_v120_results
