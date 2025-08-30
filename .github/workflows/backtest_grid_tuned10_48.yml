@@ -35,8 +35,8 @@ jobs:
         sl_atr: [0.45, 0.50]
         cooldown: [32, 34]
         min_hold: [11, 12]
-        ofi_thr: [0.42]   # fixed around tuned_10
-        t_hi: [0.74]      # fixed around tuned_10
+        ofi_thr: [0.42]
+        t_hi: [0.74]
         name:
           - "p${{ matrix.p_thr_trend }}_tp${{ matrix.tp_atr }}_sl${{ matrix.sl_atr }}_cd${{ matrix.cooldown }}_mh${{ matrix.min_hold }}_ofi${{ matrix.ofi_thr }}_thi${{ matrix.t_hi }}"
 
@@ -108,27 +108,11 @@ jobs:
           set -euo pipefail
           python -c "import os,json; s=json.load(open('_out_4u/run/summary.json')); entries=int(s.get('entries',0)); fee=float(os.environ.get('FEES_BPS','0')); slip=float(os.environ.get('SLIP_BPS','0')); rt=2.0*(fee+slip)/10000.0; s['cost_model']={'fees_bps_per_side':fee,'slip_bps_per_side':slip,'roundtrip_cost':rt}; s['cum_pnl_cost_adj']=float(s.get('cum_pnl_close_based',0.0))-entries*rt; open('_out_4u/run/summary_cost.json','w').write(json.dumps(s,indent=2))"
 
-      - name: Row summary + job page table
-        env:
-          NICK: "${{ matrix.name }}"
-        run: |
-          set -euo pipefail
-          python -c "import json,os; s=json.load(open('_out_4u/run/summary.json')); sc=json.load(open('_out_4u/run/summary_cost.json')); row={k:s.get(k) for k in ('n','entries','exits','cum_pnl_close_based','avg_gatep','trend_frac','range_frac')}; row.update({'cum_pnl_cost_adj': sc.get('cum_pnl_cost_adj')}); row.update({'name':os.environ.get('NICK','')}); open('_out_4u/run/row.json','w').write(json.dumps(row,indent=2))"
-          python - <<'PY'
-import json, os, sys
-row = json.load(open('_out_4u/run/row.json'))
-def f(x): 
-  return '-' if x is None else (f"{x:.6f}" if isinstance(x,float) else str(x))
-line = f"| {row.get('name')} | {row.get('entries')} | {f(row.get('cum_pnl_close_based'))} | {f(row.get('cum_pnl_cost_adj'))} | {f(row.get('avg_gatep'))} |"
-open(os.environ['GITHUB_STEP_SUMMARY'],'a').write("\n### Row\n| config | entries | cum_pnl | cum_pnl_cost_adj | avg_gatep |\n|---|---:|---:|---:|---:|\n"+line+"\n")
-PY
-
       - name: Upload artifacts (small, pinned)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
           name: "grid_${{ matrix.name }}"
           path: |
-            _out_4u/run/row.json
             _out_4u/run/summary.json
             _out_4u/run/summary_cost.json
             _out_4u/run/gating_debug.json
