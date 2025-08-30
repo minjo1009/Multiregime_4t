@@ -1,4 +1,4 @@
-name: Backtest-V2-Top1
+name: Backtest-V2-Tuned
 on:
   workflow_dispatch:
     inputs:
@@ -14,12 +14,48 @@ on:
         description: 'CSV glob'
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
+
+      # ---- Tunable strategy params (defaults = Top1b suggestion) ----
+      OFI_THR:
+        description: 'orderflow.ofi_thr'
+        required: false
+        default: "0.25"
+      P_THR_TREND:
+        description: 'entry.p_thr.trend'
+        required: false
+        default: "0.65"
+      COOLDOWN_BARS:
+        description: 'entry.cooldown_bars'
+        required: false
+        default: "10"
+      TP_ATR:
+        description: 'exit.tp_atr'
+        required: false
+        default: "0.90"
+      SL_ATR:
+        description: 'exit.sl_atr'
+        required: false
+        default: "0.50"
+      MIN_HOLD:
+        description: 'exit.min_hold (bars)'
+        required: false
+        default: "5"
+      R_LO:
+        description: 'regime.range_lo_pctile'
+        required: false
+        default: "0.40"
+      T_HI:
+        description: 'regime.trend_hi_pctile'
+        required: false
+        default: "0.60"
+
+      # ---- Optional costs ----
       FEES_BPS:
         description: 'fees per side (bps), e.g. 10 = 0.10%'
         required: false
         default: "0"
       SLIP_BPS:
-        description: 'slippage per side (bps), e.g. 0 = 0%'
+        description: 'slippage per side (bps)'
         required: false
         default: "0"
 
@@ -39,7 +75,7 @@ jobs:
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
-          mkdir -p tmp/trade tmp/data _out_4u/run tools
+          mkdir -p tmp/trade tmp/data _out_4u/run
           # CODE_ZIP
           if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP";           elif echo "$CODE_ZIP" | grep -qiE '^https\?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip";           else RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
           unzip -q "$CSRC" -d tmp/trade
@@ -50,10 +86,19 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params to TOP1 (one-liner; no heredoc/backslashes)
+      - name: Patch params (tunable inputs; one-liner)
+        env:
+          OFI_THR: "${{ github.event.inputs.OFI_THR }}"
+          P_THR_TREND: "${{ github.event.inputs.P_THR_TREND }}"
+          COOLDOWN_BARS: "${{ github.event.inputs.COOLDOWN_BARS }}"
+          TP_ATR: "${{ github.event.inputs.TP_ATR }}"
+          SL_ATR: "${{ github.event.inputs.SL_ATR }}"
+          MIN_HOLD: "${{ github.event.inputs.MIN_HOLD }}"
+          R_LO: "${{ github.event.inputs.R_LO }}"
+          T_HI: "${{ github.event.inputs.T_HI }}"
         run: |
           set -euo pipefail
-          python -c "import yaml; p='tmp/trade/conf/params.v2.yml'; cfg=yaml.safe_load(open(p)); cfg.setdefault('orderflow',{})['ofi_thr']=0.25; cfg.setdefault('entry',{}).setdefault('p_thr',{})['trend']=0.60; cfg.setdefault('exit',{}); cfg['exit']['tp_atr']=0.90; cfg['exit']['sl_atr']=0.50; cfg.setdefault('regime',{}); cfg['regime']['range_lo_pctile']=0.40; cfg['regime']['trend_hi_pctile']=0.60; cfg.setdefault('entry',{})['cooldown_bars']=5; yaml.safe_dump(cfg, open(p,'w'), sort_keys=False)"
+          python -c "import os,yaml; p='tmp/trade/conf/params.v2.yml'; c=yaml.safe_load(open(p)); c.setdefault('orderflow',{})['ofi_thr']=float(os.environ['OFI_THR']); c.setdefault('entry',{}).setdefault('p_thr',{})['trend']=float(os.environ['P_THR_TREND']); c.setdefault('entry',{})['cooldown_bars']=int(float(os.environ['COOLDOWN_BARS'])); c.setdefault('exit',{})['tp_atr']=float(os.environ['TP_ATR']); c['exit']['sl_atr']=float(os.environ['SL_ATR']); c['exit']['min_hold']=int(float(os.environ['MIN_HOLD'])); c.setdefault('regime',{}); c['regime']['range_lo_pctile']=float(os.environ['R_LO']); c['regime']['trend_hi_pctile']=float(os.environ['T_HI']); yaml.safe_dump(c, open(p,'w'), sort_keys=False)"
           echo '---- params.v2.yml ----'
           cat tmp/trade/conf/params.v2.yml
 
@@ -77,7 +122,7 @@ jobs:
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: (Optional) Cost-adjust summary (one-liner)
+      - name: (Optional) Cost-adjust summary
         if: ${{ github.event.inputs.FEES_BPS != '0' || github.event.inputs.SLIP_BPS != '0' }}
         env:
           FEES_BPS: "${{ github.event.inputs.FEES_BPS }}"
@@ -89,7 +134,7 @@ jobs:
       - name: Upload artifacts (pinned SHA)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
-          name: "backtest-top1"
+          name: "backtest-tuned"
           path: |
             _out_4u/run/gating_debug.json
             _out_4u/run/summary.json
