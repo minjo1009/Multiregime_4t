@@ -33,30 +33,27 @@ jobs:
       OUT_BASE: _out_119
       PYVER: '3.11'
     steps:
-      # pinned checkout (v5.0.0)
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
-      # pinned setup-python (v5.6.0)
       - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYVER }}
+        with: { python-version: ${{ env.PYVER }} }
 
-      # Guard: verify action SHAs exist (upload/download)
+      # ✅ FIXED: use single var 'pair' + 'set -- $pair'
       - name: Guard SHAs
         shell: bash
         run: |
           set -euo pipefail
           UPL=0b2256b8c012f0828dc542b3febcab082c67f72b
           DNL=fa0a91b85d4f404e444e00e005971372dc801d16
-          for repo sha in \
+          for pair in \
             "https://github.com/actions/upload-artifact $UPL" \
             "https://github.com/actions/download-artifact $DNL"
           do
-            set -- $repo; REPO=$1; SHA=$2
+            set -- $pair
+            REPO="$1"; SHA="$2"
             echo "[check] $REPO @ $SHA"
             git ls-remote "$REPO" "$SHA" | grep -q "$SHA" || { echo "::error::SHA not found in $REPO"; exit 61; }
             [[ ${#SHA} -eq 40 ]] || { echo "::error::not full-length SHA (40)"; exit 62; }
@@ -184,7 +181,7 @@ jobs:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
-      - name: Guard SHAs
+      - name: Guard download SHA
         shell: bash
         run: |
           set -euo pipefail
@@ -221,9 +218,7 @@ jobs:
 
           { head -n 1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.sorted.csv
 
-          # Gate 1 (보수)
           awk -F, 'NR==1 || ($9>=1.2 && $8>=0.55 && $11>=50)' leaderboard.sorted.csv > top_candidates_stage1.csv
-          # Gate 2 (목표 근사)
           awk -F, 'NR==1 || ($9>=1.5 && $8>=0.65 && $10>=0.5)' leaderboard.sorted.csv > top_candidates_stage2.csv
 
           echo "== Top 10 (by PF,WIN,MCC) =="
