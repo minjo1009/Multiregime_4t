@@ -1,3 +1,4 @@
+
 name: WFO_Session_Local
 
 on:
@@ -40,6 +41,7 @@ on:
         type: string
 
 jobs:
+
   validate_shas:
     runs-on: ubuntu-latest
     env:
@@ -53,16 +55,16 @@ jobs:
           echo "[PIN] validating SHAs by fetching commits..."
           mkdir -p _pincheck && cd _pincheck
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${ env.CHECKOUT_SHA }"
-          [ "$(git cat-file -t "${ env.CHECKOUT_SHA }")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "${{ env.CHECKOUT_SHA }}"
+          [ "$(git cat-file -t "${{ env.CHECKOUT_SHA }}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${ env.SETUP_PYTHON_SHA }"
-          [ "$(git cat-file -t "${ env.SETUP_PYTHON_SHA }")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "${{ env.SETUP_PYTHON_SHA }}"
+          [ "$(git cat-file -t "${{ env.SETUP_PYTHON_SHA }}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${ env.UPLOAD_ARTIFACT_SHA }"
-          [ "$(git cat-file -t "${ env.UPLOAD_ARTIFACT_SHA }")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "${{ env.UPLOAD_ARTIFACT_SHA }}"
+          [ "$(git cat-file -t "${{ env.UPLOAD_ARTIFACT_SHA }}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
@@ -70,6 +72,7 @@ jobs:
     needs: validate_shas
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - name: Setup Python (pinned)
@@ -87,8 +90,8 @@ jobs:
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -104,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work conf
+
           {
             echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
@@ -133,7 +137,7 @@ jobs:
             echo '  if tokens and tokens[0].lower()=="grid":'
             echo '    d["params"]["grid"]=True'
             echo '  import re'
-            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
             echo '  for t in tokens:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
@@ -176,15 +180,16 @@ jobs:
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
             echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
-            echo '    f.write("data_path: \"" + out_csv + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '    f.write("data_path: \\"" + out_csv + "\\"\\n")'
+            echo '    f.write("fee_bps: " + str(fee) + "\\n")'
+            echo '    f.write("champion: \\"" + champ + "\\"\\n")'
             echo '  import yaml'
             echo '  pdict=parse_champion(champ)'
             echo '  with open("conf/params.effective.yml","w") as f:'
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
           {
             echo 'import os,json,glob,math'
             echo 'import pandas as pd'
@@ -198,7 +203,6 @@ jobs:
             echo 'if sc.exists():'
             echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
             echo '  raise SystemExit(0)'
-            echo 'data={}'
             echo 'def write(d):'
             echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
             echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
@@ -249,7 +253,6 @@ jobs:
             echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
           } > work/post_summarize.py
 
-__POST__
       - name: Run single
         run: |
           set -euo pipefail
@@ -264,7 +267,14 @@ __POST__
           export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           python work/preflight_strict.py
           outdir="work/out/single"; mkdir -p "$outdir"
-          if [ -n "$EP" ]; then             PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"               --data-root work               --csv-glob "input.csv"               --outdir "$outdir"               --params "conf/params.effective.yml"               > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true;           fi
+          if [ -n "$EP" ]; then \
+            PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" \
+              --data-root work \
+              --csv-glob "input.csv" \
+              --outdir "$outdir" \
+              --params "conf/params.effective.yml" \
+              > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true; \
+          fi
       - name: Post-summarize single (cost-adjusted)
         run: |
           set -euo pipefail
@@ -279,11 +289,11 @@ __POST__
             work/out/single
             _out_4u/logs
 
-
   wfo:
     needs: validate_shas
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - name: Setup Python (pinned)
@@ -301,8 +311,8 @@ __POST__
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -318,6 +328,7 @@ __POST__
         run: |
           set -euo pipefail
           mkdir -p work conf
+
           {
             echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
@@ -347,7 +358,7 @@ __POST__
             echo '  if tokens and tokens[0].lower()=="grid":'
             echo '    d["params"]["grid"]=True'
             echo '  import re'
-            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
             echo '  for t in tokens:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
@@ -390,15 +401,16 @@ __POST__
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
             echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
-            echo '    f.write("data_path: \"" + out_csv + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '    f.write("data_path: \\"" + out_csv + "\\"\\n")'
+            echo '    f.write("fee_bps: " + str(fee) + "\\n")'
+            echo '    f.write("champion: \\"" + champ + "\\"\\n")'
             echo '  import yaml'
             echo '  pdict=parse_champion(champ)'
             echo '  with open("conf/params.effective.yml","w") as f:'
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
           {
             echo 'import os,json,glob,math'
             echo 'import pandas as pd'
@@ -412,7 +424,6 @@ __POST__
             echo 'if sc.exists():'
             echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
             echo '  raise SystemExit(0)'
-            echo 'data={}'
             echo 'def write(d):'
             echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
             echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
@@ -463,7 +474,6 @@ __POST__
             echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
           } > work/post_summarize.py
 
-__POST__
       - name: Run WFO splits
         run: |
           set -euo pipefail
@@ -481,7 +491,14 @@ __POST__
             export MODE=wfo; export K="$K"; export I="$i"
             python work/preflight_strict.py
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
-            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true;             fi
+            if [ -n "$EP" ]; then \
+              PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" \
+                --data-root work \
+                --csv-glob "input.csv" \
+                --outdir "$out" \
+                --params "conf/params.effective.yml" \
+                > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true; \
+            fi
             export OUTDIR="$out"; export FEES_BPS="${{ inputs.FEES_BPS }}"; python work/post_summarize.py || true
           done
       - name: Upload WFO artifacts
@@ -492,11 +509,11 @@ __POST__
             work/out/wfo
             _out_4u/logs
 
-
   sessions:
     needs: validate_shas
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
       - name: Setup Python (pinned)
@@ -514,8 +531,8 @@ __POST__
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          cp -f "${ inputs.CODE_ZIP_PATH }" "${WORK}/code.zip"
-          cp -f "${ inputs.DATA_ZIP_PATH }" "${WORK}/data.zip"
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
       - name: Install project deps
@@ -531,6 +548,7 @@ __POST__
         run: |
           set -euo pipefail
           mkdir -p work conf
+
           {
             echo 'import os,sys,glob,json,re,yaml'
             echo 'import pandas as pd'
@@ -560,7 +578,7 @@ __POST__
             echo '  if tokens and tokens[0].lower()=="grid":'
             echo '    d["params"]["grid"]=True'
             echo '  import re'
-            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\.?[0-9]+)")'
+            echo '  pat=re.compile(r"([a-zA-Z]+)([-+]?[0-9]*\\.?[0-9]+)")'
             echo '  for t in tokens:'
             echo '    m=pat.fullmatch(t)'
             echo '    if m:'
@@ -603,15 +621,16 @@ __POST__
             echo '    dfl[m].drop(columns=["dt_loc"]).to_csv(out_csv,index=False)'
             echo '  Path("conf").mkdir(parents=True,exist_ok=True)'
             echo '  with open("conf/config.effective.yml","w") as f:'
-            echo '    f.write("data_path: \"" + out_csv + "\"\n")'
-            echo '    f.write("fee_bps: " + str(fee) + "\n")'
-            echo '    f.write("champion: \"" + champ + "\"\n")'
+            echo '    f.write("data_path: \\"" + out_csv + "\\"\\n")'
+            echo '    f.write("fee_bps: " + str(fee) + "\\n")'
+            echo '    f.write("champion: \\"" + champ + "\\"\\n")'
             echo '  import yaml'
             echo '  pdict=parse_champion(champ)'
             echo '  with open("conf/params.effective.yml","w") as f:'
             echo '    yaml.safe_dump(pdict, f, sort_keys=False)'
             echo '  print("[PREFLIGHT]", mode, "rows:", len(pd.read_csv(out_csv)))'
           } > work/preflight_strict.py
+
           {
             echo 'import os,json,glob,math'
             echo 'import pandas as pd'
@@ -625,7 +644,6 @@ __POST__
             echo 'if sc.exists():'
             echo '  print("[POST] summary_cost.json already exists; leaving as-is.")'
             echo '  raise SystemExit(0)'
-            echo 'data={}'
             echo 'def write(d):'
             echo '  (outdir/"summary_cost.json").write_text(json.dumps(d,indent=2),encoding="utf-8")'
             echo '  print("[POST] wrote summary_cost.json with keys:", list(d.keys()))'
@@ -676,7 +694,6 @@ __POST__
             echo 'print("[POST] No sources available to derive cost-adjusted metrics.")'
           } > work/post_summarize.py
 
-__POST__
       - name: Run sessions
         run: |
           set -euo pipefail
@@ -694,7 +711,14 @@ __POST__
             export MODE=session; export SESSION="$S"
             python work/preflight_strict.py
             out="work/out/sessions/${S}"; mkdir -p "$out"
-            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "conf/params.effective.yml"                 > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true;             fi
+            if [ -n "$EP" ]; then \
+              PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" \
+                --data-root work \
+                --csv-glob "input.csv" \
+                --outdir "$out" \
+                --params "conf/params.effective.yml" \
+                > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true; \
+            fi
             export OUTDIR="$out"; export FEES_BPS="${{ inputs.FEES_BPS }}"; python work/post_summarize.py || true
           done
       - name: Upload session artifacts
@@ -704,4 +728,3 @@ __POST__
           path: |
             work/out/sessions
             _out_4u/logs
-
