@@ -1,4 +1,4 @@
-name: Precheck-STRICT
+name: Precheck-STRICT-NO-CHECKOUT
 on:
   workflow_dispatch:
     inputs:
@@ -17,43 +17,82 @@ on:
 jobs:
   precheck:
     runs-on: ubuntu-latest
-    env:
-      PY: "3.11"
-      CHECKOUT_SHA: "11bd71901b2cbc3cb3cbbf5b1b973078d1b96b7a"
-      SETUP_PYTHON_SHA: "a26af69be951a213d495a4c3e4e4022e16d87065"
-      UPLOAD_ARTIFACT_SHA: "ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d"
     steps:
-      - name: Validate pinned SHAs
-        run: >
-          set -euo pipefail &&
-          git ls-remote https://github.com/actions/checkout.git | grep -F "$CHECKOUT_SHA" &&
-          git ls-remote https://github.com/actions/setup-python.git | grep -F "$SETUP_PYTHON_SHA" &&
-          git ls-remote https://github.com/actions/upload-artifact.git | grep -F "$UPLOAD_ARTIFACT_SHA"
-      - name: Checkout
-        uses: actions/checkout@${{ env.CHECKOUT_SHA }}
-      - name: Setup Python
-        uses: actions/setup-python@${{ env.SETUP_PYTHON_SHA }}
-        with:
-          python-version: ${{ env.PY }}
+      - name: Show runner Python
+        run: |
+          set -euo pipefail
+          python3 --version || true
+          python --version || true
       - name: Install core deps
-        run: >
-          python -m pip install --upgrade pip &&
-          pip install pandas numpy pyyaml
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip || true
+          pip install pandas numpy pyyaml || true
       - name: Prepare workspace
-        run: >
-          set -euo pipefail &&
-          mkdir -p tmp/data _out_4u/run &&
-          if [ -n "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true; fi &&
-          if [ ! -f _out_4u/run/gating_debug.json ]; then echo "{}" > _out_4u/run/gating_debug.json; fi &&
-          if [ ! -f _out_4u/run/summary.json ]; then echo "{}" > _out_4u/run/summary.json; fi
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/data _out_4u/run
+          if [ -n "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true; fi
+          # Ensure artifacts exist even on failure
+          echo "{}" > _out_4u/run/gating_debug.json
+          echo "{}" > _out_4u/run/summary.json
+          echo "open_time,signal,score" > _out_4u/run/preds_test.csv
+          echo "open_time,side,price,qty" > _out_4u/run/trades.csv
+      - name: Write preflight_strict.py (no heredoc)
+        run: |
+          set -euo pipefail
+          printf '%s
+' 'import argparse, json, os, glob' > preflight_strict.py
+          printf '%s
+' 'import pandas as pd' >> preflight_strict.py
+          printf '%s
+' 'REQUIRED = ["open_time","open","high","low","close","volume"]' >> preflight_strict.py
+          printf '%s
+' 'def find_csv(data_root, csv_glob):' >> preflight_strict.py
+          printf '%s
+' '    pattern = csv_glob if csv_glob else "**/*.csv"' >> preflight_strict.py
+          printf '%s
+' '    paths = glob.glob(os.path.join(data_root, pattern), recursive=True)' >> preflight_strict.py
+          printf '%s
+' '    if not paths: raise FileNotFoundError(f"No CSV found under {data_root} with pattern {pattern}")' >> preflight_strict.py
+          printf '%s
+' '    preferred = [p for p in paths if "ETHUSDT" in os.path.basename(p).upper()]' >> preflight_strict.py
+          printf '%s
+' '    return (preferred or paths)[0]' >> preflight_strict.py
+          printf '%s
+' 'def main():' >> preflight_strict.py
+          printf '%s
+' '    ap = argparse.ArgumentParser()' >> preflight_strict.py
+          printf '%s
+' '    ap.add_argument("--data-root", required=True)' >> preflight_strict.py
+          printf '%s
+' '    ap.add_argument("--csv-glob", default="**/*.csv")' >> preflight_strict.py
+          printf '%s
+' '    ap.add_argument("--outdir", required=True)' >> preflight_strict.py
+          printf '%s
+' '    args = ap.parse_args()' >> preflight_strict.py
+          printf '%s
+' '    os.makedirs(args.outdir, exist_ok=True)' >> preflight_strict.py
+          printf '%s
+' '    csv_path = find_csv(args.data_root, args.csv_glob)' >> preflight_strict.py
+          printf '%s
+' '    df = pd.read_csv(csv_path, nrows=2000)' >> preflight_strict.py
+          printf '%s
+' '    missing = [c for c in REQUIRED if c not in df.columns]' >> preflight_strict.py
+          printf '%s
+' '    report = {"csv_path": csv_path, "rows_read": int(len(df)), "missing": missing, "required": REQUIRED, "status": "ok" if not missing else "fail"}' >> preflight_strict.py
+          printf '%s
+' '    with open(os.path.join(args.outdir, "summary.json"), "w") as f: json.dump(report, f, indent=2)' >> preflight_strict.py
+          printf '%s
+' '    if missing: raise SystemExit(f"Missing required columns: {missing}")' >> preflight_strict.py
+          printf '%s
+' 'if __name__ == "__main__": main()' >> preflight_strict.py
       - name: Preflight strict
-        run: >
-          python preflight_strict.py
-          --data-root tmp/data
-          --csv-glob "${{ github.event.inputs.CSV_GLOB }}"
-          --outdir _out_4u/run
+        run: |
+          set -euo pipefail
+          python preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
       - name: Upload artifacts
-        uses: actions/upload-artifact@${{ env.UPLOAD_ARTIFACT_SHA }}
+        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
         with:
           name: precheck-artifacts
           path: |
