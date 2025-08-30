@@ -1,3 +1,4 @@
+
 name: Backtest-V2
 on:
   workflow_dispatch:
@@ -31,29 +32,29 @@ jobs:
 
       - name: Acquire code/data (local / URL / repo raw)
         env:
-          CODE_ZIP: "${ github.event.inputs.CODE_ZIP }"
-          DATA_ZIP: "${ github.event.inputs.DATA_ZIP }"
+          CODE_ZIP: "${{ github.event.inputs.CODE_ZIP }}"
+          DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u/run
           # CODE_ZIP
-          if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP";           elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip";           else RCODE="https://raw.githubusercontent.com/${ github.repository }/${ github.ref_name }/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
+          if [ -f "$CODE_ZIP" ]; then CSRC="$CODE_ZIP";           elif echo "$CODE_ZIP" | grep -qiE '^https?://'; then curl -fL "$CODE_ZIP" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip";           else RCODE="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$CODE_ZIP"; curl -fL "$RCODE" -o tmp/trade/code.zip; CSRC="tmp/trade/code.zip"; fi
           unzip -q "$CSRC" -d tmp/trade
           # DATA_ZIP
-          if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP";           elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip";           else RDATA="https://raw.githubusercontent.com/${ github.repository }/${ github.ref_name }/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
+          if [ -f "$DATA_ZIP" ]; then DSRC="$DATA_ZIP";           elif echo "$DATA_ZIP" | grep -qiE '^https?://'; then curl -fL "$DATA_ZIP" -o tmp/data/data.zip; DSRC="tmp/data/data.zip";           else RDATA="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/$DATA_ZIP"; curl -fL "$RDATA" -o tmp/data/data.zip; DSRC="tmp/data/data.zip"; fi
           unzip -q "$DSRC" -d tmp/data
 
       - name: Preflight strict
         env:
-          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
         run: |
           set -euo pipefail
           python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run
 
       - name: Detect entrypoint and run (V2)
         env:
-          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
-          PARAMS_PATH: "${ github.event.inputs.PARAMS_PATH }"
+          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
+          PARAMS_PATH: "${{ github.event.inputs.PARAMS_PATH }}"
         run: |
           set -euo pipefail
           ENTRY=""
