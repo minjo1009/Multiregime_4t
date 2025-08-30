@@ -39,12 +39,12 @@ on:
         default: "Asia/Seoul"
         type: string
       ENTRYPOINT:
-        description: "Python path to run (e.g., work/code/run.py). Leave 'auto' to autodetect."
+        description: "Python path to run (e.g., work/code/run_4u.py). Leave 'auto' to autodetect."
         required: false
         default: "auto"
         type: string
       ENTRY_ARGS:
-        description: "Extra CLI args for ENTRYPOINT (e.g., --config conf/config.effective.yml)"
+        description: "Extra CLI args for ENTRYPOINT (appended after required ones)"
         required: false
         default: ""
         type: string
@@ -86,28 +86,23 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy scikit-learn pyyaml pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
-          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
           cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
           echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
-
-      - name: Install project deps (requirements or fallback)
+      - name: Install project deps
         run: |
           set -euo pipefail
           REQ=""
@@ -116,13 +111,10 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then
-            echo "[DEPS] Installing from $REQ"
             pip install -r "$REQ"
           else
-            echo "[DEPS] Installing common libs"
             pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
           fi
-
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -210,11 +202,11 @@ jobs:
           export FEES_BPS="${{ inputs.FEES_BPS }}"
           export CHAMPION_CONFIG="${{ inputs.CHAMPION_CONFIG }}"
           python work/preflight_strict.py
-          echo "[RUN] entrypoint=$EP args=$ARGS"
-          if [ -n "$EP" ]; then set +e; PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" $ARGS > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt; RC=$?; set -e; echo "[RC]=$RC"; fi
           mkdir -p work/out/single
+          # IMPORTANT: pass required CLI flags expected by run_4u.py
+          if [ -n "$EP" ]; then             PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"               --data-root work               --csv-glob "input.csv"               --outdir work/out/single               --params "${{ inputs.CHAMPION_CONFIG }}"               $ARGS               > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true;           fi
           for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
-            hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/"$f" || true
+            hit="$(find work/out/single -maxdepth 1 -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && echo "[HARVEST] $hit" || true
           done
       - name: Upload single artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -235,28 +227,23 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy scikit-learn pyyaml pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
-          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
           cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
           echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
-
-      - name: Install project deps (requirements or fallback)
+      - name: Install project deps
         run: |
           set -euo pipefail
           REQ=""
@@ -265,13 +252,10 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then
-            echo "[DEPS] Installing from $REQ"
             pip install -r "$REQ"
           else
-            echo "[DEPS] Installing common libs"
             pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
           fi
-
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -356,11 +340,8 @@ jobs:
             echo "[WFO] split $i/$((K-1))"
             export MODE=wfo; export K="$K"; export I="$i"
             python work/preflight_strict.py
-            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true; fi
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
-            for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
-              hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && mv -f "$hit" "$out/$f" || true
-            done
+            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "${{ inputs.CHAMPION_CONFIG }}"                 > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true;             fi
           done
       - name: Upload WFO artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -381,28 +362,23 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          python -V
+          pip install --upgrade pip
+          pip install pandas numpy scikit-learn pyyaml pytz
       - name: Prepare workspace
         run: |
           set -euo pipefail
           WORK=work
           mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs"
-          if [ ! -f "${{ inputs.CODE_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::CODE_ZIP_PATH not found: ${{ inputs.CODE_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
-          if [ ! -f "${{ inputs.DATA_ZIP_PATH }}" ]; then
-            echo "::error file=.github/workflows/wfo_session_local.yml::DATA_ZIP_PATH not found: ${{ inputs.DATA_ZIP_PATH }}"
-            ls -alh
-            exit 2
-          fi
           cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
           echo "[TREE] code:"; find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
-
-      - name: Install project deps (requirements or fallback)
+      - name: Install project deps
         run: |
           set -euo pipefail
           REQ=""
@@ -411,13 +387,10 @@ jobs:
             [ -f "work/code/backtest/$f" ] && REQ="work/code/backtest/$f" && break
           done
           if [ -n "$REQ" ]; then
-            echo "[DEPS] Installing from $REQ"
             pip install -r "$REQ"
           else
-            echo "[DEPS] Installing common libs"
             pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger ta finta
           fi
-
       - name: Write preflight
         run: |
           set -euo pipefail
@@ -502,11 +475,8 @@ jobs:
             echo "[SESSION] $S"
             export MODE=session; export SESSION="$S"
             python work/preflight_strict.py
-            if [ -n "$EP" ]; then PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP" > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true; fi
             out="work/out/sessions/${S}"; mkdir -p "$out"
-            for f in summary_cost.json summary.json gating_debug.json trades.csv preds_test.csv; do
-              hit="$(find . -type f -name "$f" | head -n 1 || true)"; [ -n "$hit" ] && mv -f "$hit" "$out/$f" || true
-            done
+            if [ -n "$EP" ]; then               PYTHONPATH=work/code:work/code/src:work/code/src/trend4u python "$EP"                 --data-root work                 --csv-glob "input.csv"                 --outdir "$out"                 --params "${{ inputs.CHAMPION_CONFIG }}"                 > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true;             fi
           done
       - name: Upload session artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
