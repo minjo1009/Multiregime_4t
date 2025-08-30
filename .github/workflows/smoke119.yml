@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: Repo path to code zip (root)
         required: true
-        default: trade_v1.1.9.zip
+        default: trade_v1.1.9.2.zip
       DATA_ZIP:
         description: Repo path to data zip (root)
         required: true
@@ -124,6 +124,13 @@ jobs:
           printf '%s\n' "sl_pct: ${{ github.event.inputs.SL }}"      >> "$CONF"
           printf '%s\n' "hold_bars: ${{ github.event.inputs.HOLD }}" >> "$CONF"
           printf '%s\n' "z_window: 288"                              >> "$CONF"
+          # Long-only + direction flip + MCC 통일
+          printf '%s\n' "long_only: true"                            >> "$CONF"
+          printf '%s\n' "pred_pos_means_long: false"                 >> "$CONF"
+          printf '%s\n' "mcc_mode: trade_vs_not"                     >> "$CONF"
+          printf '%s\n' "mcc_sample: all_bars"                       >> "$CONF"
+          printf '%s\n' "xor_tp_sl: true"                            >> "$CONF"
+          printf '%s\n' "min_gap_bars: 0"                            >> "$CONF"
           sha256sum "$CONF" | awk '{print "[conf] sha256="$1}'
 
       - name: Install deps
@@ -132,7 +139,7 @@ jobs:
           set -euo pipefail
           python -m pip install -U pip >/dev/null
           pip install pandas numpy pyyaml >/dev/null
-          if ! command -v jq >/dev/null 2nd>/dev/null; then sudo apt-get update -y && sudo apt-get install -y jq; fi
+          if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq; fi
 
       - name: Run engine
         shell: bash
