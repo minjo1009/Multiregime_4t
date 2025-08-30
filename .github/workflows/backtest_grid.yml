@@ -36,7 +36,7 @@ jobs:
           DATA_ZIP: "${{ github.event.inputs.DATA_ZIP }}"
         run: |
           set -euo pipefail
-          mkdir -p tmp/trade tmp/data _out_4u/run
+          mkdir -p tmp/trade tmp/data _out_4u/run tools
           # CODE_ZIP
           CSRC=""
           if [ -f "$CODE_ZIP" ]; then
@@ -99,25 +99,15 @@ jobs:
           if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run || true
-          python - <<'PY'
-import pandas as pd, json, numpy as np, os
-p='_out_4u/run/preds_test.csv'
-m={'winrate':None,'mcc':None}
-if os.path.exists(p):
-    df=pd.read_csv(p)
-    # label = next-bar close direction using 'score' as proxy if price not present
-    ret=df['score'].shift(-1).fillna(0.0).to_numpy()
-    y_true=np.sign(ret); y_true[y_true==0]=1
-    y_pred=np.where(df['signal'].to_numpy()>=0,1,-1)
-    tp=int(np.sum((y_true==1)&(y_pred==1)))
-    tn=int(np.sum((y_true==-1)&(y_pred==-1)))
-    fp=int(np.sum((y_true==-1)&(y_pred==1)))
-    fn=int(np.sum((y_true==1)&(y_pred==-1)))
-    winrate=float((tp+tn)/max(1,len(df)))
-    num=tp*tn-fp*fn; den=((tp+fp)*(tp+fn)*(tn+fp)*(tn+fn))**0.5+1e-9
-    m['winrate']=winrate; m['mcc']=float(num/den)
-with open('_out_4u/run/grid_metrics.json','w') as f: json.dump(m,f,indent=2)
-PY
+
+      - name: Compute grid metrics (no heredoc, base64)
+        env:
+          PY_B64: "aW1wb3J0IHBhbmRhcyBhcyBwZCwganNvbiwgbnVtcHkgYXMgbnAsIG9zCnA9J19vdXRfNHUvcnVuL3ByZWRzX3Rlc3QuY3N2JwptPXsnd2lucmF0ZSc6Tm9uZSwnbWNjJzpOb25lfQppZiBvcy5wYXRoLmV4aXN0cyhwKToKICAgIGRmPXBkLnJlYWRfY3N2KHApCiAgICB5X3ByZWQ9bnAud2hlcmUoZGZbJ3NpZ25hbCddLnRvX251bXB5KCk+PTAsMSwtMSkKICAgICMgcXVpY2sgcHJveHkgbGFiZWw6IG5leHQtc3RlcCAnc2NvcmUnIHNpZ24KICAgIHJldD1kZlsnc2NvcmUnXS5zaGlmdCgtMSkuZmlsbG5hKDAuMCkudG9fbnVtcHkoKQogICAgeV90cnVlPW5wLnNpZ24ocmV0KTsgeV90cnVlW3lfdHJ1ZT09MF09MQogICAgdHA9aW50KG5wLnN1bSgoeV90cnVlPT0xKSYoeV9wcmVkPT0xKSkpCiAgICB0bj1pbnQobnAuc3VtKCh5X3RydWU9PS0xKSYoeV9wcmVkPT0tMSkpKQogICAgZnA9aW50KG5wLnN1bSgoeV90cnVlPT0tMSkmKHlfcHJlZD09MSkpKQogICAgZm49aW50KG5wLnN1bSgoeV90cnVlPT0xKSYoeV9wcmVkPT0tMSkpKQogICAgd2lucmF0ZT1mbG9hdCgodHArdG4pL21heCgxLGxlbihkZikpKQogICAgbnVtPXRwKnRuLWZwKmZuOyBkZW49KCh0cCtmcCkqKHRwK2ZuKSoodG4rZnApKih0bitmbikpKiowLjUrMWUtOQogICAgbVsnd2lucmF0ZSddPXdpbnJhdGU7IG1bJ21jYyddPWZsb2F0KG51bS9kZW4pCndpdGggb3BlbignX291dF80dS9ydW4vZ3JpZF9tZXRyaWNzLmpzb24nLCd3JykgYXMgZjoganNvbi5kdW1wKG0sZixpbmRlbnQ9MikK"
+        run: |
+          set -euo pipefail
+          echo "$PY_B64" > tools/metrics.b64
+          python -c "import base64; open('tools/metrics.py','wb').write(base64.b64decode(open('tools/metrics.b64','rb').read()))"
+          python tools/metrics.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
