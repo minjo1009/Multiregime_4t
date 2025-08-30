@@ -18,11 +18,6 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     steps:
-      - name: Show runner Python
-        run: |
-          set -euo pipefail
-          python3 --version || true
-          python --version || true
       - name: Install deps
         run: |
           set -euo pipefail
@@ -32,19 +27,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/trade tmp/data _out_4u/run
-          unzip -q "${{ github.event.inputs.CODE_ZIP }}" -d tmp/trade
-          unzip -q "${{ github.event.inputs.DATA_ZIP }}" -d tmp/data || true
-          echo "{}" > _out_4u/run/gating_debug.json
-          echo "{}" > _out_4u/run/summary.json
-          echo "open_time,signal,score" > _out_4u/run/preds_test.csv
-          echo "open_time,side,price,qty" > _out_4u/run/trades.csv
+          unzip -q "${ github.event.inputs.CODE_ZIP }" -d tmp/trade
+          unzip -q "${ github.event.inputs.DATA_ZIP }" -d tmp/data || true
       - name: Preflight strict
         run: |
           set -euo pipefail
-          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${{ github.event.inputs.CSV_GLOB }}" --outdir _out_4u/run
+          python tmp/trade/preflight_strict.py --data-root tmp/data --csv-glob "${ github.event.inputs.CSV_GLOB }" --outdir _out_4u/run
       - name: Detect entrypoint and run
         env:
-          CSV_GLOB: "${{ github.event.inputs.CSV_GLOB }}"
+          CSV_GLOB: "${ github.event.inputs.CSV_GLOB }"
         run: |
           set -euo pipefail
           ENTRY=""
@@ -54,8 +45,13 @@ jobs:
           if [ -z "$ENTRY" ]; then echo "No entrypoint found"; exit 1; fi
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run || true
+          # Ensure artifacts exist
+          [ -f _out_4u/run/gating_debug.json ] || echo "{}" > _out_4u/run/gating_debug.json
+          [ -f _out_4u/run/summary.json ] || echo "{}" > _out_4u/run/summary.json
+          [ -f _out_4u/run/preds_test.csv ] || echo "open_time,signal,score" > _out_4u/run/preds_test.csv
+          [ -f _out_4u/run/trades.csv ] || echo "open_time,side,price,qty" > _out_4u/run/trades.csv
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e0b1f71c5e3cd2a1f1e166d0ad2d
+        uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
           name: backtest-artifacts
           path: |
