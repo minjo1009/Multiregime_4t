@@ -100,6 +100,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
             echo 'import pandas as pd'
@@ -230,6 +231,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
             echo 'import pandas as pd'
@@ -365,6 +367,7 @@ jobs:
       - name: Write preflight_strict.py (safe echo)
         run: |
           set -euo pipefail
+          mkdir -p scripts || true
           {
             echo 'import os,sys,glob,json'
             echo 'import pandas as pd'
