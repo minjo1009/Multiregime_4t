@@ -15,6 +15,10 @@ on:
         description: CSV filename after unzip
         required: true
         default: ETHUSDT_1min_2020_2025.csv
+      STRICT_GUARD:
+        description: 'true면 n_trades_ratio>0.60에서 실패, false면 경고만'
+        required: true
+        default: 'false'
 
 jobs:
   grid:
@@ -48,8 +52,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02  # upload-artifact v4
-          DNL=d3f86a106a0bac45b974a628896c90dbdf5c8093  # download-artifact v4
+          UPL=ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact v4
+          DNL=d3f86a106a0bac45b974a628896c90dbdf5c8093  # actions/download-artifact v4
           git ls-remote https://github.com/actions/upload-artifact   | grep -q "$UPL" || { echo "::error::upload-artifact commit not found"; exit 61; }
           git ls-remote https://github.com/actions/download-artifact | grep -q "$DNL" || { echo "::error::download-artifact commit not found"; exit 61; }
           [[ ${#UPL} -eq 40 && ${#DNL} -eq 40 ]] || { echo "::error::not full-length SHA"; exit 62; }
@@ -99,7 +103,7 @@ jobs:
           echo "[csv] $CSV"
           echo "[rows] $NROWS"
 
-      - name: Params & OUT_DIR (per-matrix combo)
+      - name: Params & OUT_DIR (per-matrix combo) + preflight.json write
         shell: bash
         run: |
           set -euo pipefail
@@ -115,6 +119,9 @@ jobs:
           echo "RUN_TAG=$TAG"   >> "$GITHUB_ENV"
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
+          # 각 런의 preflight.json에 n_rows 저장 (집계용)
+          jq -n --argjson n "${N_ROWS}" '{n_rows:$n}' > "${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
+          echo "[tag] $TAG"
 
       - name: Write conf/config.effective.yml (printf; no heredoc)
         shell: bash
@@ -141,25 +148,34 @@ jobs:
           pip install pandas numpy pyyaml >/dev/null
           if ! command -v jq >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq; fi
 
-      - name: Run backtest (v1.1.9p1 engine expected)
+      - name: Run backtest
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_PY" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: Guards (placeholders/null forbid + n_trades_ratio ≤ 0.60)
+      - name: Guards (soft by default; hard if STRICT_GUARD=true)
         shell: bash
         run: |
           set -euo pipefail
           S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
+          P="${GITHUB_WORKSPACE}/${OUT_DIR}/preflight.json"
           test -s "$S" || { echo "::error::summary.json missing"; exit 78; }
+          # placeholders/null 지표 금지(하드)
           jq -e '((.placeholders // false) | not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null) and (.mcc!=null)' "$S" >/dev/null \
             || { echo "::error::invalid summary (placeholders or null metrics)"; cat "$S"; exit 78; }
-          nt=$(jq -r '.n_trades' "$S"); nr="${N_ROWS}"
+          nt=$(jq -r '.n_trades' "$S")
+          nr=$(jq -r '.n_rows // empty' "$S"); [[ -n "$nr" ]] || nr=$(jq -r '.n_rows' "$P")
           ratio=$(awk -v nt="$nt" -v nr="$nr" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
           echo "[ratio] n_trades/n_rows=$ratio"
-          awk -v r="$ratio" 'BEGIN{exit !(r<=0.60)}' || { echo "::error::n_trades_ratio>0.60"; exit 79; }
+          good=$(awk -v r="$ratio" 'BEGIN{ print (r<=0.60) ? "ok" : "ng" }')
+          if [[ "$good" != "ok" ]]; then
+            echo "::warning::n_trades_ratio>0.60 ($ratio) → dense run (tag=${RUN_TAG})"
+            if [[ "${{ github.event.inputs.STRICT_GUARD }}" == "true" ]]; then
+              exit 79
+            fi
+          fi
 
       - name: Upload per-run artifact (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -169,6 +185,7 @@ jobs:
             ${{ env.OUT_DIR }}/summary.json
             ${{ env.OUT_DIR }}/trades.csv
             ${{ env.OUT_DIR }}/gating_debug.json
+            ${{ env.OUT_DIR }}/preflight.json
           if-no-files-found: warn
 
   aggregate:
@@ -190,20 +207,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "artifact,tp_pct,sl_pct,hold_bars,thr_US,thr_EU,thr_ASIA,hit_rate,profit_factor,mcc,n_trades" > leaderboard.csv
+          echo "artifact,tp_pct,sl_pct,hold_bars,thr_US,thr_EU,thr_ASIA,hit_rate,profit_factor,mcc,n_trades,ratio" > leaderboard.csv
           while IFS= read -r -d '' s; do
             dir="$(dirname "$s")"; tag="$(basename "$dir")"
             gj="$dir/gating_debug.json"
+            pf="$dir/preflight.json"
             thr_US=""; thr_EU=""; thr_ASIA=""
             [[ -f "$gj" ]] && thr_US="$(jq -r '.thr_by_session.US // empty' "$gj")" && thr_EU="$(jq -r '.thr_by_session.EU // empty' "$gj")" && thr_ASIA="$(jq -r '.thr_by_session.ASIA // empty' "$gj")"
             tp="$(jq -r '.tp_pct' "$s")"; sl="$(jq -r '.sl_pct' "$s")"; hold="$(jq -r '.hold_bars' "$s")"
-            hit="$(jq -r '.hit_rate' "$s")"; pf="$(jq -r '.profit_factor' "$s")"; mcc="$(jq -r '.mcc // empty' "$s")"; nt="$(jq -r '.n_trades' "$s")"
-            echo "$tag,$tp,$sl,$hold,$thr_US,$thr_EU,$thr_ASIA,$hit,$pf,$mcc,$nt" >> leaderboard.csv
+            hit="$(jq -r '.hit_rate' "$s")"; pfct="$(jq -r '.profit_factor' "$s")"; mcc="$(jq -r '.mcc // empty' "$s")"; nt="$(jq -r '.n_trades' "$s")"
+            nr_s="$(jq -r '.n_rows // empty' "$s")"
+            if [[ -z "$nr_s" && -f "$pf" ]]; then nr_s="$(jq -r '.n_rows' "$pf")"; fi
+            ratio="$(awk -v nt="$nt" -v nr="$nr_s" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')"
+            echo "$tag,$tp,$sl,$hold,$thr_US,$thr_EU,$thr_ASIA,$hit,$pfct,$mcc,$nt,$ratio" >> leaderboard.csv
           done < <(find all_runs -type f -name summary.json -print0)
 
+          # 보수 게이트(과밀 제외)
+          awk -F, 'NR==1 || ($12!="" && $12!="NaN" && $12<=0.60 && $9>=1.2 && $8>=0.55 && $11>=50)' leaderboard.csv > top_candidates_stage1.csv
+          # 목표 근사 게이트
+          awk -F, 'NR==1 || ($12!="" && $12!="NaN" && $12<=0.60 && $9>=1.5 && $8>=0.65 && $10>=0.5)' leaderboard.csv > top_candidates_stage2.csv
+
           { head -n 1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.sorted.csv
-          awk -F, 'NR==1 || ($9>=1.2 && $8>=0.55 && $11>=50)' leaderboard.sorted.csv > top_candidates_stage1.csv
-          awk -F, 'NR==1 || ($9>=1.5 && $8>=0.65 && $10>=0.5)' leaderboard.sorted.csv > top_candidates_stage2.csv
+          echo "== Top 10 (by PF,WIN,MCC; ratio<=0.60) =="
+          ( head -n 1 leaderboard.sorted.csv; tail -n +2 leaderboard.sorted.csv | awk -F, '$12!="" && $12!="NaN" && $12<=0.60' | head -n 10 ) | column -s, -t | sed "s/^/  /"
 
       - name: Upload leaderboards (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
