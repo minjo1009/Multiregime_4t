@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: 'Path or URL to V2 code zip (repo root file name allowed)'
         required: true
-        default: strategy_v2_codepack_v2.0.1.zip
+        default: strategy_v2_codepack_v2.0.2.zip
       DATA_ZIP:
         description: 'Path or URL to data zip (repo root file name allowed)'
         required: true

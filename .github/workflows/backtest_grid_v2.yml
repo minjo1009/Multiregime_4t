@@ -6,7 +6,7 @@ on:
       CODE_ZIP:
         description: 'Path or URL to V2 code zip (repo root file name allowed)'
         required: true
-        default: strategy_v2_codepack_v2.0.1.zip
+        default: strategy_v2_codepack_v2.0.2.zip
       DATA_ZIP:
         description: 'Path or URL to data zip (repo root file name allowed)'
         required: true
@@ -34,7 +34,7 @@ jobs:
         pthr_tr: [0.55, 0.60]
         tp_atr: [0.70, 0.90]
     steps:
-      - name: Install deps (pandas, numpy, pyyaml, numba)
+      - name: Install deps (pandas, numpy, pyyaml, numba, pyyaml)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip || true
@@ -57,35 +57,21 @@ jobs:
           touch tmp/trade/strategy/__init__.py || true
           touch tmp/trade/strategy/v2/__init__.py || true
 
-      - name: Patch params for this matrix (sed-free Python patch)
+      - name: Patch params for this matrix (no heredoc)
         env:
           OFI_THR: "${{ matrix.ofi_thr }}"
           P_THR_TR: "${{ matrix.pthr_tr }}"
           P_THR_RG: "${{ github.event.inputs.P_THR_RANGE }}"
           TP_ATR: "${{ matrix.tp_atr }}"
           SL_ATR: "${{ github.event.inputs.SL_ATR }}"
+          B64: "CmltcG9ydCBvcywgeWFtbCwganNvbgpwYXRoID0gJ3RtcC90cmFkZS9jb25mL3BhcmFtcy52Mi55bWwnCndpdGggb3BlbihwYXRoLCdyJykgYXMgZjoKICAgIGNmZyA9IHlhbWwuc2FmZV9sb2FkKGYpCmNmZy5zZXRkZWZhdWx0KCdvcmRlcmZsb3cnLCB7fSkKY2ZnLnNldGRlZmF1bHQoJ2VudHJ5Jywge30pLnNldGRlZmF1bHQoJ3BfdGhyJywge30pCmNmZy5zZXRkZWZhdWx0KCdleGl0Jywge30pCmRlZiBnZXRmKGssIGRmbHQpOgogICAgdHJ5OiByZXR1cm4gZmxvYXQob3MuZW52aXJvbi5nZXQoaywgZGZsdCkpCiAgICBleGNlcHQ6IHJldHVybiBmbG9hdChkZmx0KQpjZmdbJ29yZGVyZmxvdyddWydvZmlfdGhyJ10gPSBnZXRmKCdPRklfVEhSJywgY2ZnWydvcmRlcmZsb3cnXS5nZXQoJ29maV90aHInLCAwLjIpKQpjZmdbJ2VudHJ5J11bJ3BfdGhyJ11bJ3RyZW5kJ10gPSBnZXRmKCdQX1RIUl9UUicsIGNmZ1snZW50cnknXVsncF90aHInXS5nZXQoJ3RyZW5kJywgMC42KSkKY2ZnWydlbnRyeSddWydwX3RociddWydyYW5nZSddID0gZ2V0ZignUF9USFJfUkcnLCBjZmdbJ2VudHJ5J11bJ3BfdGhyJ10uZ2V0KCdyYW5nZScsIDAuNTUpKQpjZmdbJ2V4aXQnXVsndHBfYXRyJ10gPSBnZXRmKCdUUF9BVFInLCBjZmdbJ2V4aXQnXS5nZXQoJ3RwX2F0cicsIDAuOCkpCmNmZ1snZXhpdCddWydzbF9hdHInXSA9IGdldGYoJ1NMX0FUUicsIGNmZ1snZXhpdCddLmdldCgnc2xfYXRyJywgMC41KSkKd2l0aCBvcGVuKHBhdGgsJ3cnKSBhcyBmOgogICAgeWFtbC5zYWZlX2R1bXAoY2ZnLCBmLCBzb3J0X2tleXM9RmFsc2UpCnByaW50KGpzb24uZHVtcHMoeydwYXRjaGVkJzogcGF0aH0pKQo="
         run: |
           set -euo pipefail
-          python - <<'PY'
-import os, sys, yaml, json
-path = 'tmp/trade/conf/params.v2.yml'
-with open(path,'r') as f:
-    cfg = yaml.safe_load(f)
-cfg.setdefault('orderflow', {})
-cfg.setdefault('entry', {}).setdefault('p_thr', {})
-cfg.setdefault('exit', {})
-def getf(k, dflt):
-    try: return float(os.environ.get(k, dflt))
-    except: return float(dflt)
-cfg['orderflow']['ofi_thr'] = getf('OFI_THR', cfg['orderflow'].get('ofi_thr', 0.2))
-cfg['entry']['p_thr']['trend'] = getf('P_THR_TR', cfg['entry']['p_thr'].get('trend', 0.6))
-cfg['entry']['p_thr']['range'] = getf('P_THR_RG', cfg['entry']['p_thr'].get('range', 0.55))
-cfg['exit']['tp_atr'] = getf('TP_ATR', cfg['exit'].get('tp_atr', 0.8))
-cfg['exit']['sl_atr'] = getf('SL_ATR', cfg['exit'].get('sl_atr', 0.5))
-with open(path,'w') as f:
-    yaml.safe_dump(cfg, f, sort_keys=False)
-print(json.dumps({'patched': path}))
-PY
+          mkdir -p tools
+          echo "$B64" > tools/p.b64
+          python -c "import base64; open('tools/patch.py','wb').write(base64.b64decode(open('tools/p.b64','rb').read()))"
+          python tools/patch.py
+          echo '---- params.v2.yml ----'; cat tmp/trade/conf/params.v2.yml
 
       - name: Preflight strict
         env:
@@ -107,18 +93,15 @@ PY
           echo "ENTRY=$ENTRY"
           python "$ENTRY" --data-root tmp/data --csv-glob "$CSV_GLOB" --outdir _out_4u/run --params tmp/trade/conf/params.v2.yml
 
-      - name: Grid metrics
+      - name: Grid metrics (no heredoc)
+        env:
+          B64: "CmltcG9ydCBqc29uLCBvcwpzID0ganNvbi5sb2FkKG9wZW4oJ19vdXRfNHUvcnVuL3N1bW1hcnkuanNvbicpKSBpZiBvcy5wYXRoLmV4aXN0cygnX291dF80dS9ydW4vc3VtbWFyeS5qc29uJykgZWxzZSB7fQptID0geydjdW1fcG5sX2Nsb3NlX2Jhc2VkJzogcy5nZXQoJ2N1bV9wbmxfY2xvc2VfYmFzZWQnLCBOb25lKSwKICAgICAnYXZnX2dhdGVwJzogcy5nZXQoJ2F2Z19nYXRlcCcsIE5vbmUpLAogICAgICd0cmVuZF9mcmFjJzogcy5nZXQoJ3RyZW5kX2ZyYWMnLCBOb25lKSwKICAgICAncmFuZ2VfZnJhYyc6IHMuZ2V0KCdyYW5nZV9mcmFjJywgTm9uZSl9Cmpzb24uZHVtcChtLCBvcGVuKCdfb3V0XzR1L3J1bi9ncmlkX21ldHJpY3MuanNvbicsJ3cnKSwgaW5kZW50PTIpCg=="
         run: |
           set -euo pipefail
-          python - <<'PY'
-import json, os
-s = json.load(open('_out_4u/run/summary.json')) if os.path.exists('_out_4u/run/summary.json') else {}
-m = {'cum_pnl_close_based': s.get('cum_pnl_close_based', None),
-     'avg_gatep': s.get('avg_gatep', None),
-     'trend_frac': s.get('trend_frac', None),
-     'range_frac': s.get('range_frac', None)}
-json.dump(m, open('_out_4u/run/grid_metrics.json','w'), indent=2)
-PY
+          mkdir -p tools
+          echo "$B64" > tools/m.b64
+          python -c "import base64; open('tools/metrics.py','wb').write(base64.b64decode(open('tools/m.b64','rb').read()))"
+          python tools/metrics.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
