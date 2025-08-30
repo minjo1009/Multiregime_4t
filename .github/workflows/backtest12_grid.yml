@@ -24,10 +24,12 @@ jobs:
       max-parallel: 6
       matrix:
         include:
+          # --- Percent 모드(고정 TP/SL) ---
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
+          # --- ATR 모드(ATR비율 × 계수 → 퍼센트 환산; v1.2.0에선 외부계산 off) ---
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, FILTER: ema}
           - {MODE: atr, K1: 1.6, K2: 0.9, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, FILTER: none}
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, FILTER: ema}
@@ -40,11 +42,13 @@ jobs:
       PYVER: '3.11'
 
     steps:
+      # ✅ pinned (checkout v5.0.0)
       - name: "Checkout"
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
+      # ✅ pinned (setup-python v5.6.0)
       - name: "Setup Python"
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -87,7 +91,6 @@ jobs:
           python -m pip install -U pip >/dev/null
           pip install pandas numpy pyyaml >/dev/null
 
-      # 🔧 FIX: here-doc를 파일 리다이렉션으로 마무리 (YAML 충돌 방지)
       - name: "Detect CSV (ABS) + Preflight"
         shell: bash
         run: |
@@ -100,7 +103,7 @@ jobs:
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"; echo "[csv] $CSV"
 
-          # --- 여기서부터: python here-doc을 'cat > 파일'로 우회 (YAML 파싱 이슈 제거)
+          # here-doc을 파일로 저장 → 실행 (YAML 파싱 이슈 차단)
           cat > preflight.py <<'PY'
 import os, json, pandas as pd, numpy as np
 csv = os.environ['CSV_PATH']
@@ -109,14 +112,12 @@ df = pd.read_csv(csv, nrows=200000)
 missing = [c for c in need if c not in df.columns]
 max_ot = pd.to_numeric(df.get('open_time', pd.Series(dtype='float64')), errors='coerce').max()
 hint = 'ms' if (pd.notna(max_ot) and max_ot > 1e12) else 's'
-out = {"path": csv,
-       "rows_scanned": int(len(df)),
-       "columns": list(df.columns),
-       "missing": missing,
-       "open_time_hint": hint}
-print(json.dumps(out))
+print(json.dumps({"path": csv,
+                  "rows_scanned": int(len(df)),
+                  "columns": list(df.columns),
+                  "missing": missing,
+                  "open_time_hint": hint}))
 PY
-
           python preflight.py > "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
           cat "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
           miss=$(jq -r '.missing|length' "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json")
@@ -128,7 +129,7 @@ PY
           set -euo pipefail
           echo "MODE=${{ matrix.MODE }}" >> "$GITHUB_ENV"
           if [[ "${{ matrix.MODE }}" == "atr" ]]; then
-            TP_EFF="${{ matrix.TP || '0' }}"; SL_EFF="${{ matrix.SL || '0' }}"
+            TP_EFF="0"; SL_EFF="0"   # v1.2.0에서는 외부 ATR 환산 비활성(원하면 추후 확장)
           else
             TP_EFF="${{ matrix.TP }}"; SL_EFF="${{ matrix.SL }}"
           fi
@@ -176,6 +177,7 @@ EOF
             || { echo "::error::invalid summary"; cat "$S"; exit 79; }
           echo "[ok] metrics: hit_rate=$(jq -r .hit_rate "$S") pf=$(jq -r .profit_factor "$S") n=$(jq -r .n_trades "$S")"
 
+      # ✅ pinned (upload-artifact v4.6.2)
       - name: "Upload artifacts (per-run)"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -192,6 +194,7 @@ EOF
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
+      # ✅ pinned (download-artifact v5.0.0)
       - name: "Download all artifacts"
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
@@ -243,6 +246,7 @@ EOF
           echo "== Top 10 =="
           ( head -n 1 leaderboard.sorted.csv && tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed 's/^/  /'
 
+      # ✅ pinned (upload-artifact v4.6.2)
       - name: "Upload leaderboard"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
