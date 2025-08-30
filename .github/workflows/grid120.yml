@@ -24,12 +24,10 @@ jobs:
       max-parallel: 6
       matrix:
         include:
-          # --- Percent 모드(고정 TP/SL) ---
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, TP: 0.0035, SL: 0.0018, FILTER: ema}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, TP: 0.0035, SL: 0.0018, FILTER: none}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, TP: 0.0042, SL: 0.0020, FILTER: ema}
           - {MODE: pct, K1: 0,   K2: 0,   THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 8, BE: 3, TP: 0.0042, SL: 0.0020, FILTER: none}
-          # --- ATR 모드(ATR비율 × 계수 → 퍼센트 환산) ---
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 6, BE: 3, FILTER: ema}
           - {MODE: atr, K1: 1.6, K2: 0.9, THR_US: 4.0, THR_EU: 3.8, THR_ASIA: 3.5, HOLD: 8, BE: 5, FILTER: none}
           - {MODE: atr, K1: 1.2, K2: 0.7, THR_US: 4.2, THR_EU: 3.9, THR_ASIA: 3.6, HOLD: 6, BE: 5, FILTER: ema}
@@ -42,19 +40,17 @@ jobs:
       PYVER: '3.11'
 
     steps:
-      # ✅ pinned (checkout v5.0.0)
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
           fetch-depth: 0
 
-      # ✅ pinned (setup-python v5.6.0)
-      - name: "Setup Python"
+      - name: Setup Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYVER }}
 
-      - name: "Resolve ZIPs"
+      - name: Resolve ZIPs
         shell: bash
         run: |
           set -euo pipefail
@@ -69,7 +65,7 @@ jobs:
           res "${{ github.event.inputs.CODE_ZIP }}" CODE_ZIP_ABS
           res "${{ github.event.inputs.DATA_ZIP }}" DATA_ZIP_ABS
 
-      - name: "Unpack code and data"
+      - name: Unpack code and data
         shell: bash
         run: |
           set -euo pipefail
@@ -84,14 +80,14 @@ jobs:
           fi
           echo "[debug] CSV files:"; find "$DATA_DIR" -maxdepth 2 -type f -name '*.csv' -print || true
 
-      - name: "Install deps"
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install -U pip >/dev/null
           pip install pandas numpy pyyaml >/dev/null
 
-      - name: "Detect CSV (ABS) + Preflight"
+      - name: Detect CSV (ABS)
         shell: bash
         run: |
           set -euo pipefail
@@ -102,27 +98,14 @@ jobs:
             CSV="${GITHUB_WORKSPACE}/${F}"
           fi
           echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"; echo "[csv] $CSV"
-          python - <<'PY'
-import os, json, pandas as pd, numpy as np
-csv=os.environ['CSV_PATH']
-need=['open_time','open','high','low','close','volume']
-df=pd.read_csv(csv, nrows=200000)
-missing=[c for c in need if c not in df.columns]
-h='ms' if pd.to_numeric(df.get('open_time',pd.Series([])), errors='coerce').max()>1e12 else 's'
-print(json.dumps({"path":csv,"rows_scanned":int(len(df)),"columns":list(df.columns),"missing":missing,"open_time_hint":h}))
-PY
-          | tee "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json"
-          miss=$(jq -r '.missing|length' "${GITHUB_WORKSPACE}/${{ env.OUT_BASE }}/preflight.json")
-          [[ "$miss" == "0" ]] || { echo "::error::Required columns missing"; exit 65; }
 
-      - name: "Set params & OUT_DIR"
+      - name: Set params & OUT_DIR
         shell: bash
         run: |
           set -euo pipefail
           echo "MODE=${{ matrix.MODE }}" >> "$GITHUB_ENV"
           if [[ "${{ matrix.MODE }}" == "atr" ]]; then
-            # ATR 환산은 엔진 외부에서 직접 안함(단순화) — 필요시 conf 오버라이드에서 별도 처리 가능
-            TP_EFF="${{ matrix.TP || '0' }}"; SL_EFF="${{ matrix.SL || '0' }}"
+            TP_EFF="0"; SL_EFF="0"
           else
             TP_EFF="${{ matrix.TP }}"; SL_EFF="${{ matrix.SL }}"
           fi
@@ -133,7 +116,7 @@ PY
           echo "OUT_DIR=${{ env.OUT_BASE }}/$TAG" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: "Override conf/config.effective.yml"
+      - name: Override conf/config.effective.yml
         shell: bash
         run: |
           set -euo pipefail
@@ -152,27 +135,25 @@ EOF
           echo "[conf] wrote $RUN_DIR/conf/config.effective.yml"
           sha256sum "$RUN_DIR/conf/config.effective.yml" | awk '{print "[conf] sha256="$1}'
 
-      - name: "Run backtest (v1.2.0)"
+      - name: Run backtest (v1.2.0)
         shell: bash
         run: |
           set -euo pipefail
           export PYTHONPATH="$RUN_DIR"
           python "$RUN_DIR/run_4u.py" --data_path "$CSV_PATH" --out_dir "${GITHUB_WORKSPACE}/${OUT_DIR}"
 
-      - name: "Validate summary/trades (no placeholders, metrics present)"
+      - name: Validate summary/trades (no placeholders, metrics present)
         shell: bash
         run: |
           set -euo pipefail
           S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
           T="${GITHUB_WORKSPACE}/${OUT_DIR}/trades.csv"
           test -s "$S" && test -s "$T" || { echo "::error::missing outputs"; exit 77; }
-          # placeholders 키가 있거나, 핵심 지표가 null이면 실패
           jq -e '(.placeholders|not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null)' "$S" >/dev/null \
             || { echo "::error::invalid summary"; cat "$S"; exit 79; }
           echo "[ok] metrics: hit_rate=$(jq -r .hit_rate "$S") pf=$(jq -r .profit_factor "$S") n=$(jq -r .n_trades "$S")"
 
-      # ✅ pinned (upload-artifact v4.6.2)
-      - name: "Upload artifacts (per-run)"
+      - name: Upload artifacts (per-run)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: out_${{ env.RUN_TAG }}
@@ -188,22 +169,20 @@ EOF
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
-      # ✅ pinned (download-artifact v5.0.0)
-      - name: "Download all artifacts"
+      - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_runs
 
-      - name: "Ensure jq"
+      - name: Ensure jq
         shell: bash
         run: |
           set -euo pipefail
           if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
+            sudo apt-get update -y && sudo apt-get install -y jq
           fi
 
-      - name: "Guard: expected run count"
+      - name: Guard: expected run count
         shell: bash
         run: |
           set -euo pipefail
@@ -212,7 +191,7 @@ EOF
           echo "[guard] expected=$EXPECT found=$FOUND"
           [ "$FOUND" -eq "$EXPECT" ] || { echo "::error::per-run artifacts missing"; exit 74; }
 
-      - name: "Build leaderboard.csv"
+      - name: Build leaderboard.csv
         shell: bash
         run: |
           set -euo pipefail
@@ -236,12 +215,12 @@ EOF
             nt="$(jq -r '.n_trades // empty' "$s")"
             echo "$tag,$thr_US,$thr_EU,$thr_AS,$tp,$sl,$hold,$hit,$pf,$mcc,$nt" >> leaderboard.csv
           done < <(find all_runs -type f -name summary.json -print0)
+
           { head -n 1 leaderboard.csv; tail -n +2 leaderboard.csv | sort -t, -k9,9nr -k8,8nr -k10,10nr; } > leaderboard.sorted.csv
           echo "== Top 10 =="
           ( head -n 1 leaderboard.sorted.csv && tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed 's/^/  /'
 
-      # ✅ pinned (upload-artifact v4.6.2)
-      - name: "Upload leaderboard"
+      - name: Upload leaderboard
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: backtest12_grid_v120_results
