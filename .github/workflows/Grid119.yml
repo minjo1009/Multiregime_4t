@@ -45,6 +45,24 @@ jobs:
         with:
           python-version: ${{ env.PYVER }}
 
+      # Guard: verify action SHAs exist (upload/download)
+      - name: Guard SHAs
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPL=0b2256b8c012f0828dc542b3febcab082c67f72b
+          DNL=fa0a91b85d4f404e444e00e005971372dc801d16
+          for repo sha in \
+            "https://github.com/actions/upload-artifact $UPL" \
+            "https://github.com/actions/download-artifact $DNL"
+          do
+            set -- $repo; REPO=$1; SHA=$2
+            echo "[check] $REPO @ $SHA"
+            git ls-remote "$REPO" "$SHA" | grep -q "$SHA" || { echo "::error::SHA not found in $REPO"; exit 61; }
+            [[ ${#SHA} -eq 40 ]] || { echo "::error::not full-length SHA (40)"; exit 62; }
+          done
+          echo "[ok] action SHAs verified"
+
       - name: Resolve ZIPs
         shell: bash
         run: |
@@ -94,13 +112,15 @@ jobs:
         run: |
           set -euo pipefail
           US="${{ matrix.THRS[0] }}"; EU="${{ matrix.THRS[1] }}"; AS="${{ matrix.THRS[2] }}"
-          echo "TP=${{ matrix.TP }}"   >> "$GITHUB_ENV"
-          echo "SL=${{ matrix.SL }}"   >> "$GITHUB_ENV"
-          echo "HOLD=${{ matrix.HOLD }}" >> "$GITHUB_ENV"
-          echo "THR_US=$US" >> "$GITHUB_ENV"; echo "THR_EU=$EU" >> "$GITHUB_ENV"; echo "THR_ASIA=$AS" >> "$GITHUB_ENV"
+          echo "TP=${{ matrix.TP }}"      >> "$GITHUB_ENV"
+          echo "SL=${{ matrix.SL }}"      >> "$GITHUB_ENV"
+          echo "HOLD=${{ matrix.HOLD }}"  >> "$GITHUB_ENV"
+          echo "THR_US=$US"  >> "$GITHUB_ENV"
+          echo "THR_EU=$EU"  >> "$GITHUB_ENV"
+          echo "THR_ASIA=$AS" >> "$GITHUB_ENV"
           TAG="tp${{ matrix.TP }}_sl${{ matrix.SL }}_h${{ matrix.HOLD }}_us${US}_eu${EU}_as${AS}"
           OUT_DIR="${OUT_BASE}/$TAG"
-          echo "RUN_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RUN_TAG=$TAG"   >> "$GITHUB_ENV"
           echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "${GITHUB_WORKSPACE}/${OUT_DIR}"
           echo "[tag] $TAG"
@@ -143,17 +163,15 @@ jobs:
           set -euo pipefail
           S="${GITHUB_WORKSPACE}/${OUT_DIR}/summary.json"
           test -s "$S" || { echo "::error::summary.json missing"; exit 78; }
-          # placeholders 금지 + 핵심지표 존재
           jq -e '(.placeholders|not) and (.hit_rate!=null) and (.profit_factor!=null) and (.n_trades!=null) and (.mcc!=null)' "$S" >/dev/null \
             || { echo "::error::invalid summary (placeholders or null metrics)"; cat "$S"; exit 78; }
-          nt=$(jq -r '.n_trades' "$S")
-          nr="${N_ROWS}"
+          nt=$(jq -r '.n_trades' "$S"); nr="${N_ROWS}"
           ratio=$(awk -v nt="$nt" -v nr="$nr" 'BEGIN{ if(nr>0){printf "%.6f", nt/nr}else{print "NaN"} }')
           echo "[ratio] n_trades/n_rows=$ratio"
           awk -v r="$ratio" 'BEGIN{exit !(r<=0.60)}' || { echo "::error::n_trades_ratio>0.60"; exit 79; }
 
       - name: Upload per-run artifact
-        uses: actions/upload-artifact@d2ed200cea19851ea45389830aaa64b10fdeb890
+        uses: actions/upload-artifact@0b2256b8c012f0828dc542b3febcab082c67f72b
         with:
           name: out_${{ env.RUN_TAG }}
           path: |
@@ -166,8 +184,17 @@ jobs:
     needs: [grid]
     runs-on: ubuntu-latest
     steps:
+      - name: Guard SHAs
+        shell: bash
+        run: |
+          set -euo pipefail
+          DNL=fa0a91b85d4f404e444e00e005971372dc801d16
+          git ls-remote https://github.com/actions/download-artifact "$DNL" | grep -q "$DNL" || { echo "::error::SHA not found (download-artifact)"; exit 61; }
+          [[ ${#DNL} -eq 40 ]] || { echo "::error::not full-length SHA (40)"; exit 62; }
+          echo "[ok] download-artifact SHA verified"
+
       - name: Download all artifacts
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           path: all_runs
 
@@ -203,7 +230,7 @@ jobs:
           ( head -n 1 leaderboard.sorted.csv; tail -n +2 leaderboard.sorted.csv | head -n 10 ) | column -s, -t | sed "s/^/  /"
 
       - name: Upload leaderboards
-        uses: actions/upload-artifact@d2ed200cea19851ea45389830aaa64b10fdeb890
+        uses: actions/upload-artifact@0b2256b8c012f0828dc542b3febcab082c67f72b
         with:
           name: backtest119_grid_results
           path: |
