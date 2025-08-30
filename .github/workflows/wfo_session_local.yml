@@ -103,6 +103,22 @@ jobs:
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
           echo "[TREE] work/code:"
           find work/code -maxdepth 3 -type f | sort | sed 's/^/  /'
+      - name: Install project deps (requirements or fallback)
+        run: |
+          set -euo pipefail
+          REQ=""
+          for f in requirements.txt requirements-prod.txt requirements.in; do
+            if [ -f "work/code/$f" ]; then REQ="work/code/$f"; break; fi
+            if [ -f "work/code/backtest/$f" ]; then REQ="work/code/backtest/$f"; break; fi
+          done
+          if [ -n "$REQ" ]; then
+            echo "[DEPS] Installing from $REQ"
+            pip install -r "$REQ"
+          else
+            echo "[DEPS] No requirements.txt found; installing common libs"
+            pip install --upgrade numpy scipy statsmodels numba orjson python-json-logger
+            pip install --upgrade ta finta
+          fi
       - name: Write preflight (safe echo)
         run: |
           set -euo pipefail
@@ -188,8 +204,8 @@ jobs:
           done
           hit="$(find . -type f -name 'trades.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/trades.csv || true
           hit="$(find . -type f -name 'preds_test.csv' | head -n 1 || true)"; [ -n "$hit" ] && cp -f "$hit" work/out/single/preds_test.csv || true
-          [ -f work/out/single/summary.json ] || echo "{{}}" > work/out/single/summary.json
-          [ -f work/out/single/gating_debug.json ] || echo "{{}}" > work/out/single/gating_debug.json
+          [ -f work/out/single/summary.json ] || echo "{}" > work/out/single/summary.json
+          [ -f work/out/single/gating_debug.json ] || echo "{}" > work/out/single/gating_debug.json
           [ -f work/out/single/trades.csv ] || printf "" > work/out/single/trades.csv
           [ -f work/out/single/preds_test.csv ] || printf "" > work/out/single/preds_test.csv
       - name: Zip artifacts
