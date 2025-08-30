@@ -25,6 +25,7 @@ on:
 
 jobs:
   grid:
+    name: "grid p${{ matrix.p_thr_trend }} tp${{ matrix.tp_atr }} sl${{ matrix.sl_atr }} cd${{ matrix.cooldown }} mh${{ matrix.min_hold }} ofi${{ matrix.ofi_thr }} thi${{ matrix.t_hi }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -37,8 +38,6 @@ jobs:
         min_hold: [11, 12]
         ofi_thr: [0.42]
         t_hi: [0.74]
-        name:
-          - "p${{ matrix.p_thr_trend }}_tp${{ matrix.tp_atr }}_sl${{ matrix.sl_atr }}_cd${{ matrix.cooldown }}_mh${{ matrix.min_hold }}_ofi${{ matrix.ofi_thr }}_thi${{ matrix.t_hi }}"
 
     steps:
       - name: Install deps
@@ -111,7 +110,7 @@ jobs:
       - name: Upload artifacts (small, pinned)
         uses: actions/upload-artifact@84480863f228bb9747b473957fcc9e309aa96097
         with:
-          name: "grid_${{ matrix.name }}"
+          name: "grid_p${{ matrix.p_thr_trend }}_tp${{ matrix.tp_atr }}_sl${{ matrix.sl_atr }}_cd${{ matrix.cooldown }}_mh${{ matrix.min_hold }}_ofi${{ matrix.ofi_thr }}_thi${{ matrix.t_hi }}"
           path: |
             _out_4u/run/summary.json
             _out_4u/run/summary_cost.json
