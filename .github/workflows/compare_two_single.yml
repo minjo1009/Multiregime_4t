@@ -11,24 +11,23 @@ on:
         description: "번들#2(≈3.75) 파라미터 경로"
         required: false
         default: "conf/params_alt.yml"
-      # ---- 선택 입력(비워두면 원본 파일값 사용) ----
+      # 선택 입력(비워두면 원본 파일값 사용)
       OVERRIDE_THR_CHAMP:
-        description: "챔피언 thr override (예: 0.83)"
+        description: "챔피언 thr (예: 0.83)"
         required: false
         default: ""
       OVERRIDE_HOLD_CHAMP:
-        description: "챔피언 hold override (예: 8)"
+        description: "챔피언 hold (예: 8)"
         required: false
         default: ""
       OVERRIDE_THR_ALT:
-        description: "번들#2 thr override (예: 0.83)"
+        description: "번들#2 thr (예: 0.83)"
         required: false
         default: ""
       OVERRIDE_HOLD_ALT:
-        description: "번들#2 hold override (예: 9)"
+        description: "번들#2 hold (예: 9)"
         required: false
         default: ""
-      # ---- Data / Runner ----
       CSV_GLOB:
         description: "CSV GLOB (레포 루트 기준; 레포명/./ 붙여도 자동 보정)"
         required: false
@@ -53,6 +52,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      # 액션은 풀 SHA로 고정 (조직 정책 대응)
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
@@ -72,7 +72,6 @@ jobs:
           set -euo pipefail
           ZIP='${{ github.event.inputs.DATA_ZIP }}'
           if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
-          ls -al | sed -n '1,120p'
 
       - name: Normalize CSV_GLOB to repo root
         run: |
@@ -105,30 +104,22 @@ jobs:
           HOLD_A: ${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
         run: |
           python - <<'PY'
-          import os, sys, yaml
-          def load(p):
-            with open(p,'r',encoding='utf-8') as f: return yaml.safe_load(f) or {}
+          import os, yaml
           def clamp_thr(v):
             try: x=float(v)
             except: x=0.6
             if x>1.0: x=0.95
             if x<0.3: x=0.3
-            return round(x,4)
+            return float(f"{x:.4f}")
           def patch(p, thr, hold):
-            d=load(p)
+            d=yaml.safe_load(open(p,'r',encoding='utf-8')) or {}
             d.setdefault('entry',{}).setdefault('p_thr',{})
-            if thr:
-              d['entry']['p_thr']['trend']=clamp_thr(thr)
-              d['entry']['p_thr']['range']=clamp_thr(thr)
-            else:
-              for k in ('trend','range'):
-                d['entry']['p_thr'][k]=clamp_thr(d['entry']['p_thr'].get(k,0.6))
-            d.setdefault('exit',{})
-            d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
+            for k in ('trend','range'):
+              d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
+            d.setdefault('exit',{}); d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
             return d
-          PF_C,PF_A=os.environ['PF_C'],os.environ['PF_A']
-          dc=patch(PF_C, os.environ.get('THR_C','').strip(), os.environ.get('HOLD_C','').strip())
-          da=patch(PF_A, os.environ.get('THR_A','').strip(), os.environ.get('HOLD_A','').strip())
+          dc=patch(os.environ['PF_C'], os.environ.get('THR_C',''), os.environ.get('HOLD_C',''))
+          da=patch(os.environ['PF_A'], os.environ.get('THR_A',''), os.environ.get('HOLD_A',''))
           os.makedirs('conf', exist_ok=True)
           yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
           yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
