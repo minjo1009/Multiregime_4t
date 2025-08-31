@@ -1,0 +1,8 @@
+# derived from run_id: bundle_3.8_8_ema
+entry:
+  p_thr:
+    trend: 3.8
+    range: 3.8
+exit:
+  min_hold: 8
+# filter: ema

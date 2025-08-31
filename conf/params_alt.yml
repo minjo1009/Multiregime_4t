@@ -1,0 +1,8 @@
+# derived from run_id: bundle_3.2_6_none
+entry:
+  p_thr:
+    trend: 3.2
+    range: 3.2
+exit:
+  min_hold: 6
+# filter: none
