@@ -1,27 +1,21 @@
-name: Compare Two Singles (Champion vs Alt)
+name: Compare Two Singles (Champion vs Alt) v2
 
 on:
   workflow_dispatch:
     inputs:
       PARAMS_CHAMP:
-        description: "챔피언 파라미터 경로"
-        required: false
         default: "conf/params_champion.yml"
       PARAMS_ALT:
-        description: "번들#2(≈3.75) 파라미터 경로"
-        required: false
         default: "conf/params_alt.yml"
       CSV_GLOB:
-        description: "백테스트에 사용할 CSV GLOB"
-        required: false
+        # 루트 기준! 여기엔 레포명(폴더명) 넣지 마세요.
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      DATA_ZIP:
+        # 루트에 올려둔 데이터 ZIP 파일명 (있으면 자동 언집)
+        default: "ETHUSDT_1min_2020_2025.zip"
       RUNNER_PATH:
-        description: "러너 스크립트 경로 (예: backtest/runner.py, 비워두면 자동탐색)"
-        required: false
         default: ""
       PY_VERSION:
-        description: "Python 버전"
-        required: false
         default: "3.10"
 
 env:
@@ -36,8 +30,7 @@ jobs:
 
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ github.event.inputs.PY_VERSION }}
+        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
 
       - name: Deps (numba 호환 고정)
         run: |
@@ -45,8 +38,20 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
+      - name: Unzip data (optional)
+        run: |
+          set -euo pipefail
+          ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
+            echo "[data] unzip $ZIP"
+            unzip -o "$ZIP" >/dev/null
+          else
+            echo "[data] no zip to extract (skip)"
+          fi
+          echo "[data] show top-level files:"; ls -al | sed -n '1,120p'
+
       - name: Export PYTHONPATH
-        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
+        run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
 
       - name: Sanity check (scripts & params)
         run: |
@@ -63,32 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           OUT="out_single_champion"
-          python ci/wfo_entry.py --params "$PF" --data-root "${GITHUB_WORKSPACE}" --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
-          python - <<'PY'
-          import pandas as pd, numpy as np
-          import json, os
-          OUT="out_single_champion"; t=os.path.join(OUT,"trades.csv")
-          df=pd.read_csv(t) if os.path.exists(t) else pd.DataFrame()
-          if not df.empty:
-              ev=next((c for c in df.columns if str(c).lower()=="event"), None)
-              if ev: df=df[df[ev].astype(str).str.upper()=="EXIT"]
-              # pick timestamp
-              ts=None
-              for c in ["exit_time","ts","timestamp","time","date"]:
-                  if c in df.columns:
-                      ts=pd.to_datetime(df[c], errors="coerce", utc=True).dt.tz_localize(None)
-                      break
-              if ts is None: ts=pd.to_datetime(df.index, errors="coerce")
-              pnl=None
-              for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
-                  if c in df.columns:
-                      pnl=pd.to_numeric(df[c], errors="coerce").fillna(0.0); break
-              if pnl is None: pnl=pd.Series([np.nan]*len(df))
-              m=ts.dt.to_period("M").astype(str)
-              wr=((pnl>0).groupby(m).sum()/pnl.groupby(m).count()).rename("win_rate")
-              out=pd.DataFrame({"n_trades":pnl.groupby(m).count(),"sum_pnl":pnl.groupby(m).sum(),"avg_pnl":pnl.groupby(m).mean(),"win_rate":wr}).reset_index()
-              out.to_csv(os.path.join(OUT,"monthly.csv"), index=False)
-          PY
+          # data-root는 반드시 루트(.) — 레포명 포함 금지
+          python ci/wfo_entry.py --params "$PF" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
 
       - name: Run SINGLE — Alt(≈3.75)
@@ -99,63 +80,8 @@ jobs:
         run: |
           set -euo pipefail
           OUT="out_single_alt"
-          python ci/wfo_entry.py --params "$PF" --data-root "${GITHUB_WORKSPACE}" --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
-          python - <<'PY'
-          import pandas as pd, numpy as np
-          import json, os
-          OUT="out_single_alt"; t=os.path.join(OUT,"trades.csv")
-          df=pd.read_csv(t) if os.path.exists(t) else pd.DataFrame()
-          if not df.empty:
-              ev=next((c for c in df.columns if str(c).lower()=="event"), None)
-              if ev: df=df[df[ev].astype(str).str.upper()=="EXIT"]
-              ts=None
-              for c in ["exit_time","ts","timestamp","time","date"]:
-                  if c in df.columns:
-                      ts=pd.to_datetime(df[c], errors="coerce", utc=True).dt.tz_localize(None)
-                      break
-              if ts is None: ts=pd.to_datetime(df.index, errors="coerce")
-              pnl=None
-              for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
-                  if c in df.columns:
-                      pnl=pd.to_numeric(df[c], errors="coerce").fillna(0.0); break
-              if pnl is None: pnl=pd.Series([np.nan]*len(df))
-              m=ts.dt.to_period("M").astype(str)
-              wr=((pnl>0).groupby(m).sum()/pnl.groupby(m).count()).rename("win_rate")
-              out=pd.DataFrame({"n_trades":pnl.groupby(m).count(),"sum_pnl":pnl.groupby(m).sum(),"avg_pnl":pnl.groupby(m).mean(),"win_rate":wr}).reset_index()
-              out.to_csv(os.path.join(OUT,"monthly.csv"), index=False)
-          PY
+          python ci/wfo_entry.py --params "$PF" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
-
-      - name: Build compare_summary.csv
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os, json, pandas as pd, numpy as np
-          def load(out):
-              s=os.path.join(out,"summary.json")
-              t=os.path.join(out,"trades.csv")
-              summ=json.load(open(s,"r",encoding="utf-8")) if os.path.exists(s) else {}
-              n_exit=summ.get("exits")
-              if (n_exit is None) and os.path.exists(t):
-                  df=pd.read_csv(t)
-                  ev=next((c for c in df.columns if str(c).lower()=="event"), None)
-                  n_exit=int((df[ev].astype(str).str.upper()=="EXIT").sum()) if ev else len(df)//2
-              else:
-                  n_exit=n_exit or 0
-              return {
-                "run": out,
-                "entries": summ.get("entries"),
-                "exits": n_exit,
-                "cum_pnl_close_based": summ.get("cum_pnl_close_based"),
-                "win_rate": summ.get("win_rate"),
-                "profit_factor": summ.get("profit_factor"),
-                "mcc": summ.get("mcc"),
-                "sharpe": summ.get("sharpe"),
-                "mdd": summ.get("mdd"),
-              }
-          rows=[load("out_single_champion"), load("out_single_alt")]
-          pd.DataFrame(rows).to_csv("compare_summary.csv", index=False)
-          PY
 
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -164,7 +90,3 @@ jobs:
           path: |
             bundle_single_champion.zip
             bundle_single_alt.zip
-            out_single_champion/monthly.csv
-            out_single_alt/monthly.csv
-            compare_summary.csv
-          if-no-files-found: warn
