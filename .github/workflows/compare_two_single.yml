@@ -1,21 +1,31 @@
-name: Compare Two Singles (Champion vs Alt) v2
+name: Compare Two Singles (Champion vs Alt) — root-safe
 
 on:
   workflow_dispatch:
     inputs:
       PARAMS_CHAMP:
+        description: "챔피언 파라미터 경로"
+        required: false
         default: "conf/params_champion.yml"
       PARAMS_ALT:
+        description: "번들#2(≈3.75) 파라미터 경로"
+        required: false
         default: "conf/params_alt.yml"
       CSV_GLOB:
-        # 루트 기준! 여기엔 레포명(폴더명) 넣지 마세요.
+        description: "CSV GLOB (레포 루트 기준; 레포명이 앞에 있어도 자동 보정)"
+        required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       DATA_ZIP:
-        # 루트에 올려둔 데이터 ZIP 파일명 (있으면 자동 언집)
+        description: "루트에 올린 데이터 ZIP(있으면 자동 언집)"
+        required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       RUNNER_PATH:
+        description: "러너 경로(예: backtest/runner.py, 비우면 자동탐색)"
+        required: false
         default: ""
       PY_VERSION:
+        description: "Python 버전"
+        required: false
         default: "3.10"
 
 env:
@@ -25,12 +35,13 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Checkout (tag, not SHA)
+        uses: actions/checkout@v4
 
-      - name: Setup Python (pinned)
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
+      - name: Setup Python (tag, not SHA)
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ github.event.inputs.PY_VERSION }}
 
       - name: Deps (numba 호환 고정)
         run: |
@@ -38,17 +49,31 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
-      - name: Unzip data (optional)
+      - name: Unzip data (optional, 루트에 있을 때만)
         run: |
           set -euo pipefail
           ZIP="${{ github.event.inputs.DATA_ZIP }}"
           if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
-            echo "[data] unzip $ZIP"
+            echo "[data] unzip: $ZIP"
             unzip -o "$ZIP" >/dev/null
           else
-            echo "[data] no zip to extract (skip)"
+            echo "[data] no data zip (skip)"
           fi
-          echo "[data] show top-level files:"; ls -al | sed -n '1,120p'
+          echo "[data] top-level:"; ls -al | sed -n '1,120p'
+
+      - name: Normalize CSV_GLOB to repo root (레포명/./ 제거)
+        id: globfix
+        run: |
+          set -euo pipefail
+          ROOTF="$(basename "$GITHUB_WORKSPACE")"
+          CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
+          # remove leading "<repo>/" if present
+          CSVG="${CSVG_IN#${ROOTF}/}"
+          # remove leading "./" if present
+          CSVG="${CSVG#./}"
+          echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
+          echo "[glob] in : $CSVG_IN"
+          echo "[glob] out: $CSVG"
 
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
@@ -63,28 +88,35 @@ jobs:
       - name: Run SINGLE — Champion
         env:
           RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
-          CSVG:   ${{ github.event.inputs.CSV_GLOB }}
           PF:     ${{ github.event.inputs.PARAMS_CHAMP }}
         run: |
           set -euo pipefail
           OUT="out_single_champion"
-          # data-root는 반드시 루트(.) — 레포명 포함 금지
-          python ci/wfo_entry.py --params "$PF" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
+          python ci/wfo_entry.py \
+            --params "$PF" \
+            --data-root "." \
+            --csv-glob "$CSVG_SANITIZED" \
+            --runner "$RUNNER" \
+            --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
 
       - name: Run SINGLE — Alt(≈3.75)
         env:
           RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
-          CSVG:   ${{ github.event.inputs.CSV_GLOB }}
           PF:     ${{ github.event.inputs.PARAMS_ALT }}
         run: |
           set -euo pipefail
           OUT="out_single_alt"
-          python ci/wfo_entry.py --params "$PF" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
+          python ci/wfo_entry.py \
+            --params "$PF" \
+            --data-root "." \
+            --csv-glob "$CSVG_SANITIZED" \
+            --runner "$RUNNER" \
+            --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v4
         with:
           name: singles_compare
           path: |
