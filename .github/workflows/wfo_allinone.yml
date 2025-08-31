@@ -1,4 +1,4 @@
-name: WFO All-in-One V2.1.3 (canonical-runner)
+name: WFO All-in-One V2.1.3 (unzip+overlay+runpy)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: "conf/params.v2.yml"
       DATA_ZIP:
-        description: "data zip at repo root (optional)"
+        description: "market data zip at repo root (optional)"
         required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
@@ -24,19 +24,19 @@ on:
         required: false
         default: "true"
       GRID_THR:
-        description: "override thr list (comma)"
+        description: "override thr list (comma, optional)"
         required: false
         default: ""
       GRID_HOLD:
-        description: "override hold list (comma)"
+        description: "override hold list (comma, optional)"
         required: false
         default: ""
-      GRID_FILTER:
-        description: "override filter list (comma)"
+      RUNNER_PATH:
+        description: "explicit runner path (e.g. backtest/runner.py), optional"
         required: false
         default: ""
       BUNDLE_NAME:
-        description: "final single zip name (no .zip)"
+        description: "final ZIP name (no .zip)"
         required: false
         default: "WFO_results_all"
 
@@ -51,17 +51,24 @@ jobs:
       csv_glob: ${{ steps.mk.outputs.csv_glob }}
       params_used: ${{ steps.params_out.outputs.PF }}
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Resolve params (dot -> underscore fallback)
         id: params_out
         run: |
+          set -euo pipefail
           PF="${{ github.event.inputs.PARAMS_FILE }}"
           if [ ! -f "$PF" ] && [ "$PF" = "conf/params.v2.yml" ] && [ -f "conf/params_v2.yml" ]; then
             PF="conf/params_v2.yml"
@@ -70,28 +77,34 @@ jobs:
             echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
           fi
           echo "PF=$PF" >> "$GITHUB_OUTPUT"
+
       - name: Ensure canonical runner exists
         run: |
+          set -euo pipefail
           if [ ! -f "ci/wfo_entry.py" ]; then
             echo "ci/wfo_entry.py is missing"; exit 2
           fi
-      - name: Build matrix (+ overrides)
+
+      - name: Build matrix from params (thr=entry.p_thr, hold=exit.min_hold)
         id: mk
         env:
           PF: ${{ steps.params_out.outputs.PF }}
           CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
           GRID_THR: ${{ github.event.inputs.GRID_THR }}
           GRID_HOLD: ${{ github.event.inputs.GRID_HOLD }}
-          GRID_FILTER: ${{ github.event.inputs.GRID_FILTER }}
         run: |
+          set -euo pipefail
           python - <<'PY'
           import os, yaml, json
           pf=os.environ["PF"]
           p=yaml.safe_load(open(pf,"r",encoding="utf-8")) or {}
-          thr=(p.get("gate") or {}).get("thr",[3.2,3.8])
-          hold=p.get("hold",[6,8])
-          filt=p.get("filter",["ema","none"])
-          csvg=p.get("csv_glob", os.environ.get("CSV_GLOB_IN","**/*.csv"))
+          thr_tr = (((p.get("entry") or {}).get("p_thr") or {}).get("trend") or 0.60)
+          thr_rg = (((p.get("entry") or {}).get("p_thr") or {}).get("range") or 0.55)
+          thr_base = float((thr_tr + thr_rg)/2.0)
+          hold_base = int(((p.get("exit") or {}).get("min_hold") or 3))
+          thr_grid  = [round(x,3) for x in [thr_base-0.05, thr_base, thr_base+0.05] if 0.3 < x < 0.95] or [0.55,0.60,0.65]
+          hold_grid = sorted(set([max(1,hold_base+i) for i in [0,3,6]])) or [3,6,9]
+          # optional overrides
           def ov(env,cur,cast=None):
             v=(os.environ.get(env) or "").strip()
             if not v: return cur
@@ -100,13 +113,13 @@ jobs:
               try: xs=[cast(x) for x in xs]
               except: pass
             return xs or cur
-          thr=ov("GRID_THR",thr,float)
-          hold=ov("GRID_HOLD",hold,int)
-          filt=ov("GRID_FILTER",filt,None)
-          open("matrix.json","w",encoding="utf-8").write(json.dumps({"thr":thr,"hold":hold,"filter":filt}))
+          thr_grid  = ov("GRID_THR", thr_grid, float)
+          hold_grid = ov("GRID_HOLD", hold_grid, int)
+          csvg = p.get("csv_glob", os.environ.get("CSV_GLOB_IN","**/*.csv"))
+          open("matrix.json","w",encoding="utf-8").write(json.dumps({"thr":thr_grid,"hold":hold_grid,"filter":["none"]}))
           open("csv_glob.txt","w",encoding="utf-8").write(str(csvg))
           PY
-          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(cat matrix.json)"   >> "$GITHUB_OUTPUT"
           echo "csv_glob=$(cat csv_glob.txt)" >> "$GITHUB_OUTPUT"
 
   single:
@@ -114,38 +127,43 @@ jobs:
     needs: prep
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Unzip data (optional)
         run: |
+          set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
-      - name: (optional) Install local package if present
-        run: |
-          if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
-            python -m pip install -e .
-          fi
-      - name: Export PYTHONPATH
-        run: |
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
-      - name: Run single via canonical runner
+
+      - name: Run SINGLE via canonical runner (unzip+overlay+runpy)
         env:
-          PF: ${{ needs.prep.outputs.params_used }}
+          PF:   ${{ needs.prep.outputs.params_used }}
           CSVG: ${{ needs.prep.outputs.csv_glob }}
+          RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
         run: |
+          set -euo pipefail
           OUT="out_single"
           python ci/wfo_entry.py \
             --params "$PF" \
             --data-root "${GITHUB_WORKSPACE}" \
             --csv-glob "$CSVG" \
+            --runner "$RUNNER" \
             --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single.zip . )
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+
+      - name: Upload bundle_single.zip
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bundle_single
           path: bundle_single.zip
@@ -159,42 +177,47 @@ jobs:
       max-parallel: 4
       matrix: ${{ fromJson(needs.prep.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Unzip data (optional)
         run: |
+          set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
-      - name: (optional) Install local package if present
-        run: |
-          if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
-            python -m pip install -e .
-          fi
-      - name: Export PYTHONPATH
-        run: |
-          echo "PYTHONPATH=${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
-      - name: Run WFO member via canonical runner
+
+      - name: Run WFO member via canonical runner (unzip+overlay+runpy)
         env:
-          PF: ${{ needs.prep.outputs.params_used }}
-          CSVG: ${{ needs.prep.outputs.csv_glob }}
-          THR: ${{ matrix.thr }}
-          HOLD: ${{ matrix.hold }}
+          PF:     ${{ needs.prep.outputs.params_used }}
+          CSVG:   ${{ needs.prep.outputs.csv_glob }}
+          THR:    ${{ matrix.thr }}
+          HOLD:   ${{ matrix.hold }}
           FILTER: ${{ matrix.filter }}
+          RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
         run: |
+          set -euo pipefail
           OUT="out_${THR}_${HOLD}_${FILTER}"
           python ci/wfo_entry.py \
             --params "$PF" \
             --data-root "${GITHUB_WORKSPACE}" \
             --csv-glob "$CSVG" \
             --thr "$THR" --hold "$HOLD" --filter "$FILTER" \
+            --runner "$RUNNER" \
             --outdir "$OUT"
           ( cd "$OUT" && zip -rq "../bundle_${THR}_${HOLD}_${FILTER}.zip" . )
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+
+      - name: Upload WFO bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}
           path: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}.zip
@@ -204,24 +227,33 @@ jobs:
     needs: [wfo]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+
       - name: Deps (finalize aggregation)
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+
+      - name: Download all artifacts (pinned)
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_artifacts
+
       - name: Debug list (tree + sizes)
         run: |
+          set -euo pipefail
           echo "==== all_artifacts tree ===="; ls -R all_artifacts || true
           echo "ZIP files found:"; find all_artifacts -type f -name "*.zip" -printf "%p (%k KB)\n" | sort || true
+
       - name: Aggregate & Pack FINAL ZIP
         env:
           BND: ${{ github.event.inputs.BUNDLE_NAME }}
         run: |
+          set -euo pipefail
           python - <<'PY'
           import os,zipfile,glob,json,math
           import pandas as pd, numpy as np
@@ -302,7 +334,9 @@ jobs:
             z.write('final_pack/WFO_aggregated_summary.csv','WFO_aggregated_summary.csv')
             z.writestr('README.txt','This package includes all member bundles and WFO_aggregated_summary.csv\n')
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+
+      - name: Upload FINAL ZIP (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ github.event.inputs.BUNDLE_NAME }}
           path: ${{ github.event.inputs.BUNDLE_NAME }}.zip
