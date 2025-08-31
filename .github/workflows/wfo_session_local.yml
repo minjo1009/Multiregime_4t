@@ -184,9 +184,20 @@ jobs:
         run: |
           set -euo pipefail
           OUT="out_single"
-          mkdir -p "$OUT"
-          # find & copy (first match wins)
-          fcopy(){ p="$1"; dst="$2"; set +e; X=$(find . -type f -iname "$p" | head -n1); set -e; if [ -n "$X" ]; then cp -f "$X" "$OUT/$dst"; fi; }
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          fcopy() {
+            pat="$1"; dst="$2"
+            set +e
+            X=$(find . -type f -iname "$pat" ! -path "./$OUT/*" | head -n1)
+            set -e
+            if [ -n "$X" ]; then
+              if [ -f "$OUT/$dst" ] && [ "$X" -ef "$OUT/$dst" ]; then
+                :
+              else
+                cp -f "$X" "$OUT/$dst" 2>/dev/null || true
+              fi
+            fi
+          }
           fcopy "trades.csv" "trades.csv"
           fcopy "*trade*.csv" "trades.csv"
           fcopy "summary.json" "summary.json"
@@ -195,12 +206,10 @@ jobs:
           fcopy "*pred*.csv" "preds_test.csv"
           fcopy "gating_debug.json" "gating_debug.json"
           fcopy "*gating*.json" "gating_debug.json"
-          # fallbacks if missing
           [ -f "$OUT/summary.json" ] || echo "{}" > "$OUT/summary.json"
           [ -f "$OUT/gating_debug.json" ] || echo "{}" > "$OUT/gating_debug.json"
           [ -f "$OUT/preds_test.csv" ] || echo "empty" > "$OUT/preds_test.csv"
           [ -f "$OUT/trades.csv" ] || echo "empty" > "$OUT/trades.csv"
-          # manifest + params snapshot
           echo "{\"run\":\"single\",\"ts\":\"$(date -Iseconds)\"}" > "$OUT/manifest.json"
           [ -f "$PF" ] && cp -f "$PF" "$OUT/params_used.yml" || true
           ( cd "$OUT" && zip -rq ../bundle_single.zip . )
@@ -294,8 +303,20 @@ jobs:
         run: |
           set -euo pipefail
           OUT="out_${THR}_${HOLD}_${FILTER}"
-          mkdir -p "$OUT"
-          fcopy(){ p="$1"; dst="$2"; set +e; X=$(find . -type f -iname "$p" | head -n1); set -e; if [ -n "$X" ]; then cp -f "$X" "$OUT/$dst"; fi; }
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          fcopy() {
+            pat="$1"; dst="$2"
+            set +e
+            X=$(find . -type f -iname "$pat" ! -path "./$OUT/*" | head -n1)
+            set -e
+            if [ -n "$X" ]; then
+              if [ -f "$OUT/$dst" ] && [ "$X" -ef "$OUT/$dst" ]; then
+                :
+              else
+                cp -f "$X" "$OUT/$dst" 2>/dev/null || true
+              fi
+            fi
+          }
           fcopy "trades.csv" "trades.csv"
           fcopy "*trade*.csv" "trades.csv"
           fcopy "summary.json" "summary.json"
@@ -319,7 +340,7 @@ jobs:
           if-no-files-found: warn
 
   finalize:
-    needs: [wfo, single]
+    needs: [wfo]
     runs-on: ubuntu-latest
     steps:
       - name: Setup Python (pinned)
@@ -339,110 +360,103 @@ jobs:
           echo "ZIP files found:"
           find all_artifacts -type f -name "*.zip" -printf "%p (%k KB)\n" | sort || true
       - name: Aggregate & Pack FINAL ZIP
+        env:
+          BND: ${{ github.event.inputs.BUNDLE_NAME }}
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os,zipfile,glob,json,csv,math
-          import pandas as pd
-          import numpy as np
-          ROOT="all_artifacts"
-          bundles=[]
-          for p in glob.glob(os.path.join(ROOT,"**","*.zip"),recursive=True):
-            bundles.append(p)
-          # also consider unzipped dirs that already contain standard files
-          std_dirs=[]
-          for d in glob.glob(os.path.join(ROOT,"**"),recursive=True):
-            if os.path.isdir(d):
-              if all(os.path.exists(os.path.join(d,f)) for f in ["trades.csv","summary.json","preds_test.csv","gating_debug.json"]):
-                std_dirs.append(d)
-          os.makedirs("final_pack",exist_ok=True)
-          rows=[]
-          def safe_read_csv(p):
-            try: return pd.read_csv(p)
-            except: return pd.DataFrame()
-          def compute_trade_metrics(df):
-            n=len(df); r={"n_trades":n}
-            if n==0: r.update({"win_rate":np.nan,"cum_pnl":0.0,"avg_pnl":np.nan,"median_pnl":np.nan}); return r
-            pnl_col=None
-            for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent"]:
-              if c in df.columns: pnl_col=c; break
-            if pnl_col is None: r.update({"win_rate":np.nan,"cum_pnl":np.nan,"avg_pnl":np.nan,"median_pnl":np.nan}); return r
-            pnl=pd.to_numeric(df[pnl_col],errors="coerce").fillna(0.0)
-            r["cum_pnl"]=float(pnl.sum())
-            r["avg_pnl"]=float(pnl.mean())
-            r["median_pnl"]=float(pnl.median())
-            r["win_rate"]=float((pnl>0).sum())/max(n,1)
-            return r
-          def compute_mcc(df):
-            if df is None or df.empty: return {}
-            m={c.lower():c for c in df.columns}
-            yt=next((m[k] for k in ["y_true","true","label","target"] if k in m),None)
-            yp=next((m[k] for k in ["y_pred","pred","prediction","pred_label"] if k in m),None)
-            if not yt or not yp: return {}
-            Yt=df[yt].values; Yp=df[yp].values
-            if df[yp].dtype.kind in "f": Yp=(Yp>=0.5).astype(int)
-            tp=int(((Yt==1)&(Yp==1)).sum()); tn=int(((Yt==0)&(Yp==0)).sum())
-            fp=int(((Yt==0)&(Yp==1)).sum()); fn=int(((Yt==1)&(Yp==0)).sum())
-            den=(tp+fp)*(tp+fn)*(tn+fp)*(tn+fn); den=math.sqrt(den) if den else 0
-            mcc=(tp*tn - fp*fn)/den if den else float("nan")
-            return {"mcc":float(mcc),"tp":tp,"tn":tn,"fp":fp,"fn":fn}
-          # extract bundles (if any) into temp and aggregate
-          TMP="tmp_extract"; os.makedirs(TMP,exist_ok=True)
-          def harvest_dir(d, run_id):
-            r={"run_id":run_id}
-            t=os.path.join(d,"trades.csv"); s=os.path.join(d,"summary.json"); p=os.path.join(d,"preds_test.csv")
-            if os.path.exists(t): r.update(compute_trade_metrics(safe_read_csv(t)))
-            if os.path.exists(s):
-              try:
-                summ=json.load(open(s,"r",encoding="utf-8"))
-                for k in ["entries","exits","cum_pnl_close_based","avg_gatep","sharpe","mdd","profit_factor","win_rate"]:
-                  if k in summ and (k!="win_rate" or math.isnan(r.get("win_rate",float("nan")))):
-                    r[k]=summ[k]
-              except: pass
-            if os.path.exists(p): r.update(compute_mcc(safe_read_csv(p)))
-            rows.append(r)
-          import re
-          def infer_run_id(name):
-            m=re.search(r'(?:bundle|out)[-_]([0-9.]+)[-_]([0-9]+)[-_]([A-Za-z0-9]+)',name)
-            if m: return f"thr={m.group(1)},hold={m.group(2)},filter={m.group(3)}"
-            if "single" in name: return "single"
-            return name
-          for zp in bundles:
-            nm=os.path.splitext(os.path.basename(zp))[0]
-            rid=infer_run_id(nm)
-            od=os.path.join(TMP,nm); os.makedirs(od,exist_ok=True)
-            try:
-              with zipfile.ZipFile(zp,'r') as z: z.extractall(od)
-              harvest_dir(od,rid)
-            except: pass
-          for d in std_dirs:
-            harvest_dir(d,infer_run_id(os.path.basename(d)))
-          # build df
-          df=pd.DataFrame(rows)
-          cols=["run_id","n_trades","win_rate","cum_pnl","avg_pnl","median_pnl","entries","exits","avg_gatep","profit_factor","sharpe","mdd","mcc","tp","tn","fp","fn"]
-          for c in cols:
-            if c not in df.columns: df[c]=np.nan
-          df=df[cols]
-          df["cum_pnl"]=pd.to_numeric(df["cum_pnl"],errors="coerce")
-          df["win_rate"]=pd.to_numeric(df["win_rate"],errors="coerce")
-          df["mcc"]=pd.to_numeric(df["mcc"],errors="coerce")
-          df=df.sort_values(by=["cum_pnl","win_rate","mcc"],ascending=[False,False,False],na_position="last")
-          df.to_csv("final_pack/WFO_aggregated_summary.csv",index=False)
-          # pack everything into single zip
-          FINAL=os.environ.get("BUNDLE","WFO_results_all.zip")
-          with zipfile.ZipFile(FINAL,"w",zipfile.ZIP_DEFLATED) as z:
-            # include all artifacts (dirs) and bundle zips
-            for base,dirs,files in os.walk("all_artifacts"):
-              for fn in files:
-                p=os.path.join(base,fn)
-                z.write(p, os.path.relpath(p,"all_artifacts"))
-            # include summary and a tiny README
-            z.write("final_pack/WFO_aggregated_summary.csv","WFO_aggregated_summary.csv")
-            z.writestr("README.txt","This package includes all member bundles and WFO_aggregated_summary.csv\n")
-          PY
+          : > _agg.py
+          echo "import os,zipfile,glob,json,math" >> _agg.py
+          echo "import pandas as pd" >> _agg.py
+          echo "import numpy as np" >> _agg.py
+          echo "ROOT='all_artifacts'" >> _agg.py
+          echo "bundles=glob.glob(os.path.join(ROOT,'**','*.zip'),recursive=True)" >> _agg.py
+          echo "std_dirs=[]" >> _agg.py
+          echo "for d in glob.glob(os.path.join(ROOT,'**'),recursive=True):" >> _agg.py
+          echo "  if os.path.isdir(d):" >> _agg.py
+          echo "    need=['trades.csv','summary.json','preds_test.csv','gating_debug.json']" >> _agg.py
+          echo "    if all(os.path.exists(os.path.join(d,f)) for f in need): std_dirs.append(d)" >> _agg.py
+          echo "os.makedirs('final_pack',exist_ok=True)" >> _agg.py
+          echo "rows=[]" >> _agg.py
+          echo "def safe_read_csv(p):" >> _agg.py
+          echo "  try: return pd.read_csv(p)" >> _agg.py
+          echo "  except: return pd.DataFrame()" >> _agg.py
+          echo "def compute_trade_metrics(df):" >> _agg.py
+          echo "  n=len(df); r={'n_trades':n}" >> _agg.py
+          echo "  if n==0: r.update({'win_rate':np.nan,'cum_pnl':0.0,'avg_pnl':np.nan,'median_pnl':np.nan}); return r" >> _agg.py
+          echo "  pnl_col=None" >> _agg.py
+          echo "  for c in ['pnl_close_based','pnl','pnl_value','pnl_usd','pnl_krw','pnl_pct','pnl_percent']:" >> _agg.py
+          echo "    if c in df.columns: pnl_col=c; break" >> _agg.py
+          echo "  if pnl_col is None: r.update({'win_rate':np.nan,'cum_pnl':np.nan,'avg_pnl':np.nan,'median_pnl':np.nan}); return r" >> _agg.py
+          echo "  pnl=pd.to_numeric(df[pnl_col],errors='coerce').fillna(0.0)" >> _agg.py
+          echo "  r['cum_pnl']=float(pnl.sum()); r['avg_pnl']=float(pnl.mean()); r['median_pnl']=float(pnl.median());" >> _agg.py
+          echo "  r['win_rate']=float((pnl>0).sum())/max(n,1); return r" >> _agg.py
+          echo "def compute_mcc(df):" >> _agg.py
+          echo "  if df is None or df.empty: return {}" >> _agg.py
+          echo "  m={c.lower():c for c in df.columns}" >> _agg.py
+          echo "  yt=next((m[k] for k in ['y_true','true','label','target'] if k in m),None)" >> _agg.py
+          echo "  yp=next((m[k] for k in ['y_pred','pred','prediction','pred_label'] if k in m),None)" >> _agg.py
+          echo "  if not yt or not yp: return {}" >> _agg.py
+          echo "  Yt=df[yt].values; Yp=df[yp].values" >> _agg.py
+          echo "  if df[yp].dtype.kind in 'f': Yp=(Yp>=0.5).astype(int)" >> _agg.py
+          echo "  tp=int(((Yt==1)&(Yp==1)).sum()); tn=int(((Yt==0)&(Yp==0)).sum())" >> _agg.py
+          echo "  fp=int(((Yt==0)&(Yp==1)).sum()); fn=int(((Yt==1)&(Yp==0)).sum())" >> _agg.py
+          echo "  den=(tp+fp)*(tp+fn)*(tn+fp)*(tn+fn); den=math.sqrt(den) if den else 0" >> _agg.py
+          echo "  mcc=(tp*tn - fp*fn)/den if den else float('nan')" >> _agg.py
+          echo "  return {'mcc':float(mcc),'tp':tp,'tn':tn,'fp':fp,'fn':fn}" >> _agg.py
+          echo "def infer_run_id(name):" >> _agg.py
+          echo "  import re" >> _agg.py
+          echo "  m=re.search(r'(?:bundle|out)[-_]([0-9.]+)[-_]([0-9]+)[-_]([A-Za-z0-9]+)',name)" >> _agg.py
+          echo "  if m: return f'thr={m.group(1)},hold={m.group(2)},filter={m.group(3)}'" >> _agg.py
+          echo "  if 'single' in name: return 'single'" >> _agg.py
+          echo "  return name" >> _agg.py
+          echo "TMP='tmp_extract'; os.makedirs(TMP,exist_ok=True)" >> _agg.py
+          echo "def harvest_dir(d, run_id):" >> _agg.py
+          echo "  r={'run_id':run_id}" >> _agg.py
+          echo "  t=os.path.join(d,'trades.csv'); s=os.path.join(d,'summary.json'); p=os.path.join(d,'preds_test.csv')" >> _agg.py
+          echo "  if os.path.exists(t): r.update(compute_trade_metrics(safe_read_csv(t)))" >> _agg.py
+          echo "  if os.path.exists(s):" >> _agg.py
+          echo "    try:" >> _agg.py
+          echo "      summ=json.load(open(s,'r',encoding='utf-8'))" >> _agg.py
+          echo "      for k in ['entries','exits','cum_pnl_close_based','avg_gatep','sharpe','mdd','profit_factor','win_rate']:" >> _agg.py
+          echo "        if k in summ and (k!='win_rate' or pd.isna(r.get('win_rate',float('nan')))):" >> _agg.py
+          echo "          r[k]=summ[k]" >> _agg.py
+          echo "    except: pass" >> _agg.py
+          echo "  if os.path.exists(p): r.update(compute_mcc(safe_read_csv(p)))" >> _agg.py
+          echo "  rows.append(r)" >> _agg.py
+          echo "for zp in bundles:" >> _agg.py
+          echo "  nm=os.path.splitext(os.path.basename(zp))[0]" >> _agg.py
+          echo "  rid=infer_run_id(nm)" >> _agg.py
+          echo "  od=os.path.join(TMP,nm); os.makedirs(od,exist_ok=True)" >> _agg.py
+          echo "  try:" >> _agg.py
+          echo "    with zipfile.ZipFile(zp,'r') as z: z.extractall(od)" >> _agg.py
+          echo "    harvest_dir(od,rid)" >> _agg.py
+          echo "  except: pass" >> _agg.py
+          echo "for d in std_dirs: harvest_dir(d, infer_run_id(os.path.basename(d)))" >> _agg.py
+          echo "import pandas as pd" >> _agg.py
+          echo "df=pd.DataFrame(rows)" >> _agg.py
+          echo "cols=['run_id','n_trades','win_rate','cum_pnl','avg_pnl','median_pnl','entries','exits','avg_gatep','profit_factor','sharpe','mdd','mcc','tp','tn','fp','fn']" >> _agg.py
+          echo "for c in cols:" >> _agg.py
+          echo "  if c not in df.columns: df[c]=np.nan" >> _agg.py
+          echo "df=df[cols]" >> _agg.py
+          echo "df['cum_pnl']=pd.to_numeric(df['cum_pnl'],errors='coerce')" >> _agg.py
+          echo "df['win_rate']=pd.to_numeric(df['win_rate'],errors='coerce')" >> _agg.py
+          echo "df['mcc']=pd.to_numeric(df['mcc'],errors='coerce')" >> _agg.py
+          echo "df=df.sort_values(by=['cum_pnl','win_rate','mcc'],ascending=[False,False,False],na_position='last')" >> _agg.py
+          echo "os.makedirs('final_pack',exist_ok=True)" >> _agg.py
+          echo "df.to_csv('final_pack/WFO_aggregated_summary.csv',index=False)" >> _agg.py
+          echo "bnd=os.environ.get('BND','WFO_results_all')" >> _agg.py
+          echo "FINAL=f'%s.zip' % bnd" >> _agg.py
+          echo "with zipfile.ZipFile(FINAL,'w',zipfile.ZIP_DEFLATED) as z:" >> _agg.py
+          echo "  for base,dirs,files in os.walk('all_artifacts'):" >> _agg.py
+          echo "    for fn in files:" >> _agg.py
+          echo "      p=os.path.join(base,fn)" >> _agg.py
+          echo "      z.write(p, os.path.relpath(p,'all_artifacts'))" >> _agg.py
+          echo "  z.write('final_pack/WFO_aggregated_summary.csv','WFO_aggregated_summary.csv')" >> _agg.py
+          echo "  z.writestr('README.txt','This package includes all member bundles and WFO_aggregated_summary.csv\\n')" >> _agg.py
+          python _agg.py
       - name: Upload FINAL ZIP (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ github.event.inputs.BUNDLE_NAME }}
-          path: WFO_results_all.zip
+          path: ${{ github.event.inputs.BUNDLE_NAME }}.zip
           if-no-files-found: error
