@@ -347,6 +347,11 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+      - name: Deps (finalize aggregation)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pandas numpy
       - name: Download all artifacts (pinned)
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
@@ -432,7 +437,6 @@ jobs:
           echo "    harvest_dir(od,rid)" >> _agg.py
           echo "  except: pass" >> _agg.py
           echo "for d in std_dirs: harvest_dir(d, infer_run_id(os.path.basename(d)))" >> _agg.py
-          echo "import pandas as pd" >> _agg.py
           echo "df=pd.DataFrame(rows)" >> _agg.py
           echo "cols=['run_id','n_trades','win_rate','cum_pnl','avg_pnl','median_pnl','entries','exits','avg_gatep','profit_factor','sharpe','mdd','mcc','tp','tn','fp','fn']" >> _agg.py
           echo "for c in cols:" >> _agg.py
@@ -445,7 +449,7 @@ jobs:
           echo "os.makedirs('final_pack',exist_ok=True)" >> _agg.py
           echo "df.to_csv('final_pack/WFO_aggregated_summary.csv',index=False)" >> _agg.py
           echo "bnd=os.environ.get('BND','WFO_results_all')" >> _agg.py
-          echo "FINAL=f'%s.zip' % bnd" >> _agg.py
+          echo "FINAL=f'{bnd}.zip'" >> _agg.py
           echo "with zipfile.ZipFile(FINAL,'w',zipfile.ZIP_DEFLATED) as z:" >> _agg.py
           echo "  for base,dirs,files in os.walk('all_artifacts'):" >> _agg.py
           echo "    for fn in files:" >> _agg.py
