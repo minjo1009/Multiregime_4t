@@ -1,11 +1,52 @@
-name: WFO Session Local V2.1.3
+name: WFO Session V2.1.3 (single)
+
 on:
   workflow_dispatch:
     inputs:
       PARAMS_FILE:
-        description: "Path to params file"
+        description: "params yaml path"
         required: false
         default: "conf/params.v2.yml"
+      DATA_ZIP:
+        description: "data zip at repo root (optional)"
+        required: false
+        default: "ETHUSDT_1min_2020_2025.zip"
+      CSV_GLOB:
+        description: "csv glob if no zip"
+        required: false
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      ENTRYPOINTS:
+        description: "python entrypoints (| separated)"
+        required: false
+        default: "run_4u.py|backtest/run_4u.py|run.py|backtest/runner.py"
+      PY_VERSION:
+        description: "python version"
+        required: false
+        default: "3.11"
+      GRID_THR:
+        description: "override thr list (comma, optional)"
+        required: false
+        default: ""
+      GRID_HOLD:
+        description: "override hold list (comma, optional)"
+        required: false
+        default: ""
+      GRID_FILTER:
+        description: "override filter list (comma, optional)"
+        required: false
+        default: ""
+      OUT_PREFIX:
+        description: "per-run out dir prefix"
+        required: false
+        default: "out"
+      BUNDLE_NAME:
+        description: "final single zip artifact name (no .zip)"
+        required: false
+        default: "wfo_all_results"
+      RETENTION_DAYS:
+        description: "artifact retention days"
+        required: false
+        default: "7"
 
 jobs:
   prep:
@@ -14,51 +55,54 @@ jobs:
       matrix: ${{ steps.mk.outputs.matrix }}
       csv_glob: ${{ steps.mk.outputs.csv_glob }}
     steps:
-      - name: Validate pinned SHAs
-        run: |
-          set -euo pipefail
-          echo "checkout=08c6903cd8c0fde910a37f88322edcfb5dd907a8"
-          echo "setup-python=a26af69be951a213d495a4c3e4e4022e16d87065"
-          echo "upload-artifact=ea165f8d65b6e75b540449e92b4886f43607fa02"
-
-      - name: Checkout
+      - name: Checkout (pinned SHA)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-
-      - name: Setup Python
+      - name: Setup Python (pinned SHA)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.11"
-
-      - name: Install deps
+          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pyyaml
-
+          pip install pandas numpy pyyaml
       - name: Verify params file
         run: |
           set -euo pipefail
           test -f "${{ github.event.inputs.PARAMS_FILE }}" || { echo "Error: conf/params.v2.yml missing in repo root. Add it and rerun."; exit 3; }
-
-      - name: Build matrix from params
+      - name: Build matrix from params (+ optional overrides)
         id: mk
         env:
           PARAMS_FILE: ${{ github.event.inputs.PARAMS_FILE }}
+          GRID_THR: ${{ github.event.inputs.GRID_THR }}
+          GRID_HOLD: ${{ github.event.inputs.GRID_HOLD }}
+          GRID_FILTER: ${{ github.event.inputs.GRID_FILTER }}
         run: |
           set -euo pipefail
           printf '%s\n' \
-          'import os, json, yaml' \
-          'pf=os.environ.get("PARAMS_FILE","conf/params.v2.yml")' \
+          'import os,yaml,json' \
+          'pf=os.environ["PARAMS_FILE"]' \
           'p=yaml.safe_load(open(pf,"r",encoding="utf-8"))' \
+          'csvg=p.get("csv_glob","**/*.csv")' \
           'thr=p.get("gate",{}).get("thr",[3.2,3.8])' \
           'hold=p.get("hold",[6,8])' \
           'filt=p.get("filter",["ema","none"])' \
-          'csvg=p.get("csv_glob","**/*.csv")' \
+          'def ovrd(env,cur,cast=float):' \
+          '  v=os.environ.get(env,"").strip()' \
+          '  if not v: return cur' \
+          '  xs=[x.strip() for x in v.split(",") if x.strip()]' \
+          '  if env!="GRID_FILTER":' \
+          '    try: xs=[cast(x) for x in xs]' \
+          '    except: pass' \
+          '  return xs if xs else cur' \
+          'thr=ovrd("GRID_THR",thr,float)' \
+          'hold=ovrd("GRID_HOLD",hold,int)' \
+          'filt=ovrd("GRID_FILTER",filt,str)' \
           'm={"thr":thr,"hold":hold,"filter":filt}' \
           'open("matrix.json","w",encoding="utf-8").write(json.dumps(m))' \
           'open("csv_glob.txt","w",encoding="utf-8").write(str(csvg))' \
-          > build_matrix.py
-          python build_matrix.py
+          > _mk.py
+          python _mk.py
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
           echo "csv_glob=$(cat csv_glob.txt)" >> "$GITHUB_OUTPUT"
 
@@ -70,28 +114,22 @@ jobs:
       max-parallel: 4
       matrix: ${{ fromJson(needs.prep.outputs.matrix) }}
     steps:
-      - name: Checkout
+      - name: Checkout (pinned SHA)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-
-      - name: Setup Python
+      - name: Setup Python (pinned SHA)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.11"
-
-      - name: Install deps
+          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
-
       - name: Unzip data if present
         run: |
           set -euo pipefail
-          if [ -f "ETHUSDT_1min_2020_2025.zip" ]; then
-            unzip -o "ETHUSDT_1min_2020_2025.zip" || true
-          fi
-
-      - name: Preflight (CSV detect + schema)
+          if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+      - name: Preflight CSV schema
         run: |
           set -euo pipefail
           printf '%s\n' \
@@ -103,38 +141,64 @@ jobs:
           'df=pd.read_csv(paths[0],nrows=5)' \
           'miss=[c for c in req if c not in df.columns]' \
           'assert not miss, f"Missing columns: {miss} in {paths[0]}"' \
-          'print("OK preflight:",paths[0])' \
-          > _ci_preflight.py
-          python _ci_preflight.py "${{ needs.prep.outputs.csv_glob }}"
-
-      - name: Run backtest (matrix member)
+          'print("OK:", paths[0])' \
+          > _preflight.py
+          python _preflight.py "${{ needs.prep.outputs.csv_glob }}"
+      - name: Run backtest (matrix)
         env:
           THR: ${{ matrix.thr }}
           HOLD: ${{ matrix.hold }}
           FILTER: ${{ matrix.filter }}
+          ENTRYPOINTS: ${{ github.event.inputs.ENTRYPOINTS }}
+          OUT_PREFIX: ${{ github.event.inputs.OUT_PREFIX }}
         run: |
           set -euo pipefail
-          set +e
-          python run_4u.py || python backtest/run_4u.py || python run.py || python backtest/runner.py
-          rc=$?
-          set -e
-          mkdir -p out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}
+          IFS='|' read -ra EPS <<< "${ENTRYPOINTS}"
+          rc=1
+          for ep in "${EPS[@]}"; do
+            if [ -f "$ep" ]; then
+              python "$ep" && rc=0 && break || true
+            fi
+          done
+          mkdir -p "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}"
           [ -f summary.json ] || echo "{}" > summary.json
           [ -f gating_debug.json ] || echo "{}" > gating_debug.json
           [ -f preds_test.csv ] || echo "empty" > preds_test.csv
           [ -f trades.csv ] || echo "empty" > trades.csv
-          mv -f summary.json out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}/
-          mv -f gating_debug.json out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}/
-          mv -f preds_test.csv out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}/
-          mv -f trades.csv out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}/
-          cd out_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}
-          zip -r ../bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}.zip .
+          mv -f summary.json "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}/"
+          mv -f gating_debug.json "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}/"
+          mv -f preds_test.csv "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}/"
+          mv -f trades.csv "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}/"
+          cd "${OUT_PREFIX}_${THR}_${HOLD}_${FILTER}"
+          zip -r "../bundle_${THR}_${HOLD}_${FILTER}.zip" .
           cd ..
           exit 0
-
-      - name: Upload bundle (this member)
+      - name: Upload member bundle (pinned SHA)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}
           path: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}.zip
           if-no-files-found: warn
+          retention-days: ${{ github.event.inputs.RETENTION_DAYS }}
+
+  finalize:
+    needs: grid
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts (pinned SHA)
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          path: all_artifacts
+      - name: Make single zip
+        run: |
+          set -euo pipefail
+          cd all_artifacts
+          zip -r "../${{ github.event.inputs.BUNDLE_NAME }}.zip" .
+          cd ..
+      - name: Upload SINGLE file (pinned SHA)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ github.event.inputs.BUNDLE_NAME }}
+          path: ${{ github.event.inputs.BUNDLE_NAME }}.zip
+          if-no-files-found: error
+          retention-days: ${{ github.event.inputs.RETENTION_DAYS }}
