@@ -1,0 +1,251 @@
+name: WFO All-in-One V2.1.3 (canonical-runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      PARAMS_FILE:
+        description: "params path (dot preferred, fallback underscore)"
+        required: false
+        default: "conf/params.v2.yml"
+      DATA_ZIP:
+        description: "data zip at repo root (optional)"
+        required: false
+        default: "ETHUSDT_1min_2020_2025.zip"
+      CSV_GLOB:
+        description: "csv glob override (if no zip)"
+        required: false
+        default: "**/*ETHUSDT*1min*2020*2025*.csv"
+      PY_VERSION:
+        description: "python version"
+        required: false
+        default: "3.11"
+      RUN_SINGLE:
+        description: "also run single baseline? (true/false)"
+        required: false
+        default: "true"
+      BUNDLE_NAME:
+        description: "final single zip name (no .zip)"
+        required: false
+        default: "WFO_results_all"
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      csv_glob: ${{ steps.mk.outputs.csv_glob }}
+      params_used: ${{ steps.params_out.outputs.PF }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyyaml
+      - name: Resolve params (dot -> underscore fallback)
+        id: params_out
+        run: |
+          PF="${{ github.event.inputs.PARAMS_FILE }}"
+          if [ ! -f "$PF" ] && [ "$PF" = "conf/params.v2.yml" ] && [ -f "conf/params_v2.yml" ]; then
+            PF="conf/params_v2.yml"
+          fi
+          if [ ! -f "$PF" ]; then
+            echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
+          fi
+          echo "PF=$PF" >> "$GITHUB_OUTPUT"
+      - name: Build matrix from params.gate/hold/filter
+        id: mk
+        env:
+          PF: ${{ steps.params_out.outputs.PF }}
+        run: |
+          python - <<'PY'
+          import yaml, json, os
+          p=yaml.safe_load(open(os.environ["PF"],"r",encoding="utf-8"))
+          thr=(p.get("gate") or {}).get("thr",[3.2,3.8])
+          hold=p.get("hold",[6,8])
+          filt=p.get("filter",["ema","none"])
+          print("thr:",thr,"hold:",hold,"filt:",filt)
+          open("matrix.json","w",encoding="utf-8").write(json.dumps({"thr":thr,"hold":hold,"filter":filt}))
+          open("csv_glob.txt","w",encoding="utf-8").write(str(p.get("csv_glob","**/*.csv")))
+          PY
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "csv_glob=$(cat csv_glob.txt)" >> "$GITHUB_OUTPUT"
+
+  single:
+    if: ${{ github.event.inputs.RUN_SINGLE == 'true' }}
+    needs: prep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyyaml
+      - name: Unzip data (optional)
+        run: |
+          if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+      - name: Run single via canonical runner
+        env:
+          PF: ${{ needs.prep.outputs.params_used }}
+          CSVG: ${{ needs.prep.outputs.csv_glob }}
+        run: |
+          OUT="out_single"
+          python ci/wfo_entry.py             --params "$PF"             --data-root "${GITHUB_WORKSPACE}"             --csv-glob "$CSVG"             --outdir "$OUT"
+          ( cd "$OUT" && zip -rq ../bundle_single.zip . )
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bundle_single
+          path: bundle_single.zip
+          if-no-files-found: warn
+
+  wfo:
+    needs: prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.prep.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyyaml
+      - name: Unzip data (optional)
+        run: |
+          if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+      - name: Run WFO member via canonical runner
+        env:
+          PF: ${{ needs.prep.outputs.params_used }}
+          CSVG: ${{ needs.prep.outputs.csv_glob }}
+          THR: ${{ matrix.thr }}
+          HOLD: ${{ matrix.hold }}
+          FILTER: ${{ matrix.filter }}
+        run: |
+          OUT="out_${THR}_${HOLD}_${FILTER}"
+          python ci/wfo_entry.py             --params "$PF"             --data-root "${GITHUB_WORKSPACE}"             --csv-glob "$CSVG"             --thr "$THR" --hold "$HOLD" --filter "$FILTER"             --outdir "$OUT"
+          ( cd "$OUT" && zip -rq "../bundle_${THR}_${HOLD}_${FILTER}.zip" . )
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}
+          path: bundle_${{ matrix.thr }}_${{ matrix.hold }}_${{ matrix.filter }}.zip
+          if-no-files-found: warn
+
+  finalize:
+    needs: [wfo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Deps (finalize aggregation)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          path: all_artifacts
+      - name: Debug list
+        run: |
+          echo "==== all_artifacts tree ===="; ls -R all_artifacts || true
+          echo "ZIP files found:"; find all_artifacts -type f -name "*.zip" -printf "%p (%k KB)
+" | sort || true
+      - name: Aggregate & Pack FINAL ZIP
+        env:
+          BND: ${{ github.event.inputs.BUNDLE_NAME }}
+        run: |
+          python - <<'PY'
+          import os,zipfile,glob,json,math
+          import pandas as pd, numpy as np
+          ROOT='all_artifacts'
+          bundles=glob.glob(os.path.join(ROOT,'**','*.zip'),recursive=True)
+          rows=[]
+          TMP='tmp_extract'; os.makedirs(TMP,exist_ok=True)
+          def safe_read_csv(p):
+            try: import pandas as pd; return pd.read_csv(p)
+            except: import pandas as pd; return pd.DataFrame()
+          def compute_trade_metrics(df):
+            import numpy as np
+            n=len(df); r={'n_trades':n}
+            if n==0: r.update({'win_rate':np.nan,'cum_pnl':0.0,'avg_pnl':np.nan,'median_pnl':np.nan,'profit_factor':np.nan}); return r
+            pnl_col=None
+            for c in ['pnl_close_based','pnl','pnl_value','pnl_usd','pnl_krw','pnl_pct','pnl_percent']:
+              if c in df.columns: pnl_col=c; break
+            if pnl_col is None: r.update({'win_rate':np.nan,'cum_pnl':np.nan,'avg_pnl':np.nan,'median_pnl':np.nan,'profit_factor':np.nan}); return r
+            pnl=pd.to_numeric(df[pnl_col],errors='coerce').fillna(0.0)
+            pos=float(pnl[pnl>0].sum()); neg=float(pnl[pnl<0].sum())
+            r['cum_pnl']=float(pnl.sum()); r['avg_pnl']=float(pnl.mean()); r['median_pnl']=float(pnl.median())
+            r['win_rate']=float((pnl>0).sum())/max(n,1)
+            r['profit_factor']=(pos/abs(neg)) if neg!=0 else np.nan
+            return r
+          def compute_mcc(df):
+            if df is None or df.empty: return {}
+            m={c.lower():c for c in df.columns}
+            yt=next((m.get(k) for k in ['y_true','true','label','target'] if k in m),None)
+            yp=next((m.get(k) for k in ['y_pred','pred','prediction','pred_label'] if k in m),None)
+            if not yt or not yp: return {}
+            Yt=df[yt].values; Yp=df[yp].values
+            if df[yp].dtype.kind in 'f': Yp=(Yp>=0.5).astype(int)
+            tp=int(((Yt==1)&(Yp==1)).sum()); tn=int(((Yt==0)&(Yp==0)).sum())
+            fp=int(((Yt==0)&(Yp==1)).sum()); fn=int(((Yt==1)&(Yp==0)).sum())
+            den=(tp+fp)*(tp+fn)*(tn+fp)*(tn+fn); den=math.sqrt(den) if den else 0
+            mcc=(tp*tn - fp*fn)/den if den else float('nan')
+            return {'mcc':float(mcc),'tp':tp,'tn':tn,'fp':fp,'fn':fn}
+          def infer_run_id(name):
+            import re
+            m=re.search(r'(?:bundle|out)[-_]([0-9.]+)[-_]([0-9]+)[-_]([A-Za-z0-9]+)',name)
+            if m: return f"thr={m.group(1)},hold={m.group(2)},filter={m.group(3)}"
+            if 'single' in name: return 'single'
+            return name
+          for zp in bundles:
+            nm=os.path.splitext(os.path.basename(zp))[0]
+            rid=infer_run_id(nm)
+            od=os.path.join(TMP,nm); os.makedirs(od,exist_ok=True)
+            try:
+              with zipfile.ZipFile(zp,'r') as z: z.extractall(od)
+              t=os.path.join(od,'trades.csv'); s=os.path.join(od,'summary.json'); p=os.path.join(od,'preds_test.csv')
+              r={'run_id':rid}
+              import pandas as pd, numpy as np
+              if os.path.exists(t): r.update(compute_trade_metrics(safe_read_csv(t)))
+              if os.path.exists(s):
+                try:
+                  summ=json.load(open(s,'r',encoding='utf-8'))
+                  for k in ['entries','exits','cum_pnl_close_based','avg_gatep','sharpe','mdd','profit_factor','win_rate']:
+                    if k in summ and (k!='win_rate' or pd.isna(r.get('win_rate',np.nan))):
+                      r[k]=summ[k]
+                except: pass
+              if os.path.exists(p): r.update(compute_mcc(safe_read_csv(p)))
+              rows.append(r)
+            except: pass
+          import pandas as pd, numpy as np
+          df=pd.DataFrame(rows)
+          cols=['run_id','n_trades','win_rate','cum_pnl','avg_pnl','median_pnl','entries','exits','avg_gatep','profit_factor','sharpe','mdd','mcc','tp','tn','fp','fn']
+          for c in cols:
+            if c not in df.columns: df[c]=np.nan
+          df=df[cols]
+          for c in ['cum_pnl','win_rate','mcc']: df[c]=pd.to_numeric(df[c],errors='coerce')
+          df=df.sort_values(by=['cum_pnl','win_rate','mcc'],ascending=[False,False,False],na_position='last')
+          os.makedirs('final_pack',exist_ok=True)
+          df.to_csv('final_pack/WFO_aggregated_summary.csv',index=False)
+          FINAL=f"{os.environ.get('BND','WFO_results_all')}.zip"
+          with zipfile.ZipFile(FINAL,'w',zipfile.ZIP_DEFLATED) as z:
+            for base,dirs,files in os.walk('all_artifacts'):
+              for fn in files:
+                p=os.path.join(base,fn)
+                z.write(p, os.path.relpath(p,'all_artifacts'))
+            z.write('final_pack/WFO_aggregated_summary.csv','WFO_aggregated_summary.csv')
+            z.writestr('README.txt','This package includes all member bundles and WFO_aggregated_summary.csv\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ github.event.inputs.BUNDLE_NAME }}
+          path: ${{ github.event.inputs.BUNDLE_NAME }}.zip
+          if-no-files-found: error
