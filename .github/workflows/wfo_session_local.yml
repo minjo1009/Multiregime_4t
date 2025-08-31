@@ -1,5 +1,4 @@
-
-name: WFO_Session_Local_v213_splitfix
+name: WFO_Session_Local_v213_splitfix2
 
 on:
   workflow_dispatch:
@@ -24,11 +23,6 @@ on:
         required: false
         default: "7.5"
         type: string
-      CHAMPION_CONFIG:
-        description: "Champion config (used only if params.v2.yml not present)"
-        required: false
-        default: "grid_p0.83_tp2.2_sl0.45_cd34_mh12_ofi0.42_thi0.74"
-        type: string
       SPLITS:
         description: "Number of WFO splits"
         required: false
@@ -51,44 +45,44 @@ jobs:
       - name: Validate pinned SHAs exist
         run: |
           set -euo pipefail
-          echo "[PIN] validating SHAs by fetching commits..."
+          echo "[PIN] validating SHAs..."
           mkdir -p _pincheck && cd _pincheck
 
           git -c init.defaultBranch=main init checkout && cd checkout
-          git fetch --depth 1 https://github.com/actions/checkout "${CHECKOUT_SHA}"
-          [ "$(git cat-file -t "${CHECKOUT_SHA}")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/checkout "$CHECKOUT_SHA"
+          [ "$(git cat-file -t "$CHECKOUT_SHA")" = "commit" ] || { echo "::error::checkout SHA not a commit"; exit 2; }
           cd ..
 
           git -c init.defaultBranch=main init setup_python && cd setup_python
-          git fetch --depth 1 https://github.com/actions/setup-python "${SETUP_PYTHON_SHA}"
-          [ "$(git cat-file -t "${SETUP_PYTHON_SHA}")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/setup-python "$SETUP_PYTHON_SHA"
+          [ "$(git cat-file -t "$SETUP_PYTHON_SHA")" = "commit" ] || { echo "::error::setup-python SHA not a commit"; exit 2; }
           cd ..
 
           git -c init.defaultBranch=main init upload_artifact && cd upload_artifact
-          git fetch --depth 1 https://github.com/actions/upload-artifact "${UPLOAD_ARTIFACT_SHA}"
-          [ "$(git cat-file -t "${UPLOAD_ARTIFACT_SHA}")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
+          git fetch --depth 1 https://github.com/actions/upload-artifact "$UPLOAD_ARTIFACT_SHA"
+          [ "$(git cat-file -t "$UPLOAD_ARTIFACT_SHA")" = "commit" ] || { echo "::error::upload-artifact SHA not a commit"; exit 2; }
           cd ..
           echo "[PIN] ok"
 
-  _shared:
-    name: setup_shared
+  single_run:
     needs: validate_shas
     runs-on: ubuntu-latest
-    outputs:
-      done: ${{ steps.finish.outputs.done }}
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+
       - name: Install base deps
         run: |
           set -euo pipefail
           python -V
           pip install --upgrade pip
           pip install pandas numpy pyyaml pytz
+
       - name: Prepare workspace
         run: |
           set -euo pipefail
@@ -98,85 +92,17 @@ jobs:
           cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
           unzip -q "${WORK}/code.zip" -d "${WORK}/code"
           unzip -q "${WORK}/data.zip" -d "${WORK}/data"
-          # If repo has conf/params.v2.yml, keep it; else create from CHAMPION_CONFIG
-          if [ -f "conf/params.v2.yml" ]; then
-            echo "[PARAMS] using repo conf/params.v2.yml"
-          else
-            echo "[PARAMS] generating conf/params.v2.yml from CHAMPION_CONFIG"
-            python - <<'PY'
-import os, re, yaml, sys
-s=os.environ.get("CHAMPION_CONFIG","")
-d={}
-for k,v in re.findall(r"([a-zA-Z]+)([-+]?[0-9]+(?:\.[0-9]+)?)", s):
-    k=k.lower(); v=float(v); d[k]=v
-params={
-  "regime":{"trend_hi_pctile": d.get("thi",0.74)},
-  "orderflow":{"ofi_thr": d.get("ofi",0.42)},
-  "entry":{"p_thr":{"trend": d.get("p", d.get("grid_p",0.83)), "range": d.get("p", d.get("grid_p",0.83))},
-           "cooldown_bars": int(d.get("cd",34))},
-  "exit":{"tp_atr": d.get("tp",2.2), "sl_atr": d.get("sl",0.45), "max_hold": int(d.get("mh",12))}
-}
-yaml.safe_dump(params, open("conf/params.v2.yml","w"), sort_keys=False)
-print("[PARAMS] wrote conf/params.v2.yml")
-PY
+          # Require params in repo root
+          if [ ! -f "conf/params.v2.yml" ]; then
+            echo "::error::conf/params.v2.yml missing in repo root. Add it and rerun."
+            exit 3
           fi
-          # Overlay params into likely codepack conf paths
+          # Also overlay into codepack paths (safety)
           for d in work/code work/code/backtest work/code/src; do
             mkdir -p "$d/conf"
             cp -f conf/params.v2.yml "$d/conf/params.v2.yml" || true
           done
-      - name: Write preflight (split & session aware)
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-import os, glob, pandas as pd, yaml
-from pathlib import Path
-def run(mode, **env):
-    root="work/data"
-    patt=os.environ.get("CSV_GLOB","**/*.csv")
-    g=glob.glob(os.path.join(root,patt), recursive=True)
-    if not g: raise SystemExit("No CSV found under work/data")
-    df=pd.read_csv(g[0])
-    df["dt_utc"]=pd.to_datetime(df["open_time"], utc=True, errors="coerce")
-    out="work/input.csv"
-    if mode=="wfo":
-        K=int(env.get("K",3)); I=int(env.get("I",0))
-        edges=pd.date_range(df["dt_utc"].min(), df["dt_utc"].max(), periods=K+1)
-        s,e=edges[I], edges[I+1]
-        df=df[(df["dt_utc"]>=s)&(df["dt_utc"]<e)]
-    elif mode=="session":
-        S=env.get("SESSION","ASIA").upper()
-        TZ=env.get("TZ","Asia/Seoul")
-        dfl=df.copy()
-        dfl["dt_loc"]=dfl["dt_utc"].dt.tz_convert(TZ)
-        hr=dfl["dt_loc"].dt.hour
-        if S=="ASIA": mask=(hr>=9)&(hr<17)
-        elif S=="EU": mask=(hr>=17)|(hr<1)
-        else: mask=(hr>=1)&(hr<9)
-        df=dfl[mask].drop(columns=["dt_loc"])
-    df.to_csv(out, index=False)
-    Path("conf").mkdir(exist_ok=True)
-    cfg={"data_path": out, "fee_bps": float(os.environ.get("FEES_BPS","7.5"))}
-    yaml.safe_dump(cfg, open("conf/config.effective.yml","w"), sort_keys=False)
-    print(f"[PREFLIGHT] mode={mode} rows={len(df)}")
-if __name__=="__main__":
-    # write a small launcher so later steps can call it with envs
-    Path("work/preflight_strict.py").write_text(run.__code__.co_consts[0] if False else __file__)
-PY
-          # Instead of writing a module, we'll invoke inline python in each run step
-      - id: finish
-        run: echo "done=1" >> "$GITHUB_OUTPUT"
 
-  single_run:
-    needs: _shared
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (pinned)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-      - name: Restore prepared workspace
-        run: |
-          set -euo pipefail
-          ls -al
       - name: Preflight (single)
         env:
           CSV_GLOB: ${{ inputs.CSV_GLOB }}
@@ -195,9 +121,8 @@ df.to_csv("work/input.csv", index=False)
 yaml.safe_dump({"data_path":"work/input.csv","fee_bps":float(os.environ.get("FEES_BPS","7.5"))}, open("conf/config.effective.yml","w"), sort_keys=False)
 print("[PREFLIGHT] single rows", len(df))
 PY
+
       - name: Run single
-        env:
-          CSV_GLOB: ${{ inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
           EP=""
@@ -210,6 +135,7 @@ PY
             --data-root work --csv-glob "input.csv" \
             --outdir "$outdir" --params conf/params.v2.yml \
             > _out_4u/logs/stdout_single.txt 2> _out_4u/logs/stderr_single.txt || true
+
       - name: Post-summarize single
         env:
           OUTDIR: work/out/single
@@ -230,13 +156,12 @@ if tr.exists() and tr.stat().st_size>0:
             if col in df.columns:
                 r=df[col].astype(float).dropna()
                 rt=2*fees/10000.0
-                d={"entries": int(len(r)),
-                   "avg_pnl_per_trade": float(r.mean()*100.0),
-                   "avg_pnl_per_trade_after_fee": float((r-rt).mean()*100.0),
-                   "cum_pnl": float(r.sum()),
-                   "cum_pnl_cost_adj": float((r-rt).sum()),
-                   "fee_roundtrip_bps": 2*fees, "source":"trades.csv"}
-                write(d); raise SystemExit(0)
+                write({"entries": int(len(r)),
+                       "avg_pnl_per_trade": float(r.mean()*100.0),
+                       "avg_pnl_per_trade_after_fee": float((r-rt).mean()*100.0),
+                       "cum_pnl": float(r.sum()),
+                       "cum_pnl_cost_adj": float((r-rt).sum()),
+                       "fee_roundtrip_bps": 2*fees,"source":"trades.csv"}); raise SystemExit(0)
     except Exception as e:
         print("[POST] trades.csv parse failed:", e)
 if sj.exists():
@@ -248,13 +173,14 @@ if sj.exists():
         cum=avg/100.0*entries; cum_adj=after/100.0*entries
         write({"entries":entries,"avg_pnl_per_trade":avg,"avg_pnl_per_trade_after_fee":after,
                "cum_pnl":cum,"cum_pnl_cost_adj":cum_adj,"fee_roundtrip_bps":2*fees,"source":"summary.json(avg)"}); raise SystemExit(0)
-    cum=d.get("cum_pnl_close_based"); 
+    cum=d.get("cum_pnl_close_based")
     if cum is not None and entries>0:
         cum=float(cum); avg_dec=cum/entries; after_dec=avg_dec-(2*fees/10000.0)
         write({"entries":entries,"avg_pnl_per_trade":avg_dec*100.0,"avg_pnl_per_trade_after_fee":after_dec*100.0,
                "cum_pnl":cum,"cum_pnl_cost_adj":after_dec*entries,"fee_roundtrip_bps":2*fees,"source":"summary.json(proxy)"}); raise SystemExit(0)
 print("[POST] No sources to summarize.")
 PY
+
       - name: Upload single artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -265,11 +191,36 @@ PY
             _out_4u/logs
 
   wfo:
-    needs: _shared
+    needs: validate_shas
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          pip install pandas numpy pyyaml pytz
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          WORK=work
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs" conf
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          if [ ! -f "conf/params.v2.yml" ]; then
+            echo "::error::conf/params.v2.yml missing in repo root. Add it and rerun."
+            exit 3
+          fi
+          for d in work/code work/code/backtest work/code/src; do
+            mkdir -p "$d/conf"
+            cp -f conf/params.v2.yml "$d/conf/params.v2.yml" || true
+          done
       - name: Run WFO splits
         env:
           CSV_GLOB: ${{ inputs.CSV_GLOB }}
@@ -287,24 +238,21 @@ PY
           for i in $(seq 0 $((K-1))); do
             echo "[WFO] split $i/$((K-1))"
             python - <<'PY'
-import os, glob, pandas as pd, yaml
-from pathlib import Path
+import os, glob, pandas as pd
 patt=os.environ.get("CSV_GLOB","**/*.csv")
 g=glob.glob(os.path.join("work","data",patt), recursive=True)
 df=pd.read_csv(g[0]); df["dt_utc"]=pd.to_datetime(df["open_time"], utc=True, errors="coerce")
-K=int(os.environ.get("K","3")); I=int(os.environ.get("I","0"))
+K=int(os.environ.get("K","3")); i=int(os.environ.get("i","0"))
 edges=pd.date_range(df["dt_utc"].min(), df["dt_utc"].max(), periods=K+1)
-s,e=edges[int(os.environ.get("i_env","0"))], edges[int(os.environ.get("i_env","0"))+1]
-mask=(df["dt_utc"]>=s)&(df["dt_utc"]<e)
-df[mask].to_csv("work/input.csv", index=False)
-yaml.safe_dump({"data_path":"work/input.csv","fee_bps":float(os.environ.get("FEES_BPS","7.5"))}, open("conf/config.effective.yml","w"), sort_keys=False)
-print("[PREFLIGHT] wfo rows", mask.sum())
+s,e=edges[i], edges[i+1]
+df[(df["dt_utc"]>=s)&(df["dt_utc"]<e)].to_csv("work/input.csv", index=False)
+print("[PREFLIGHT] wfo rows", len(pd.read_csv("work/input.csv")))
 PY
             out="work/out/wfo/split_${i}"; mkdir -p "$out"
-            PYTHONPATH=work/code:work/code/src I="$i" i_env="$i" K="$K" python "$EP" \
+            i="$i" PYTHONPATH=work/code:work/code/src python "$EP" \
               --data-root work --csv-glob "input.csv" --outdir "$out" --params conf/params.v2.yml \
               > "_out_4u/logs/stdout_wfo_${i}.txt" 2> "_out_4u/logs/stderr_wfo_${i}.txt" || true
-            OUTDIR="$out" python - <<'PY'
+            OUTDIR="$out" FEES_BPS="${FEES_BPS}" python - <<'PY'
 import os,json,glob,pandas as pd
 from pathlib import Path
 fees=float(os.environ.get("FEES_BPS","7.5"))
@@ -350,11 +298,36 @@ PY
             _out_4u/logs
 
   sessions:
-    needs: _shared
+    needs: validate_shas
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          set -euo pipefail
+          pip install pandas numpy pyyaml pytz
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          WORK=work
+          mkdir -p "${WORK}/code" "${WORK}/data" "_out_4u/logs" conf
+          cp -f "${{ inputs.CODE_ZIP_PATH }}" "${WORK}/code.zip"
+          cp -f "${{ inputs.DATA_ZIP_PATH }}" "${WORK}/data.zip"
+          unzip -q "${WORK}/code.zip" -d "${WORK}/code"
+          unzip -q "${WORK}/data.zip" -d "${WORK}/data"
+          if [ ! -f "conf/params.v2.yml" ]; then
+            echo "::error::conf/params.v2.yml missing in repo root. Add it and rerun."
+            exit 3
+          fi
+          for d in work/code work/code/backtest work/code/src; do
+            mkdir -p "$d/conf"
+            cp -f conf/params.v2.yml "$d/conf/params.v2.yml" || true
+          done
       - name: Run sessions (ASIA/EU/US)
         env:
           CSV_GLOB: ${{ inputs.CSV_GLOB }}
@@ -369,9 +342,8 @@ PY
           [ -z "$EP" ] && [ -f work/code/backtest/runner.py ] && EP="work/code/backtest/runner.py"
           for S in ASIA EU US; do
             echo "[SESSION] $S"
-            python - <<'PY'
-import os, glob, pandas as pd, yaml
-from pathlib import Path
+            S="$S" TZ="${TZ}" python - <<'PY'
+import os, glob, pandas as pd
 patt=os.environ.get("CSV_GLOB","**/*.csv")
 g=glob.glob(os.path.join("work","data",patt), recursive=True)
 df=pd.read_csv(g[0]); df["dt_utc"]=pd.to_datetime(df["open_time"], utc=True, errors="coerce")
@@ -382,14 +354,13 @@ if S=="ASIA": mask=(hr>=9)&(hr<17)
 elif S=="EU": mask=(hr>=17)|(hr<1)
 else: mask=(hr>=1)&(hr<9)
 dfl[mask].drop(columns=["dt_loc"]).to_csv("work/input.csv", index=False)
-yaml.safe_dump({"data_path":"work/input.csv","fee_bps":float(os.environ.get("FEES_BPS","7.5"))}, open("conf/config.effective.yml","w"), sort_keys=False)
 print("[PREFLIGHT] session", S, "rows", int(mask.sum()))
 PY
             out="work/out/sessions/${S}"; mkdir -p "$out"
             S="$S" PYTHONPATH=work/code:work/code/src python "$EP" \
               --data-root work --csv-glob "input.csv" --outdir "$out" --params conf/params.v2.yml \
               > "_out_4u/logs/stdout_${S}.txt" 2> "_out_4u/logs/stderr_${S}.txt" || true
-            OUTDIR="$out" python - <<'PY'
+            OUTDIR="$out" FEES_BPS="${FEES_BPS}" python - <<'PY'
 import os,json,glob,pandas as pd
 from pathlib import Path
 fees=float(os.environ.get("FEES_BPS","7.5"))
