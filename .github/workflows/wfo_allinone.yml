@@ -18,7 +18,7 @@ on:
       PY_VERSION:
         description: "python version"
         required: false
-        default: "3.11"
+        default: "3.10"   # numba 안정권
       RUN_SINGLE:
         description: "also run single baseline? (true/false)"
         required: false
@@ -59,11 +59,11 @@ jobs:
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
 
-      - name: Deps
+      - name: Deps (pinned for numba)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml
+          python -m pip install --upgrade pip wheel setuptools
+          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
       - name: Resolve params (dot -> underscore fallback)
         id: params_out
@@ -135,16 +135,19 @@ jobs:
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
 
-      - name: Deps
+      - name: Deps (pinned for numba)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml
+          python -m pip install --upgrade pip wheel setuptools
+          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
       - name: Unzip data (optional)
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+
+      - name: Export PYTHONPATH
+        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
 
       - name: Run SINGLE via canonical runner (unzip+overlay+runpy)
         env:
@@ -185,16 +188,19 @@ jobs:
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
 
-      - name: Deps
+      - name: Deps (pinned for numba)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml
+          python -m pip install --upgrade pip wheel setuptools
+          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
       - name: Unzip data (optional)
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+
+      - name: Export PYTHONPATH
+        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
 
       - name: Run WFO member via canonical runner (unzip+overlay+runpy)
         env:
@@ -230,13 +236,13 @@ jobs:
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Deps (finalize aggregation)
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pandas numpy
+          python -m pip install --upgrade pip wheel setuptools
+          pip install "numpy==1.26.4" "pandas==2.2.2"
 
       - name: Download all artifacts (pinned)
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
