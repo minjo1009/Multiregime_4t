@@ -1,25 +1,83 @@
-# ci/wfo_entry.py  (hardened autodetect v4 with script fallback)
-import argparse, glob, os, json, importlib, importlib.util, yaml, pathlib, datetime, sys, re, inspect, runpy
-
-EXCLUDE_DIR_HINTS = ["ci/", "/ci/", "/.github/", "/tests/", "/test/"]
-EXCLUDE_FILE_HINTS = ["preflight", "pre_flight", "check", "lint", "setup"]
-
-PREFERRED_PATH_HINTS = ["backtest", "strategy", "runner", "train", "run_4u", "run"]
-
-DESIRED_ARGS = ["csv_paths","params","outdir","thr","hold","filter_name"]
+# ci/wfo_entry.py  (v5: codepack unzip + params overlay + runpy argv)
+import argparse, glob, os, json, yaml, pathlib, datetime, sys, runpy, shutil
 
 def load_params(p):
     with open(p, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
+def ensure_dir(d): pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+
 def pick_csvs(data_root, csv_glob):
-    pat = os.path.join(data_root or ".", csv_glob)
-    paths = sorted(glob.glob(pat, recursive=True))
+    import glob as _g, os as _o
+    pat = _o.path.join(data_root or ".", csv_glob)
+    paths = sorted(_g.glob(pat, recursive=True))
     if not paths:
-        raise FileNotFoundError(f"No CSV matched: {pat}")
+        raise SystemExit(f"No CSV matched: {pat}")
     return paths
 
-def ensure_dir(d): pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+def unzip_codepack_if_any(workspace="."):
+    # find a likely strategy codepack at repo root
+    cands = []
+    for fn in os.listdir(workspace):
+        if fn.endswith(".zip") and "strategy" in fn.lower():
+            cands.append(os.path.join(workspace, fn))
+    extracted = []
+    for zp in cands:
+        try:
+            import zipfile
+            with zipfile.ZipFile(zp,'r') as z:
+                z.extractall(workspace)
+                extracted.extend(z.namelist())
+            print(f"[wfo_entry] extracted codepack: {os.path.basename(zp)} ({len(extracted)} files)")
+        except Exception as e:
+            print(f"[wfo_entry] skip codepack {zp}: {e}")
+    return extracted
+
+def overlay_params(cfg, thr=None, hold=None, filt=None):
+    # Map WFO knobs to this strategy's params
+    p = dict(cfg) if isinstance(cfg, dict) else {}
+    # entry p_thr: set both trend/range if thr provided
+    if thr is not None:
+        ep = (p.get("entry") or {}).get("p_thr") or {}
+        ep["trend"] = float(thr)
+        ep["range"] = float(thr)
+        p.setdefault("entry", {})["p_thr"] = ep
+    # exit min_hold: set from hold if provided
+    if hold is not None:
+        ex = p.get("exit") or {}
+        ex["min_hold"] = int(hold)
+        p["exit"] = ex
+    # 'filter' is not used by this code; record in meta only
+    return p
+
+def write_params_file(p, outdir):
+    ensure_dir(outdir)
+    outp = os.path.join(outdir, "params_used.yml")
+    with open(outp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(p, f, sort_keys=False, allow_unicode=True)
+    return outp
+
+def find_runner_path(workspace="."):
+    pref = ["backtest/runner.py", "run_4u.py", "runner.py", "run.py"]
+    for rel in pref:
+        cand = os.path.join(workspace, rel)
+        if os.path.isfile(cand):
+            return cand
+    # search widely
+    for root,dirs,files in os.walk(workspace):
+        for fn in files:
+            if fn.endswith(".py") and fn.lower() in {"runner.py","run_4u.py","run.py"}:
+                return os.path.join(root, fn)
+    raise FileNotFoundError("runner script not found after codepack extraction")
+
+def run_script_with_argv(py_path, argv):
+    old_argv = list(sys.argv)
+    try:
+        sys.argv = argv
+        print("[wfo_entry] exec", py_path, "argv:", " ".join(argv[1:]))
+        runpy.run_path(py_path, run_name="__main__")
+    finally:
+        sys.argv = old_argv
 
 def write_minimum(outdir):
     ensure_dir(outdir)
@@ -34,138 +92,6 @@ def write_minimum(outdir):
         if not os.path.exists(fp):
             with open(fp, "w", encoding="utf-8") as f: f.write(body)
 
-def _import_from_path(py_path):
-    spec = importlib.util.spec_from_file_location("wfo_dyn", py_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore
-    return mod
-
-def _should_exclude_path(path):
-    low = path.replace("\\\\","/").lower()
-    if any(h in low for h in EXCLUDE_DIR_HINTS): return True
-    base = os.path.basename(low)
-    if any(h in base for h in EXCLUDE_FILE_HINTS): return True
-    return False
-
-def _path_pref_score(path):
-    low = path.replace("\\\\","/").lower()
-    score = 0
-    for i,kw in enumerate(PREFERRED_PATH_HINTS):
-        if kw in low: score += (10 - i)
-    return score
-
-def _score_callable(func, source_path):
-    try:
-        sig = inspect.signature(func)
-        params = set(sig.parameters.keys())
-        score = sum(1 for k in DESIRED_ARGS if k in params)
-        if any(p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for p in sig.parameters.values()):
-            score -= 1
-    except Exception:
-        score = 0
-    score += _path_pref_score(source_path or "")
-    return score
-
-def _call_compatible(func, **kwargs):
-    try:
-        sig = inspect.signature(func)
-        accepted = {k:v for k,v in kwargs.items() if k in sig.parameters}
-        return func(**accepted)
-    except Exception:
-        try:
-            return func()
-        except Exception as e2:
-            raise e2
-
-def _find_callable(entry_module, entry_script, fn_candidates):
-    for p in [os.getcwd(), os.path.join(os.getcwd(), "src")]:
-        if p not in sys.path: sys.path.insert(0, p)
-
-    candidates = []  # (callable, how, source_path, score)
-
-    def consider_module(mod_name, how_hint):
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:
-            return
-        for fn in fn_candidates:
-            if fn and hasattr(mod, fn):
-                obj = getattr(mod, fn)
-                src = getattr(obj, "__code__", None)
-                srcp = getattr(src, "co_filename", mod.__file__ if hasattr(mod,'__file__') else "")
-                if srcp and _should_exclude_path(srcp): continue
-                sc = _score_callable(obj, srcp or "")
-                candidates.append((obj, f"{how_hint}:{mod_name}", srcp or "", sc))
-
-    def consider_path(py_path, how_hint):
-        if not os.path.isfile(py_path): return
-        if _should_exclude_path(py_path): return
-        try:
-            mod = _import_from_path(py_path)
-        except Exception:
-            return
-        for fn in fn_candidates:
-            if fn and hasattr(mod, fn):
-                obj = getattr(mod, fn)
-                sc = _score_callable(obj, py_path)
-                candidates.append((obj, f"{how_hint}:{py_path}", py_path, sc))
-
-    if entry_module: consider_module(entry_module, "module")
-    if entry_script: consider_path(entry_script, "script")
-
-    if entry_module:
-        guess = entry_module.replace(".", "/") + ".py"
-        consider_path(guess, "path")
-
-    for py in glob.glob("**/*.py", recursive=True):
-        if _should_exclude_path(py): continue
-        try:
-            with open(py, "r", encoding="utf-8") as f: s = f.read()
-        except Exception:
-            continue
-        for fn in [x for x in fn_candidates if x]:
-            pattern = r"\bdef\s+" + re.escape(fn) + r"\s*\("
-            try:
-                if re.search(pattern, s):
-                    consider_path(py, "scan")
-            except re.error:
-                continue
-
-    for py in ["run_4u.py", "run.py", "backtest/run_4u.py", "backtest/runner.py"]:
-        consider_path(py, "fallback")
-
-    if not candidates:
-        return None, None
-    candidates.sort(key=lambda x: x[3], reverse=True)
-    return candidates[0][0], candidates[0][1]
-
-def _heuristic_script():
-    # look for scripts that are likely to be runnable as __main__
-    ranked = []
-    for py in glob.glob("**/*.py", recursive=True):
-        if _should_exclude_path(py): continue
-        try:
-            with open(py, "r", encoding="utf-8") as f: s = f.read()
-        except Exception:
-            continue
-        score = 0
-        low = py.replace("\\\\","/").lower()
-        if "__main__" in s: score += 2
-        if "argparse.ArgumentParser" in s: score += 2
-        score += _path_pref_score(py)
-        if score>0:
-            ranked.append((score, py))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    return [py for _,py in ranked[:20]]  # top candidates
-
-def _run_script_as_main(py_path, env_overrides):
-    # inject env hints
-    for k,v in env_overrides.items():
-        if v is not None:
-            os.environ[str(k)] = str(v)
-    # execute as script __main__
-    runpy.run_path(py_path, run_name="__main__")
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--params", "--config", dest="params", required=True)
@@ -175,85 +101,45 @@ def main():
     ap.add_argument("--hold", type=int)
     ap.add_argument("--filter", type=str)
     ap.add_argument("--outdir", required=True)
-    ap.add_argument("--entry-module")
-    ap.add_argument("--entry-script")
-    ap.add_argument("--entry-fn")
+    # optional explicit runner path
+    ap.add_argument("--runner")
     args = ap.parse_args()
 
-    cfg = load_params(args.params)
-    entry = (cfg.get("entry") or {})
+    # 0) Extract strategy codepack if present
+    unzip_codepack_if_any(os.getcwd())
 
-    entry_module = args.entry_module or entry.get("module")
-    entry_script = args.entry_script or entry.get("script")
-    fn_candidates = [args.entry_fn or entry.get("fn"), "run_once", "main", "run"]
-
+    # 1) prepare CSVs early (validation)
     csvs = pick_csvs(args.data_root, args.csv_glob)
-    ensure_dir(args.outdir)
 
-    func, how = _find_callable(entry_module, entry_script, fn_candidates)
-    if func:
-        print(f"[wfo_entry] using {how}")
-        run_kwargs = dict(
-            csv_paths=csvs, params=cfg, outdir=args.outdir,
-            thr=args.thr, hold=args.hold, filter_name=args.filter
-        )
-        _call_compatible(func, **run_kwargs)
-    else:
-        # Fallback: script execution
-        cands = []
-        # prefer explicitly provided script
-        if entry_script and os.path.isfile(entry_script):
-            cands.append(entry_script)
-        # then heuristics
-        cands += _heuristic_script()
-        tried = []
-        ok = False
-        for sp in cands:
-            if sp in tried: continue
-            tried.append(sp)
-            try:
-                print(f"[wfo_entry] trying script: {sp}")
-                _run_script_as_main(sp, {
-                    "PARAMS_FILE": args.params,
-                    "CSV_GLOB": args.csv_glob,
-                    "DATA_ROOT": args.data_root,
-                    "WFO_THR": args.thr,
-                    "WFO_HOLD": args.hold,
-                    "WFO_FILTER": args.filter,
-                    "OUTDIR": args.outdir,
-                })
-                ok = True
-                how = f"script:{sp}"
-                print(f"[wfo_entry] executed {how}")
-                break
-            except SystemExit as e:
-                # scripts may call sys.exit(0)
-                if int(getattr(e, "code", 0) or 0) == 0:
-                    ok = True
-                    how = f"script:{sp}"
-                    print(f"[wfo_entry] executed {how} (SystemExit 0)")
-                    break
-                else:
-                    continue
-            except Exception as e:
-                continue
-        if not ok:
-            raise ImportError("Cannot locate entry callable or runnable script via heuristics")
+    # 2) load and overlay params → write to outdir/params_used.yml
+    base_cfg = load_params(args.params)
+    patched_cfg = overlay_params(base_cfg, args.thr, args.hold, args.filter)
+    params_path = write_params_file(patched_cfg, args.outdir)
 
+    # 3) locate runner
+    runner = args.runner or find_runner_path(os.getcwd())
+
+    # 4) run script via runpy with argv for argparse
+    argv = [
+        runner,
+        "--data-root", args.data_root,
+        "--csv-glob", args.csv_glob,
+        "--outdir", args.outdir,
+        "--params", params_path,
+    ]
+    run_script_with_argv(runner, argv)
+
+    # 5) ensure minimum artifacts
     write_minimum(args.outdir)
+
+    # 6) manifest
     with open(os.path.join(args.outdir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({
             "thr": args.thr, "hold": args.hold, "filter": args.filter,
             "csv_glob": args.csv_glob, "data_root": args.data_root,
-            "params_file": args.params, "entry_used": how if func else how,
+            "params_file": params_path, "runner": runner,
             "ts": datetime.datetime.utcnow().isoformat()+"Z"
         }, f, ensure_ascii=False, indent=2)
-
-    try:
-        import shutil
-        shutil.copyfile(args.params, os.path.join(args.outdir, "params_used.yml"))
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     main()
