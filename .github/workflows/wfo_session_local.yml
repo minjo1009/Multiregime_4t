@@ -54,15 +54,18 @@ jobs:
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Resolve params (dot -> underscore fallback)
         id: params_out
         run: |
@@ -75,6 +78,7 @@ jobs:
             echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
           fi
           echo "PF=$PF" >> "$GITHUB_OUTPUT"
+
       - name: Build matrix (+ overrides) via echo script
         id: mk
         env:
@@ -117,19 +121,23 @@ jobs:
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+
       - name: Preflight (auto-detect new/legacy)
         run: |
           set -euo pipefail
@@ -161,6 +169,7 @@ jobs:
             echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
           fi
+
       - name: Run single (entrypoint scan)
         env:
           ENTRYPOINTS: ${{ github.event.inputs.ENTRYPOINTS }}
@@ -185,6 +194,7 @@ jobs:
           [ -f trades.csv ] || echo "empty" > trades.csv
           mv -f summary.json gating_debug.json preds_test.csv trades.csv out_single/
           ( cd out_single && zip -rq ../bundle_single.zip . )
+
       - name: Upload bundle_single.zip
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -202,19 +212,23 @@ jobs:
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
+
       - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
+
       - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
+
       - name: Preflight (auto-detect new/legacy)
         run: |
           set -euo pipefail
@@ -246,6 +260,7 @@ jobs:
             echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
           fi
+
       - name: Run WFO member
         env:
           THR: ${{ matrix.thr }}
@@ -274,6 +289,7 @@ jobs:
           [ -f trades.csv ] || echo "empty" > trades.csv
           mv -f summary.json gating_debug.json preds_test.csv trades.csv "$OUT"/
           ( cd "$OUT" && zip -rq "../bundle_${THR}_${HOLD}_${FILTER}.zip" . )
+
       - name: Upload WFO bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -289,11 +305,22 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_artifacts
-      - name: Make FINAL single ZIP
+
+      - name: Debug list (what got downloaded)
+        run: |
+          set -euo pipefail
+          echo "==== all_artifacts tree ===="
+          ls -R all_artifacts || true
+          echo "============================"
+          echo "ZIP files found:"
+          find all_artifacts -type f -name "*.zip" -printf "%p (%k KB)\n" | sort || true
+
+      - name: Make FINAL single ZIP (even if empty)
         run: |
           set -euo pipefail
           cd all_artifacts
           zip -rq "../${{ github.event.inputs.BUNDLE_NAME }}.zip" .
+
       - name: Upload FINAL ZIP (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
