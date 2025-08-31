@@ -79,7 +79,7 @@ jobs:
           fi
           echo "PF=$PF" >> "$GITHUB_OUTPUT"
 
-      - name: Build matrix (+ overrides) via echo script
+      - name: Build matrix (+ overrides)
         id: mk
         env:
           PF: ${{ steps.params_out.outputs.PF }}
@@ -306,7 +306,7 @@ jobs:
         with:
           path: all_artifacts
 
-      - name: Debug list (what got downloaded)
+      - name: Debug list (tree + sizes)
         run: |
           set -euo pipefail
           echo "==== all_artifacts tree ===="
@@ -315,7 +315,7 @@ jobs:
           echo "ZIP files found:"
           find all_artifacts -type f -name "*.zip" -printf "%p (%k KB)\n" | sort || true
 
-      - name: Make FINAL single ZIP (even if empty)
+      - name: Make FINAL single ZIP
         run: |
           set -euo pipefail
           cd all_artifacts
