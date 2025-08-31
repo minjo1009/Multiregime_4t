@@ -1,4 +1,4 @@
-name: WFO Session Local V2.1.3 (echo-fix)
+name: WFO Session Local V2.1.3 (fi-fix)
 
 on:
   workflow_dispatch:
@@ -75,7 +75,7 @@ jobs:
             echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
           fi
           echo "PF=$PF" >> "$GITHUB_OUTPUT"
-      - name: Build matrix (+ overrides) via echo lines (no heredoc, no printf)
+      - name: Build matrix (+ overrides) via echo lines
         id: mk
         env:
           PF: ${{ steps.params_out.outputs.PF }}
@@ -148,6 +148,7 @@ jobs:
             echo "miss=[c for c in req if c not in df.columns]" >> _pre.py
             echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
+          fi
       - name: Run single
         env:
           ENTRYPOINTS: ${{ github.event.inputs.ENTRYPOINTS }}
@@ -212,6 +213,7 @@ jobs:
             echo "miss=[c for c in req if c not in df.columns]" >> _pre.py
             echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
+          fi
       - name: Run WFO member
         env:
           THR: ${{ matrix.thr }}
