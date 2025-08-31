@@ -12,7 +12,7 @@ on:
         required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       CSV_GLOB:
-        description: "csv glob (if no zip / override)"
+        description: "csv glob override (if no zip)"
         required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       ENTRYPOINTS:
@@ -28,15 +28,15 @@ on:
         required: false
         default: "true"
       GRID_THR:
-        description: "override thr list (comma, optional)"
+        description: "override thr list (comma)"
         required: false
         default: ""
       GRID_HOLD:
-        description: "override hold list (comma, optional)"
+        description: "override hold list (comma)"
         required: false
         default: ""
       GRID_FILTER:
-        description: "override filter list (comma, optional)"
+        description: "override filter list (comma)"
         required: false
         default: ""
       BUNDLE_NAME:
@@ -50,7 +50,7 @@ jobs:
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
       csv_glob: ${{ steps.mk.outputs.csv_glob }}
-      params_used: ${{ steps.mk.outputs.params_used }}
+      params_used: ${{ steps.params_out.outputs.PF }}
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
@@ -64,64 +64,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
       - name: Resolve params (dot -> underscore fallback)
-        id: params
+        id: params_out
         run: |
           set -euo pipefail
           PF="${{ github.event.inputs.PARAMS_FILE }}"
-          if [ ! -f "$PF" ]; then
-            [ "$PF" = "conf/params.v2.yml" ] && PF="conf/params_v2.yml"
+          if [ ! -f "$PF" ] && [ "$PF" = "conf/params.v2.yml" ] && [ -f "conf/params_v2.yml" ]; then
+            PF="conf/params_v2.yml"
           fi
           if [ ! -f "$PF" ]; then
             echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
           fi
-          echo "PF=$PF" >> $GITHUB_OUTPUT
-      - name: Build matrix from params (with overrides)
+          echo "PF=$PF" >> "$GITHUB_OUTPUT"
+      - name: Build matrix (+ overrides) via python -c
         id: mk
         env:
-          PF: ${{ steps.params.outputs.PF }}
+          PF: ${{ steps.params_out.outputs.PF }}
+          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
           GRID_THR: ${{ github.event.inputs.GRID_THR }}
           GRID_HOLD: ${{ github.event.inputs.GRID_HOLD }}
           GRID_FILTER: ${{ github.event.inputs.GRID_FILTER }}
-          CSV_GLOB_IN: ${{ github.event.inputs.CSV_GLOB }}
         run: |
           set -euo pipefail
-          printf '%s\n' \
-          'import os,yaml,json' \
-          'pf=os.environ["PF"]' \
-          'p=yaml.safe_load(open(pf,"r",encoding="utf-8"))' \
-          '# try csv_glob; many repos put it only in WFO params.v2.yml' \
-          'csvg=os.environ.get("CSV_GLOB_IN","").strip() or p.get("csv_glob","**/*.csv")' \
-          '# defaults for grid if not present in params file' \
-          'def get_list(p,*keys,default=None):' \
-          '  cur=p' \
-          '  for k in keys:' \
-          '    if isinstance(cur,dict) and k in cur: cur=cur[k]' \
-          '    else: return default' \
-          '  return cur' \
-          'thr=get_list(p,"gate","thr",default=[3.2,3.8])' \
-          'hold=p.get("hold",[6,8])' \
-          'filt=p.get("filter",["ema","none"])' \
-          '# apply overrides (comma list)' \
-          'import builtins' \
-          'def ov(env,cur,cast=float):' \
-          '  v=os.environ.get(env,"").strip()' \
-          '  if not v: return cur' \
-          '  xs=[x.strip() for x in v.split(",") if x.strip()]' \
-          '  if env!="GRID_FILTER":' \
-          '    try: xs=[cast(x) for x in xs]' \
-          '    except Exception: pass' \
-          '  return xs if xs else cur' \
-          'thr=ov("GRID_THR",thr,float)' \
-          'hold=ov("GRID_HOLD",hold,int)' \
-          'filt=ov("GRID_FILTER",filt,str)' \
-          'm={"thr":thr,"hold":hold,"filter":filt}' \
-          'open("matrix.json","w",encoding="utf-8").write(json.dumps(m))' \
-          'open("csv_glob.txt","w",encoding="utf-8").write(str(csvg))' \
-          > _mk.py
-          python _mk.py
-          echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
-          echo "csv_glob=$(cat csv_glob.txt)" >> $GITHUB_OUTPUT
-          echo "params_used=${{ steps.params.outputs.PF }}" >> $GITHUB_OUTPUT
+          MATRIX_JSON=$(python -c "import os,yaml,json; pf=os.environ['PF']; p=yaml.safe_load(open(pf,'r',encoding='utf-8'))
+csvg=os.environ.get('CSV_GLOB_IN') or p.get('csv_glob','**/*.csv')
+thr=(p.get('gate',{}) or {}).get('thr',[3.2,3.8]); hold=p.get('hold',[6,8]); filt=p.get('filter',['ema','none'])
+def ov(env,cur,cast=float):
+  v=os.environ.get(env,'').strip()
+  if not v: return cur
+  xs=[t.strip() for t in v.split(',') if t.strip()]
+  if env!='GRID_FILTER':
+    try: xs=[cast(x) for x in xs]
+    except Exception: pass
+  return xs or cur
+thr=ov('GRID_THR',thr,float); hold=ov('GRID_HOLD',hold,int); filt=ov('GRID_FILTER',filt,str)
+print(json.dumps({'matrix':{'thr':thr,'hold':hold,'filter':filt},'csv_glob':csvg}))")
+          echo "matrix=$(echo "$MATRIX_JSON" | python -c "import sys,json;print(json.dumps(json.load(sys.stdin)['matrix']))")" >> "$GITHUB_OUTPUT"
+          echo "csv_glob=$(echo "$MATRIX_JSON" | python -c "import sys,json;print(json.load(sys.stdin)['csv_glob'])")" >> "$GITHUB_OUTPUT"
 
   single:
     if: ${{ github.event.inputs.RUN_SINGLE == 'true' }}
@@ -139,11 +117,11 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
-      - name: Unzip data (if present)
+      - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
-      - name: Preflight
+      - name: Preflight (inline fallback-safe)
         run: |
           set -euo pipefail
           if [ -f "ci/preflight_strict.py" ]; then
@@ -151,17 +129,11 @@ jobs:
           elif [ -f "preflight_strict.py" ]; then
             python preflight_strict.py "${{ needs.prep.outputs.csv_glob }}"
           else
-            printf '%s\n' \
-            'import sys,glob,pandas as pd' \
-            'req=["open_time","open","high","low","close","volume"]' \
-            'g=sys.argv[1]' \
-            'paths=glob.glob(g,recursive=True)' \
-            'assert paths, f"No CSV found by glob: {g}"' \
-            'df=pd.read_csv(paths[0],nrows=5)' \
-            'miss=[c for c in req if c not in df.columns]' \
-            'assert not miss, f"Missing columns: {miss} in {paths[0]}"' \
-            > _pre.py; python _pre.py "${{ needs.prep.outputs.csv_glob }}"
-      - name: Run single
+            python -c "import sys,glob,pandas as pd; g='${{ needs.prep.outputs.csv_glob }}'
+paths=glob.glob(g,recursive=True); assert paths, f'No CSV found by glob: {g}'
+df=pd.read_csv(paths[0],nrows=5); req=['open_time','open','high','low','close','volume']
+miss=[c for c in req if c not in df.columns]; assert not miss, f'Missing columns: {miss} in {paths[0]}'"
+      - name: Run single (entrypoint scan)
         env:
           ENTRYPOINTS: ${{ github.event.inputs.ENTRYPOINTS }}
         run: |
@@ -176,11 +148,8 @@ jobs:
           [ -f gating_debug.json ] || echo "{}" > gating_debug.json
           [ -f preds_test.csv ] || echo "empty" > preds_test.csv
           [ -f trades.csv ] || echo "empty" > trades.csv
-          mv -f summary.json out_single/
-          mv -f gating_debug.json out_single/
-          mv -f preds_test.csv out_single/
-          mv -f trades.csv out_single/
-          cd out_single && zip -r ../bundle_single.zip . && cd ..
+          mv -f summary.json gating_debug.json preds_test.csv trades.csv out_single/
+          ( cd out_single && zip -rq ../bundle_single.zip . )
       - name: Upload bundle_single.zip
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -207,11 +176,11 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
-      - name: Unzip data (if present)
+      - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${{ github.event.inputs.DATA_ZIP }}" ]; then unzip -o "${{ github.event.inputs.DATA_ZIP }}" || true; fi
-      - name: Preflight
+      - name: Preflight (inline fallback-safe)
         run: |
           set -euo pipefail
           if [ -f "ci/preflight_strict.py" ]; then
@@ -219,17 +188,11 @@ jobs:
           elif [ -f "preflight_strict.py" ]; then
             python preflight_strict.py "${{ needs.prep.outputs.csv_glob }}"
           else
-            printf '%s\n' \
-            'import sys,glob,pandas as pd' \
-            'req=["open_time","open","high","low","close","volume"]' \
-            'g=sys.argv[1]' \
-            'paths=glob.glob(g,recursive=True)' \
-            'assert paths, f"No CSV found by glob: {g}"' \
-            'df=pd.read_csv(paths[0],nrows=5)' \
-            'miss=[c for c in req if c not in df.columns]' \
-            'assert not miss, f"Missing columns: {miss} in {paths[0]}"' \
-            > _pre.py; python _pre.py "${{ needs.prep.outputs.csv_glob }}"
-      - name: Run backtest (WFO member)
+            python -c "import sys,glob,pandas as pd; g='${{ needs.prep.outputs.csv_glob }}'
+paths=glob.glob(g,recursive=True); assert paths, f'No CSV found by glob: {g}'
+df=pd.read_csv(paths[0],nrows=5); req=['open_time','open','high','low','close','volume']
+miss=[c for c in req if c not in df.columns]; assert not miss, f'Missing columns: {miss} in {paths[0]}'"
+      - name: Run WFO member
         env:
           THR: ${{ matrix.thr }}
           HOLD: ${{ matrix.hold }}
@@ -238,9 +201,8 @@ jobs:
         run: |
           set -euo pipefail
           IFS='|' read -ra EPS <<< "${ENTRYPOINTS}"
-          rc=1
           for ep in "${EPS[@]}"; do
-            if [ -f "$ep" ]; then python "$ep" && rc=0 && break || true; fi
+            if [ -f "$ep" ]; then python "$ep" && break || true; fi
           done
           OUT="out_${THR}_${HOLD}_${FILTER}"
           mkdir -p "$OUT"
@@ -248,11 +210,8 @@ jobs:
           [ -f gating_debug.json ] || echo "{}" > gating_debug.json
           [ -f preds_test.csv ] || echo "empty" > preds_test.csv
           [ -f trades.csv ] || echo "empty" > trades.csv
-          mv -f summary.json "$OUT/"
-          mv -f gating_debug.json "$OUT/"
-          mv -f preds_test.csv "$OUT/"
-          mv -f trades.csv "$OUT/"
-          cd "$OUT" && zip -r "../bundle_${THR}_${HOLD}_${FILTER}.zip" . && cd ..
+          mv -f summary.json gating_debug.json preds_test.csv trades.csv "$OUT"/
+          ( cd "$OUT" && zip -rq "../bundle_${THR}_${HOLD}_${FILTER}.zip" . )
       - name: Upload WFO bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -261,22 +220,22 @@ jobs:
           if-no-files-found: warn
 
   finalize:
-    needs: [wfo, single, prep]
+    needs: [wfo, single]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts (pinned)
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         with:
           path: all_artifacts
-      - name: Make single ZIP of everything
+      - name: Make single ZIP
         run: |
           set -euo pipefail
           cd all_artifacts
-          zip -r "../${{ github.event.inputs.BUNDLE_NAME }}.zip" .
-          cd ..
+          zip -rq "../${{ github.event.inputs.BUNDLE_NAME }}.zip" .
       - name: Upload FINAL ZIP (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ github.event.inputs.BUNDLE_NAME }}
           path: ${{ github.event.inputs.BUNDLE_NAME }}.zip
           if-no-files-found: error
+
