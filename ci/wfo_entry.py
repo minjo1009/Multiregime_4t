@@ -1,4 +1,4 @@
-# ci/wfo_entry.py
+# ci/wfo_entry.py  (regex-safe scan version)
 import argparse, glob, os, json, importlib, importlib.util, yaml, pathlib, datetime, sys, re
 
 def load_params(p):
@@ -48,6 +48,8 @@ def _find_callable(module_or_path, fn_candidates):
                     return getattr(mod, fn), f"module:{module_or_path}"
         except ModuleNotFoundError:
             pass
+        except Exception:
+            pass
 
         # 2) Interpret module as path (backtest.runner -> backtest/runner.py)
         guess = module_or_path.replace(".", "/") + ".py"
@@ -64,19 +66,25 @@ def _find_callable(module_or_path, fn_candidates):
             if fn and hasattr(mod, fn):
                 return getattr(mod, fn), f"script:{module_or_path}"
 
-    # 4) Project-wide scan for a matching function
+    # 4) Project-wide scan for a matching function (regex-safe)
     for py in glob.glob("**/*.py", recursive=True):
         try:
-            with open(py, "r", encoding="utf-8") as f: s = f.read()
+            with open(py, "r", encoding="utf-8") as f:
+                s = f.read()
         except Exception:
             continue
-        if any(re.search(rf"\\bdef\\s+{fn}\\s*\\(", s) for fn in fn_candidates if fn):
+        for fn in [x for x in fn_candidates if x]:
+            pattern = r"\bdef\s+" + re.escape(fn) + r"\s*\("
             try:
-                mod = _import_from_path(py)
-                for fn in fn_candidates:
-                    if fn and hasattr(mod, fn):
-                        return getattr(mod, fn), f"scan:{py}"
-            except Exception:
+                if re.search(pattern, s):
+                    try:
+                        mod = _import_from_path(py)
+                        if hasattr(mod, fn):
+                            return getattr(mod, fn), f"scan:{py}"
+                    except Exception:
+                        continue
+            except re.error:
+                # If fn contained odd chars, skip this regex
                 continue
 
     # 5) Fallback common runners
