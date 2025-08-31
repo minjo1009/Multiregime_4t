@@ -4,16 +4,46 @@ on:
   workflow_dispatch:
     inputs:
       PARAMS_CHAMP:
+        description: "챔피언 파라미터 경로"
+        required: false
         default: "conf/params_champion.yml"
       PARAMS_ALT:
+        description: "번들#2(≈3.75) 파라미터 경로"
+        required: false
         default: "conf/params_alt.yml"
+      # ---- 선택 입력(비워두면 원본 파일값 사용) ----
+      OVERRIDE_THR_CHAMP:
+        description: "챔피언 thr override (예: 0.83)"
+        required: false
+        default: ""
+      OVERRIDE_HOLD_CHAMP:
+        description: "챔피언 hold override (예: 8)"
+        required: false
+        default: ""
+      OVERRIDE_THR_ALT:
+        description: "번들#2 thr override (예: 0.83)"
+        required: false
+        default: ""
+      OVERRIDE_HOLD_ALT:
+        description: "번들#2 hold override (예: 9)"
+        required: false
+        default: ""
+      # ---- Data / Runner ----
       CSV_GLOB:
+        description: "CSV GLOB (레포 루트 기준; 레포명/./ 붙여도 자동 보정)"
+        required: false
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       DATA_ZIP:
+        description: "루트에 올린 데이터 ZIP (있으면 자동 언집)"
+        required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       RUNNER_PATH:
+        description: "러너 경로(예: backtest/runner.py, 비우면 자동탐색)"
+        required: false
         default: ""
       PY_VERSION:
+        description: "Python 버전"
+        required: false
         default: "3.10"
 
 env:
@@ -40,7 +70,7 @@ jobs:
       - name: Unzip data (optional)
         run: |
           set -euo pipefail
-          ZIP="${{ github.event.inputs.DATA_ZIP }}"
+          ZIP='${{ github.event.inputs.DATA_ZIP }}'
           if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
           ls -al | sed -n '1,120p'
 
@@ -49,8 +79,8 @@ jobs:
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
           CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
-          CSVG="${CSVG_IN#${ROOTF}/}"   # 앞의 '레포명/' 제거
-          CSVG="${CSVG#./}"             # 앞의 './' 제거
+          CSVG="${CSVG_IN#${ROOTF}/}"   # '레포명/' 제거
+          CSVG="${CSVG#./}"             # './' 제거
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
           echo "[glob] in : $CSVG_IN"
           echo "[glob] out: $CSVG"
@@ -65,15 +95,55 @@ jobs:
           test -f "${{ github.event.inputs.PARAMS_CHAMP }}" || { echo "PARAMS_CHAMP not found"; exit 2; }
           test -f "${{ github.event.inputs.PARAMS_ALT }}"   || { echo "PARAMS_ALT not found"; exit 2; }
 
+      - name: Patch params safety (thr clamp & optional override)
+        env:
+          PF_C: ${{ github.event.inputs.PARAMS_CHAMP }}
+          PF_A: ${{ github.event.inputs.PARAMS_ALT }}
+          THR_C: ${{ github.event.inputs.OVERRIDE_THR_CHAMP }}
+          HOLD_C: ${{ github.event.inputs.OVERRIDE_HOLD_CHAMP }}
+          THR_A: ${{ github.event.inputs.OVERRIDE_THR_ALT }}
+          HOLD_A: ${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
+        run: |
+          python - <<'PY'
+          import os, sys, yaml
+          def load(p):
+            with open(p,'r',encoding='utf-8') as f: return yaml.safe_load(f) or {}
+          def clamp_thr(v):
+            try: x=float(v)
+            except: x=0.6
+            if x>1.0: x=0.95
+            if x<0.3: x=0.3
+            return round(x,4)
+          def patch(p, thr, hold):
+            d=load(p)
+            d.setdefault('entry',{}).setdefault('p_thr',{})
+            if thr:
+              d['entry']['p_thr']['trend']=clamp_thr(thr)
+              d['entry']['p_thr']['range']=clamp_thr(thr)
+            else:
+              for k in ('trend','range'):
+                d['entry']['p_thr'][k]=clamp_thr(d['entry']['p_thr'].get(k,0.6))
+            d.setdefault('exit',{})
+            d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
+            return d
+          PF_C,PF_A=os.environ['PF_C'],os.environ['PF_A']
+          dc=patch(PF_C, os.environ.get('THR_C','').strip(), os.environ.get('HOLD_C','').strip())
+          da=patch(PF_A, os.environ.get('THR_A','').strip(), os.environ.get('HOLD_A','').strip())
+          os.makedirs('conf', exist_ok=True)
+          yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
+          yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
+          print('[params] champion:', dc)
+          print('[params] alt:', da)
+          PY
+
       - name: Run SINGLE — Champion
         env:
           RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
-          PF:     ${{ github.event.inputs.PARAMS_CHAMP }}
         run: |
           set -euo pipefail
           OUT="out_single_champion"
           python ci/wfo_entry.py \
-            --params "$PF" \
+            --params "conf/params_champion_safe.yml" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
             --runner "$RUNNER" \
@@ -83,12 +153,11 @@ jobs:
       - name: Run SINGLE — Alt(≈3.75)
         env:
           RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
-          PF:     ${{ github.event.inputs.PARAMS_ALT }}
         run: |
           set -euo pipefail
           OUT="out_single_alt"
           python ci/wfo_entry.py \
-            --params "$PF" \
+            --params "conf/params_alt_safe.yml" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
             --runner "$RUNNER" \
