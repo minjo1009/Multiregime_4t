@@ -1,0 +1,27 @@
+# params for Strategy V2.1.3 — kept minimal & ASCII-only
+# Root: conf/params.v2.yml
+version: "2.1.3"
+pair: "ETHUSDT"
+timeframe: "1min"
+data_zip: "ETHUSDT_1min_2020_2025.zip"
+csv_glob: "**/*ETHUSDT*1min*2020*2025*.csv"
+
+risk:
+  tp: 0.0038
+  sl: 0.0022
+  be: 0
+
+gate:
+  thr:
+    - 3.2
+    - 3.8
+  a: 1.1
+  beta: 1.0
+
+hold:
+  - 6
+  - 8
+
+filter:
+  - "ema"
+  - "none"
