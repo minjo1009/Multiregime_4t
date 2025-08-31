@@ -1,47 +1,35 @@
-name: Compare Two Singles (Champion vs Alt) — root-safe
+name: Compare Two Singles (Champion vs Alt) — root-safe (SHA pinned)
 
 on:
   workflow_dispatch:
     inputs:
       PARAMS_CHAMP:
-        description: "챔피언 파라미터 경로"
-        required: false
         default: "conf/params_champion.yml"
       PARAMS_ALT:
-        description: "번들#2(≈3.75) 파라미터 경로"
-        required: false
         default: "conf/params_alt.yml"
       CSV_GLOB:
-        description: "CSV GLOB (레포 루트 기준; 레포명이 앞에 있어도 자동 보정)"
-        required: false
+        # 레포 루트 기준 패턴만 입력 (레포명/./ 붙여도 자동 보정됨)
         default: "**/*ETHUSDT*1min*2020*2025*.csv"
       DATA_ZIP:
-        description: "루트에 올린 데이터 ZIP(있으면 자동 언집)"
-        required: false
         default: "ETHUSDT_1min_2020_2025.zip"
       RUNNER_PATH:
-        description: "러너 경로(예: backtest/runner.py, 비우면 자동탐색)"
-        required: false
         default: ""
       PY_VERSION:
-        description: "Python 버전"
-        required: false
         default: "3.10"
 
-env:
-  PYTHONUTF8: "1"
+env: { PYTHONUTF8: "1" }
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (tag, not SHA)
-        uses: actions/checkout@v4
+      # === SHA 고정 액션 ===
+      - name: Checkout (pinned)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Setup Python (tag, not SHA)
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ github.event.inputs.PY_VERSION }}
+      - name: Setup Python (pinned)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
 
       - name: Deps (numba 호환 고정)
         run: |
@@ -49,28 +37,20 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
 
-      - name: Unzip data (optional, 루트에 있을 때만)
+      - name: Unzip data (optional)
         run: |
           set -euo pipefail
           ZIP="${{ github.event.inputs.DATA_ZIP }}"
-          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then
-            echo "[data] unzip: $ZIP"
-            unzip -o "$ZIP" >/dev/null
-          else
-            echo "[data] no data zip (skip)"
-          fi
-          echo "[data] top-level:"; ls -al | sed -n '1,120p'
+          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
+          ls -al | sed -n '1,120p'
 
-      - name: Normalize CSV_GLOB to repo root (레포명/./ 제거)
-        id: globfix
+      - name: Normalize CSV_GLOB to repo root
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
           CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
-          # remove leading "<repo>/" if present
-          CSVG="${CSVG_IN#${ROOTF}/}"
-          # remove leading "./" if present
-          CSVG="${CSVG#./}"
+          CSVG="${CSVG_IN#${ROOTF}/}"   # 앞의 '레포명/' 제거
+          CSVG="${CSVG#./}"             # 앞의 './' 제거
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
           echo "[glob] in : $CSVG_IN"
           echo "[glob] out: $CSVG"
@@ -115,8 +95,8 @@ jobs:
             --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload artifacts (pinned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: singles_compare
           path: |
