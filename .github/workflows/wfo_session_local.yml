@@ -1,4 +1,4 @@
-name: WFO Session Local V2.1.3 (fixed)
+name: WFO Session Local V2.1.3 (echo-fix)
 
 on:
   workflow_dispatch:
@@ -54,18 +54,15 @@ jobs:
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ github.event.inputs.PY_VERSION }}
-
-      - name: Install deps
+      - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install pandas numpy pyyaml
-
       - name: Resolve params (dot -> underscore fallback)
         id: params_out
         run: |
@@ -78,8 +75,7 @@ jobs:
             echo "Error: params file not found (conf/params.v2.yml or conf/params_v2.yml)"; exit 3
           fi
           echo "PF=$PF" >> "$GITHUB_OUTPUT"
-
-      - name: Build matrix (+ overrides) using a small script
+      - name: Build matrix (+ overrides) via echo lines (no heredoc, no printf)
         id: mk
         env:
           PF: ${{ steps.params_out.outputs.PF }}
@@ -89,8 +85,27 @@ jobs:
           GRID_FILTER: ${{ github.event.inputs.GRID_FILTER }}
         run: |
           set -euo pipefail
-          printf '%s
-'           'import os,yaml,json'           'pf=os.environ["PF"]'           'p=yaml.safe_load(open(pf,"r",encoding="utf-8"))'           'csvg=os.environ.get("CSV_GLOB_IN") or p.get("csv_glob","**/*.csv")'           'thr=(p.get("gate",{}) or {}).get("thr",[3.2,3.8])'           'hold=p.get("hold",[6,8])'           'filt=p.get("filter",["ema","none"])'           'def ov(env,cur,cast=float):'           '  v=os.environ.get(env,"").strip()'           '  if not v: return cur'           '  xs=[t.strip() for t in v.split(",") if t.strip()]'           '  if env!="GRID_FILTER":'           '    try: xs=[cast(x) for x in xs]'           '    except Exception: pass'           '  return xs or cur'           'thr=ov("GRID_THR",thr,float)'           'hold=ov("GRID_HOLD",hold,int)'           'filt=ov("GRID_FILTER",filt,str)'           'open("matrix.json","w",encoding="utf-8").write(json.dumps({"thr":thr,"hold":hold,"filter":filt}))'           'open("csv_glob.txt","w",encoding="utf-8").write(str(csvg))'           > _mk.py
+          : > _mk.py
+          echo "import os,yaml,json" >> _mk.py
+          echo "pf=os.environ['PF']" >> _mk.py
+          echo "p=yaml.safe_load(open(pf,'r',encoding='utf-8'))" >> _mk.py
+          echo "csvg=os.environ.get('CSV_GLOB_IN') or p.get('csv_glob','**/*.csv')" >> _mk.py
+          echo "thr=(p.get('gate',{}) or {}).get('thr',[3.2,3.8])" >> _mk.py
+          echo "hold=p.get('hold',[6,8])" >> _mk.py
+          echo "filt=p.get('filter',['ema','none'])" >> _mk.py
+          echo "def ov(env,cur,cast=float):" >> _mk.py
+          echo "  v=os.environ.get(env,'').strip()" >> _mk.py
+          echo "  if not v: return cur" >> _mk.py
+          echo "  xs=[t.strip() for t in v.split(',') if t.strip()]" >> _mk.py
+          echo "  if env!='GRID_FILTER':" >> _mk.py
+          echo "    try: xs=[cast(x) for x in xs]" >> _mk.py
+          echo "    except Exception: pass" >> _mk.py
+          echo "  return xs or cur" >> _mk.py
+          echo "thr=ov('GRID_THR',thr,float)" >> _mk.py
+          echo "hold=ov('GRID_HOLD',hold,int)" >> _mk.py
+          echo "filt=ov('GRID_FILTER',filt,str)" >> _mk.py
+          echo "open('matrix.json','w',encoding='utf-8').write(json.dumps({'thr':thr,'hold':hold,'filter':filt}))" >> _mk.py
+          echo "open('csv_glob.txt','w',encoding='utf-8').write(str(csvg))" >> _mk.py
           python _mk.py
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
           echo "csv_glob=$(cat csv_glob.txt)" >> "$GITHUB_OUTPUT"
@@ -123,8 +138,15 @@ jobs:
           elif [ -f "preflight_strict.py" ]; then
             python preflight_strict.py "${{ needs.prep.outputs.csv_glob }}"
           else
-            printf '%s
-'             'import sys,glob,pandas as pd'             'g=sys.argv[1]'             'paths=glob.glob(g,recursive=True)'             'assert paths, f"No CSV found by glob: {g}"'             'df=pd.read_csv(paths[0],nrows=5)'             'req=["open_time","open","high","low","close","volume"]'             'miss=[c for c in req if c not in df.columns]'             'assert not miss, f"Missing columns: {miss} in {paths[0]}"'             > _pre.py
+            : > _pre.py
+            echo "import sys,glob,pandas as pd" >> _pre.py
+            echo "g=sys.argv[1]" >> _pre.py
+            echo "paths=glob.glob(g,recursive=True)" >> _pre.py
+            echo "assert paths, f'No CSV found by glob: {g}'" >> _pre.py
+            echo "df=pd.read_csv(paths[0],nrows=5)" >> _pre.py
+            echo "req=['open_time','open','high','low','close','volume']" >> _pre.py
+            echo "miss=[c for c in req if c not in df.columns]" >> _pre.py
+            echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
       - name: Run single
         env:
@@ -180,8 +202,15 @@ jobs:
           elif [ -f "preflight_strict.py" ]; then
             python preflight_strict.py "${{ needs.prep.outputs.csv_glob }}"
           else
-            printf '%s
-'             'import sys,glob,pandas as pd'             'g=sys.argv[1]'             'paths=glob.glob(g,recursive=True)'             'assert paths, f"No CSV found by glob: {g}"'             'df=pd.read_csv(paths[0],nrows=5)'             'req=["open_time","open","high","low","close","volume"]'             'miss=[c for c in req if c not in df.columns]'             'assert not miss, f"Missing columns: {miss} in {paths[0]}"'             > _pre.py
+            : > _pre.py
+            echo "import sys,glob,pandas as pd" >> _pre.py
+            echo "g=sys.argv[1]" >> _pre.py
+            echo "paths=glob.glob(g,recursive=True)" >> _pre.py
+            echo "assert paths, f'No CSV found by glob: {g}'" >> _pre.py
+            echo "df=pd.read_csv(paths[0],nrows=5)" >> _pre.py
+            echo "req=['open_time','open','high','low','close','volume']" >> _pre.py
+            echo "miss=[c for c in req if c not in df.columns]" >> _pre.py
+            echo "assert not miss, f'Missing columns: {miss} in {paths[0]}'" >> _pre.py
             python _pre.py "${{ needs.prep.outputs.csv_glob }}"
       - name: Run WFO member
         env:
