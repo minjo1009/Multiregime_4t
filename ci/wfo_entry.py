@@ -1,5 +1,5 @@
-# ci/wfo_entry.py  (hardened autodetect v3)
-import argparse, glob, os, json, importlib, importlib.util, yaml, pathlib, datetime, sys, re, inspect
+# ci/wfo_entry.py  (hardened autodetect v4 with script fallback)
+import argparse, glob, os, json, importlib, importlib.util, yaml, pathlib, datetime, sys, re, inspect, runpy
 
 EXCLUDE_DIR_HINTS = ["ci/", "/ci/", "/.github/", "/tests/", "/test/"]
 EXCLUDE_FILE_HINTS = ["preflight", "pre_flight", "check", "lint", "setup"]
@@ -51,7 +51,7 @@ def _path_pref_score(path):
     low = path.replace("\\\\","/").lower()
     score = 0
     for i,kw in enumerate(PREFERRED_PATH_HINTS):
-        if kw in low: score += (10 - i)  # earlier hints worth more
+        if kw in low: score += (10 - i)
     return score
 
 def _score_callable(func, source_path):
@@ -59,12 +59,10 @@ def _score_callable(func, source_path):
         sig = inspect.signature(func)
         params = set(sig.parameters.keys())
         score = sum(1 for k in DESIRED_ARGS if k in params)
-        # prefer functions not requiring *args/**kwargs only
         if any(p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for p in sig.parameters.values()):
             score -= 1
     except Exception:
         score = 0
-    # path preference
     score += _path_pref_score(source_path or "")
     return score
 
@@ -73,19 +71,17 @@ def _call_compatible(func, **kwargs):
         sig = inspect.signature(func)
         accepted = {k:v for k,v in kwargs.items() if k in sig.parameters}
         return func(**accepted)
-    except Exception as e:
-        # last resort: try no-arg call (for scripts exposing main() without params)
+    except Exception:
         try:
             return func()
         except Exception as e2:
             raise e2
 
 def _find_callable(entry_module, entry_script, fn_candidates):
-    # Ensure repo paths are importable
     for p in [os.getcwd(), os.path.join(os.getcwd(), "src")]:
         if p not in sys.path: sys.path.insert(0, p)
 
-    candidates = []  # list of (callable, how, source_path, score)
+    candidates = []  # (callable, how, source_path, score)
 
     def consider_module(mod_name, how_hint):
         try:
@@ -114,16 +110,13 @@ def _find_callable(entry_module, entry_script, fn_candidates):
                 sc = _score_callable(obj, py_path)
                 candidates.append((obj, f"{how_hint}:{py_path}", py_path, sc))
 
-    # 1) Explicit overrides first
     if entry_module: consider_module(entry_module, "module")
     if entry_script: consider_path(entry_script, "script")
 
-    # 2) If module provided but import failed, try path guess
     if entry_module:
         guess = entry_module.replace(".", "/") + ".py"
         consider_path(guess, "path")
 
-    # 3) Project-wide scan
     for py in glob.glob("**/*.py", recursive=True):
         if _should_exclude_path(py): continue
         try:
@@ -138,16 +131,40 @@ def _find_callable(entry_module, entry_script, fn_candidates):
             except re.error:
                 continue
 
-    # 4) Fallback common runners
     for py in ["run_4u.py", "run.py", "backtest/run_4u.py", "backtest/runner.py"]:
         consider_path(py, "fallback")
 
     if not candidates:
-        raise ImportError("Cannot locate entry callable via module/script/scan")
-
-    # Pick best by score
+        return None, None
     candidates.sort(key=lambda x: x[3], reverse=True)
     return candidates[0][0], candidates[0][1]
+
+def _heuristic_script():
+    # look for scripts that are likely to be runnable as __main__
+    ranked = []
+    for py in glob.glob("**/*.py", recursive=True):
+        if _should_exclude_path(py): continue
+        try:
+            with open(py, "r", encoding="utf-8") as f: s = f.read()
+        except Exception:
+            continue
+        score = 0
+        low = py.replace("\\\\","/").lower()
+        if "__main__" in s: score += 2
+        if "argparse.ArgumentParser" in s: score += 2
+        score += _path_pref_score(py)
+        if score>0:
+            ranked.append((score, py))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return [py for _,py in ranked[:20]]  # top candidates
+
+def _run_script_as_main(py_path, env_overrides):
+    # inject env hints
+    for k,v in env_overrides.items():
+        if v is not None:
+            os.environ[str(k)] = str(v)
+    # execute as script __main__
+    runpy.run_path(py_path, run_name="__main__")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -158,7 +175,6 @@ def main():
     ap.add_argument("--hold", type=int)
     ap.add_argument("--filter", type=str)
     ap.add_argument("--outdir", required=True)
-    # explicit overrides (optional)
     ap.add_argument("--entry-module")
     ap.add_argument("--entry-script")
     ap.add_argument("--entry-fn")
@@ -167,7 +183,6 @@ def main():
     cfg = load_params(args.params)
     entry = (cfg.get("entry") or {})
 
-    # Accept module OR script, allow CLI override
     entry_module = args.entry_module or entry.get("module")
     entry_script = args.entry_script or entry.get("script")
     fn_candidates = [args.entry_fn or entry.get("fn"), "run_once", "main", "run"]
@@ -176,20 +191,61 @@ def main():
     ensure_dir(args.outdir)
 
     func, how = _find_callable(entry_module, entry_script, fn_candidates)
-    print(f"[wfo_entry] using {how}")
-
-    run_kwargs = dict(
-        csv_paths=csvs, params=cfg, outdir=args.outdir,
-        thr=args.thr, hold=args.hold, filter_name=args.filter
-    )
-    _call_compatible(func, **run_kwargs)
+    if func:
+        print(f"[wfo_entry] using {how}")
+        run_kwargs = dict(
+            csv_paths=csvs, params=cfg, outdir=args.outdir,
+            thr=args.thr, hold=args.hold, filter_name=args.filter
+        )
+        _call_compatible(func, **run_kwargs)
+    else:
+        # Fallback: script execution
+        cands = []
+        # prefer explicitly provided script
+        if entry_script and os.path.isfile(entry_script):
+            cands.append(entry_script)
+        # then heuristics
+        cands += _heuristic_script()
+        tried = []
+        ok = False
+        for sp in cands:
+            if sp in tried: continue
+            tried.append(sp)
+            try:
+                print(f"[wfo_entry] trying script: {sp}")
+                _run_script_as_main(sp, {
+                    "PARAMS_FILE": args.params,
+                    "CSV_GLOB": args.csv_glob,
+                    "DATA_ROOT": args.data_root,
+                    "WFO_THR": args.thr,
+                    "WFO_HOLD": args.hold,
+                    "WFO_FILTER": args.filter,
+                    "OUTDIR": args.outdir,
+                })
+                ok = True
+                how = f"script:{sp}"
+                print(f"[wfo_entry] executed {how}")
+                break
+            except SystemExit as e:
+                # scripts may call sys.exit(0)
+                if int(getattr(e, "code", 0) or 0) == 0:
+                    ok = True
+                    how = f"script:{sp}"
+                    print(f"[wfo_entry] executed {how} (SystemExit 0)")
+                    break
+                else:
+                    continue
+            except Exception as e:
+                continue
+        if not ok:
+            raise ImportError("Cannot locate entry callable or runnable script via heuristics")
 
     write_minimum(args.outdir)
     with open(os.path.join(args.outdir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({
             "thr": args.thr, "hold": args.hold, "filter": args.filter,
             "csv_glob": args.csv_glob, "data_root": args.data_root,
-            "params_file": args.params, "entry_used": how,
+            "params_file": args.params, "entry_used": how if func else how,
             "ts": datetime.datetime.utcnow().isoformat()+"Z"
         }, f, ensure_ascii=False, indent=2)
 
