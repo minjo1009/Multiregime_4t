@@ -1,17 +1,16 @@
-name: Single Sensitivity 3x3 (thr+-0.02 x hold+-1) - aggregate
+name: Single Sensitivity 3x3 - aggregate
 
-on:
-  workflow_dispatch:
-    inputs:
-      BASE_PARAMS: { default: "conf/params_alt.yml" }
-      BASE_THR:    { default: "0.83" }
-      BASE_HOLD:   { default: "9" }
-      CSV_GLOB:    { default: "**/*ETHUSDT*1min*2020*2025*.csv" }
-      DATA_ZIP:    { default: "ETHUSDT_1min_2020_2025.zip" }
-      PY_VERSION:  { default: "3.10" }
+on: { workflow_dispatch: {} }
 
 env:
   PYTHONUTF8: "1"
+  PY_VERSION: "3.10"
+  BASE_PARAMS: "conf/params_alt.yml"
+  # 아래 두 값만 바꾸면 스윕 범위 자동 반영(0.83±0.02, 9±1)
+  BASE_THR: "0.83"
+  BASE_HOLD: "9"
+  CSV_GLOB: "**/*ETHUSDT*1min*2020*2025*.csv"
+  DATA_ZIP: "ETHUSDT_1min_2020_2025.zip"
 
 jobs:
   sweep:
@@ -19,28 +18,33 @@ jobs:
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
+        with:
+          python-version: ${{ env.PY_VERSION }}
+
       - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
-      - name: Unzip data (optional)
+
+      - name: Unzip data if present
         run: |
           set -euo pipefail
-          ZIP='${{ github.event.inputs.DATA_ZIP }}'
-          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
+          if [ -f "${DATA_ZIP}" ]; then unzip -o "${DATA_ZIP}" >/dev/null; fi
+
       - name: Normalize CSV_GLOB to repo root
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
-          CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
-          CSVG="${CSVG_IN#${ROOTF}/}"; CSVG="${CSVG#./}"
+          CSVG="${CSV_GLOB#${ROOTF}/}"; CSVG="${CSVG#./}"
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
+
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
+
       - name: Prepare patched runner from codepack (force)
         run: |
           set -euo pipefail
@@ -48,8 +52,8 @@ jobs:
           rm -rf _codepack
           unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
           python - <<'PY'
-          p="_codepack/backtest/runner.py"
-          post = r'''
+p="_codepack/backtest/runner.py"
+post = r'''
 # ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
 try:
     import json, pandas as pd, numpy as np, os
@@ -81,50 +85,56 @@ except Exception:
     pass
 # ==== END: auto-post-enrich (v2.1.3-patched) ====
 '''
-          open(p,'a',encoding='utf-8').write(post)
-          PY
+open(p,'a',encoding='utf-8').write(post)
+PY
           echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
-      - name: Run sweep 3x3 and aggregate
+
+      - name: Run sweep (3x3) and aggregate
         env:
-          BASE_PARAMS: ${{ github.event.inputs.BASE_PARAMS }}
-          BASE_THR:    ${{ github.event.inputs.BASE_THR }}
-          BASE_HOLD:   ${{ github.event.inputs.BASE_HOLD }}
-          CSVG:        ${{ env.CSVG_SANITIZED }}
-          RUNNER:      ${{ env.RUNNER_PATH_EXP }}
+          CSVG: ${{ env.CSVG_SANITIZED }}
+          RUNNER: ${{ env.RUNNER_PATH_EXP }}
         run: |
           set -euo pipefail
-          mkdir -p conf _agg
+          mkdir -p conf
+          # 스윕 값 계산 (BASE_THR±0.02, BASE_HOLD±1)
           python - <<'PY'
-          import os, yaml, itertools, math
-          base_thr=float(os.environ['BASE_THR']); base_hold=int(os.environ['BASE_HOLD'])
-          thr_list=[round(base_thr+d,2) for d in (-0.02,0.0,0.02)]
-          thr_list=[min(0.95,max(0.3,x)) for x in thr_list]
-          hold_list=[base_hold-1, base_hold, base_hold+1]
-          os.makedirs("conf", exist_ok=True)
-          combos=[]
-          for thr in thr_list:
-            for hold in hold_list:
-              d=yaml.safe_load(open(os.environ['BASE_PARAMS'],'r',encoding='utf-8')) or {}
-              d.setdefault('entry',{}).setdefault('p_thr',{})
-              for k in ('trend','range'): d['entry']['p_thr'][k]=float(thr)
-              d.setdefault('exit',{}); d['exit']['min_hold']=int(hold)
-              fn=f"conf/params_thr{thr:.2f}_h{hold}.yml"
-              yaml.safe_dump(d, open(fn,'w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
-              combos.append((f"{thr:.2f}", str(hold), fn))
-          open("_agg/combos.txt","w",encoding="utf-8").write("\n".join(["\t".join(x) for x in combos]))
-          PY
-          while IFS=$'\t' read -r THR HOLD FN; do
-            OUT="out_thr${THR}_h${HOLD}"
-            echo "[RUN] THR=$THR HOLD=$HOLD -> $OUT"
-            python ci/wfo_entry.py --params "$FN" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
-            ( cd "$OUT" && zip -rq ../sweep_${THR}_${HOLD}.zip . )
-          done < _agg/combos.txt
+import os, yaml
+base_thr=float(os.environ['BASE_THR']); base_hold=int(os.environ['BASE_HOLD'])
+thr_list=[max(0.3,min(0.95,round(base_thr+d,2))) for d in (-0.02,0.0,0.02)]
+hold_list=[base_hold-1, base_hold, base_hold+1]
+open("_thr.txt","w").write(" ".join(f"{t:.2f}" for t in thr_list))
+open("_hold.txt","w").write(" ".join(str(h) for h in hold_list))
+PY
+          THR_LIST=$(cat _thr.txt)
+          HOLD_LIST=$(cat _hold.txt)
+
+          for THR in $THR_LIST; do
+            for HOLD in $HOLD_LIST; do
+              echo "[PARAM] thr=$THR hold=$HOLD"
+              python - <<'PY'
+import os, yaml
+thr=os.environ['THR']; hold=os.environ['HOLD']; base=os.environ['BASE_PARAMS']
+d=yaml.safe_load(open(base,'r',encoding='utf-8')) or {}
+d.setdefault('entry',{}).setdefault('p_thr',{})
+for k in ('trend','range'): d['entry']['p_thr'][k]=float(thr)
+d.setdefault('exit',{}); d['exit']['min_hold']=int(hold)
+fn=f"conf/params_thr{thr}_h{hold}.yml"
+yaml.safe_dump(d, open(fn,'w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
+print("WROTE", fn)
+PY
+              OUT="out_thr${THR}_h${HOLD}"
+              python ci/wfo_entry.py --params "conf/params_thr${THR}_h${HOLD}.yml" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
+              ( cd "$OUT" && zip -rq ../sweep_${THR}_${HOLD}.zip . )
+            done
+          done
+
+          # 통합 ZIP (short SHA)
           AGG="sweep_3x3_bundle_${GITHUB_SHA::7}.zip"
           zip -rq "$AGG" sweep_*.zip
-          mv "$AGG" _agg/
+          mkdir -p _agg && mv "$AGG" _agg/
+
       - name: Upload aggregated artifact (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: sweep_3x3_bundle
-          path: |
-            _agg/sweep_3x3_bundle_*.zip
+          path: _agg/sweep_3x3_bundle_*.zip
