@@ -1,20 +1,14 @@
-name: Single Sensitivity 3x3 (thr±0.02 × hold±1)
+name: Single Sensitivity 3x3 (thr+-0.02 x hold+-1) - aggregate
 
 on:
   workflow_dispatch:
     inputs:
-      BASE_PARAMS:
-        description: '기본 파라미터 파일 경로'
-        default: 'conf/params_alt.yml'
-      CSV_GLOB:
-        description: 'CSV GLOB (레포 루트 기준; 레포명/./ 붙여도 자동 보정)'
-        default: '**/*ETHUSDT*1min*2020*2025*.csv'
-      RUNNER_PATH:
-        description: 'runner 경로(예: backtest/runner.py, 비우면 자동탐색)'
-        default: ''
-      PY_VERSION:
-        description: 'Python 버전'
-        default: '3.10'
+      BASE_PARAMS: { default: "conf/params_alt.yml" }
+      BASE_THR:    { default: "0.83" }
+      BASE_HOLD:   { default: "9" }
+      CSV_GLOB:    { default: "**/*ETHUSDT*1min*2020*2025*.csv" }
+      DATA_ZIP:    { default: "ETHUSDT_1min_2020_2025.zip" }
+      PY_VERSION:  { default: "3.10" }
 
 env:
   PYTHONUTF8: "1"
@@ -22,83 +16,115 @@ env:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 0.83 ± 0.02, hold 9 ± 1
-        thr: ['0.81','0.83','0.85']
-        hold: ['8','9','10']
-
     steps:
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ github.event.inputs.PY_VERSION }}
-
-      - name: Deps (numba 호환 고정)
+        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
+      - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
-
+      - name: Unzip data (optional)
+        run: |
+          set -euo pipefail
+          ZIP='${{ github.event.inputs.DATA_ZIP }}'
+          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
       - name: Normalize CSV_GLOB to repo root
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
           CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
-          CSVG="${CSVG_IN#${ROOTF}/}"   # '레포명/' 제거
-          CSVG="${CSVG#./}"             # './' 제거
+          CSVG="${CSVG_IN#${ROOTF}/}"; CSVG="${CSVG#./}"
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
-          echo "[glob] in : $CSVG_IN"
-          echo "[glob] out: $CSVG"
-
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
-
-      - name: Build safe params for each cell
-        env:
-          BASE: ${{ github.event.inputs.BASE_PARAMS }}
-          THR:  ${{ matrix.thr }}
-          HOLD: ${{ matrix.hold }}
-        run: |
-          python - <<'PY'
-          import os, yaml
-          base=os.environ['BASE']; thr=os.environ['THR']; hold=os.environ['HOLD']
-          with open(base,'r',encoding='utf-8') as f:
-              d=yaml.safe_load(f) or {}
-          d.setdefault('entry',{}).setdefault('p_thr',{})
-          for k in ('trend','range'):
-              d['entry']['p_thr'][k]=max(0.3, min(0.95, float(thr)))
-          d.setdefault('exit',{})
-          d['exit']['min_hold']=int(hold)
-          out=f"conf/params_thr{thr}_h{hold}.yml"
-          os.makedirs('conf', exist_ok=True)
-          with open(out,'w',encoding='utf-8') as f:
-              yaml.safe_dump(d, f, sort_keys=False, allow_unicode=True)
-          print('wrote', out)
-          PY
-
-      - name: Run SINGLE
-        env:
-          RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
-          CSVG:   ${{ env.CSVG_SANITIZED }}
+      - name: Prepare patched runner from codepack (force)
         run: |
           set -euo pipefail
-          OUT="out_thr${{ matrix.thr }}_h${{ matrix.hold }}"
-          python ci/wfo_entry.py \
-            --params "conf/params_thr${{ matrix.thr }}_h${{ matrix.hold }}.yml" \
-            --data-root "." \
-            --csv-glob "$CSVG" \
-            --runner "$RUNNER" \
-            --outdir "$OUT"
-          ( cd "$OUT" && zip -rq ../sweep_${{ matrix.thr }}_${{ matrix.hold }}.zip . )
-
-      - name: Upload artifact (cell) (pinned)
+          test -f strategy_v2_codepack_v2.1.3.zip || { echo "codepack zip missing"; exit 2; }
+          rm -rf _codepack
+          unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
+          python - <<'PY'
+          p="_codepack/backtest/runner.py"
+          post = r'''
+# ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
+try:
+    import json, pandas as pd, numpy as np, os
+    outdir = locals().get("outdir", ".")
+    trades_path = os.path.join(outdir, "trades.csv")
+    if os.path.exists(trades_path):
+        df_tr = pd.read_csv(trades_path)
+        ev = next((c for c in df_tr.columns if str(c).lower()=="event"), None)
+        df_ex = df_tr[df_tr[ev].astype(str).str.upper()=="EXIT"].copy() if ev is not None else df_tr.copy()
+        pnl_col = None
+        for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+            if c in df_ex.columns: pnl_col=c; break
+        if pnl_col is None:
+            df_tr["pnl_close_based"] = 0.0
+            df_tr.to_csv(trades_path, index=False)
+            pnl_col = "pnl_close_based"; df_ex = df_tr.copy()
+        s_path = os.path.join(outdir, "summary.json")
+        summ = {}
+        if os.path.exists(s_path):
+            import json; summ = json.load(open(s_path,"r",encoding="utf-8"))
+        s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
+        summ["exits"] = int(len(s))
+        summ["win_rate"] = float((s>0).sum())/max(1,len(s))
+        pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
+        summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
+        summ["cum_pnl_close_based"] = float(s.sum())
+        json.dump(summ, open(s_path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+except Exception:
+    pass
+# ==== END: auto-post-enrich (v2.1.3-patched) ====
+'''
+          open(p,'a',encoding='utf-8').write(post)
+          PY
+          echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
+      - name: Run sweep 3x3 and aggregate
+        env:
+          BASE_PARAMS: ${{ github.event.inputs.BASE_PARAMS }}
+          BASE_THR:    ${{ github.event.inputs.BASE_THR }}
+          BASE_HOLD:   ${{ github.event.inputs.BASE_HOLD }}
+          CSVG:        ${{ env.CSVG_SANITIZED }}
+          RUNNER:      ${{ env.RUNNER_PATH_EXP }}
+        run: |
+          set -euo pipefail
+          mkdir -p conf _agg
+          python - <<'PY'
+          import os, yaml, itertools, math
+          base_thr=float(os.environ['BASE_THR']); base_hold=int(os.environ['BASE_HOLD'])
+          thr_list=[round(base_thr+d,2) for d in (-0.02,0.0,0.02)]
+          thr_list=[min(0.95,max(0.3,x)) for x in thr_list]
+          hold_list=[base_hold-1, base_hold, base_hold+1]
+          os.makedirs("conf", exist_ok=True)
+          combos=[]
+          for thr in thr_list:
+            for hold in hold_list:
+              d=yaml.safe_load(open(os.environ['BASE_PARAMS'],'r',encoding='utf-8')) or {}
+              d.setdefault('entry',{}).setdefault('p_thr',{})
+              for k in ('trend','range'): d['entry']['p_thr'][k]=float(thr)
+              d.setdefault('exit',{}); d['exit']['min_hold']=int(hold)
+              fn=f"conf/params_thr{thr:.2f}_h{hold}.yml"
+              yaml.safe_dump(d, open(fn,'w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
+              combos.append((f"{thr:.2f}", str(hold), fn))
+          open("_agg/combos.txt","w",encoding="utf-8").write("\n".join(["\t".join(x) for x in combos]))
+          PY
+          while IFS=$'\t' read -r THR HOLD FN; do
+            OUT="out_thr${THR}_h${HOLD}"
+            echo "[RUN] THR=$THR HOLD=$HOLD -> $OUT"
+            python ci/wfo_entry.py --params "$FN" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
+            ( cd "$OUT" && zip -rq ../sweep_${THR}_${HOLD}.zip . )
+          done < _agg/combos.txt
+          AGG="sweep_3x3_bundle_${GITHUB_SHA::7}.zip"
+          zip -rq "$AGG" sweep_*.zip
+          mv "$AGG" _agg/
+      - name: Upload aggregated artifact (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: sweep_3x3
+          name: sweep_3x3_bundle
           path: |
-            sweep_${{ matrix.thr }}_${{ matrix.hold }}.zip
+            _agg/sweep_3x3_bundle_*.zip
