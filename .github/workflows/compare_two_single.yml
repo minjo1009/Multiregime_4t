@@ -1,4 +1,4 @@
-name: Compare Two Singles - force codepack runner
+name: Compare Two Singles - post-enrich results
 
 on:
   workflow_dispatch:
@@ -31,21 +31,19 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
+          pip install "numpy==1.26.4" "pandas==2.2.2" "pyyaml"
 
       - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${DATA_ZIP}" ]; then unzip -o "${DATA_ZIP}" >/dev/null; fi
 
-      - name: Normalize CSV_GLOB to repo root (strip repo name and 'Multiregime 4t*')
+      - name: Normalize CSV_GLOB (strip repo and 'Multiregime 4t*')
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
           CSVG_IN="${CSV_GLOB}"
-          # strip './' and '<repo>/' prefix
           CSVG="${CSVG_IN#${ROOTF}/}"; CSVG="${CSVG#./}"
-          # strip 'Multiregime 4t*/' or 'Multiregime_4t*/' prefixes if present
           CSVG="$(printf '%s' "$CSVG" | sed -E 's#^(Multiregime[ _]4t[^/]*/)+##')"
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
           echo "[glob] in : $CSVG_IN"
@@ -60,47 +58,6 @@ jobs:
           test -f ci/wfo_entry.py || { echo "ci/wfo_entry.py missing"; exit 2; }
           test -f "${PARAMS_CHAMP}" || { echo "PARAMS_CHAMP not found"; exit 2; }
           test -f "${PARAMS_ALT}"   || { echo "PARAMS_ALT not found"; exit 2; }
-          test -f "strategy_v2_codepack_v2.1.3.zip" || { echo "codepack zip missing"; exit 2; }
-
-      - name: Prepare patched runner from codepack (force)
-        run: |
-          set -euo pipefail
-          rm -rf _codepack
-          unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          cat >> _codepack/backtest/runner.py <<'PY'
-# ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
-try:
-    import json, pandas as pd, numpy as np, os
-    outdir = locals().get("outdir", ".")
-    trades_path = os.path.join(outdir, "trades.csv")
-    if os.path.exists(trades_path):
-        df_tr = pd.read_csv(trades_path)
-        ev = next((c for c in df_tr.columns if str(c).lower()=="event"), None)
-        df_ex = df_tr[df_tr[ev].astype(str).str.upper()=="EXIT"].copy() if ev is not None else df_tr.copy()
-        pnl_col = None
-        for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
-            if c in df_ex.columns:
-                pnl_col=c; break
-        if pnl_col is None:
-            df_tr["pnl_close_based"] = 0.0
-            df_tr.to_csv(trades_path, index=False)
-            pnl_col = "pnl_close_based"; df_ex = df_tr.copy()
-        s_path = os.path.join(outdir, "summary.json")
-        summ = {}
-        if os.path.exists(s_path):
-            summ = json.load(open(s_path,"r",encoding="utf-8"))
-        s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
-        summ["exits"] = int(len(s))
-        summ["win_rate"] = float((s>0).sum())/max(1,len(s))
-        pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
-        summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
-        summ["cum_pnl_close_based"] = float(s.sum())
-        json.dump(summ, open(s_path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
-except Exception:
-    pass
-# ==== END: auto-post-enrich (v2.1.3-patched) ====
-PY
-          echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
 
       - name: Patch params (clamp and override)
         run: |
@@ -126,19 +83,77 @@ yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), s
 yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
 PY
 
-      - name: Run SINGLE - Champion (force codepack runner)
+      - name: Run SINGLE - Champion
         run: |
           set -euo pipefail
           OUT="out_single_champion"
-          python ci/wfo_entry.py --params "conf/params_champion_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
-          ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
+          python ci/wfo_entry.py --params "conf/params_champion_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --outdir "$OUT"
 
-      - name: Run SINGLE - Alt (force codepack runner)
+      - name: Post-enrich - Champion
+        run: |
+          python - <<'PY'
+import os, json, pandas as pd, numpy as np
+outdir="out_single_champion"
+tp=os.path.join(outdir,"trades.csv"); sp=os.path.join(outdir,"summary.json")
+if os.path.exists(tp):
+  df=pd.read_csv(tp)
+  ev=next((c for c in df.columns if c.lower()=="event"), None)
+  if ev is not None:
+    df=df[df[ev].astype(str).str.upper()=="EXIT"].copy()
+  pnl=None
+  for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+    if c in df.columns: pnl=c; break
+  if pnl is None:
+    df["pnl_close_based"]=0.0; pnl="pnl_close_based"
+    df.to_csv(tp,index=False)
+  s=pd.to_numeric(df[pnl], errors="coerce").fillna(0.0)
+  summ={}
+  if os.path.exists(sp):
+    summ=json.load(open(sp,"r",encoding="utf-8"))
+  summ["exits"]=int(len(s))
+  summ["win_rate"]=float((s>0).sum())/max(1,len(s))
+  pos=float(s[s>0].sum()); neg=float(s[s<0].sum())
+  summ["profit_factor"]=(pos/abs(neg)) if neg!=0 else None
+  summ["cum_pnl_close_based"]=float(s.sum())
+  json.dump(summ, open(sp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+          ( cd out_single_champion && zip -rq ../bundle_single_champion.zip . )
+
+      - name: Run SINGLE - Alt
         run: |
           set -euo pipefail
           OUT="out_single_alt"
-          python ci/wfo_entry.py --params "conf/params_alt_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
-          ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
+          python ci/wfo_entry.py --params "conf/params_alt_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --outdir "$OUT"
+
+      - name: Post-enrich - Alt
+        run: |
+          python - <<'PY'
+import os, json, pandas as pd, numpy as np
+outdir="out_single_alt"
+tp=os.path.join(outdir,"trades.csv"); sp=os.path.join(outdir,"summary.json")
+if os.path.exists(tp):
+  df=pd.read_csv(tp)
+  ev=next((c for c in df.columns if c.lower()=="event"), None)
+  if ev is not None:
+    df=df[df[ev].astype(str).str.upper()=="EXIT"].copy()
+  pnl=None
+  for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+    if c in df.columns: pnl=c; break
+  if pnl is None:
+    df["pnl_close_based"]=0.0; pnl="pnl_close_based"
+    df.to_csv(tp,index=False)
+  s=pd.to_numeric(df[pnl], errors="coerce").fillna(0.0)
+  summ={}
+  if os.path.exists(sp):
+    summ=json.load(open(sp,"r",encoding="utf-8"))
+  summ["exits"]=int(len(s))
+  summ["win_rate"]=float((s>0).sum())/max(1,len(s))
+  pos=float(s[s>0].sum()); neg=float(s[s<0].sum())
+  summ["profit_factor"]=(pos/abs(neg)) if neg!=0 else None
+  summ["cum_pnl_close_based"]=float(s.sum())
+  json.dump(summ, open(sp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+          ( cd out_single_alt && zip -rq ../bundle_single_alt.zip . )
 
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
