@@ -1,4 +1,4 @@
-name: Compare Two Singles - safe
+name: Compare Two Singles - enforce metrics
 
 on:
   workflow_dispatch:
@@ -7,7 +7,6 @@ env:
   PY_VERSION: "3.10"
   PARAMS_CHAMP: "conf/params_champion.yml"
   PARAMS_ALT:   "conf/params_alt.yml"
-  # thr/hold는 0.x / 정수로 덮어쓴다
   OVERRIDE_THR_CHAMP: "0.83"
   OVERRIDE_HOLD_CHAMP: "8"
   OVERRIDE_THR_ALT:   "0.83"
@@ -51,33 +50,55 @@ jobs:
         run: |
           set -euo pipefail
           test -f ci/wfo_entry.py || { echo "ci/wfo_entry.py missing"; exit 2; }
+          test -f ci/precheck_contract.py || { echo "ci/precheck_contract.py missing"; exit 2; }
+          test -f ci/metrics_enforcer.py  || { echo "ci/metrics_enforcer.py missing"; exit 2; }
           test -f "${PARAMS_CHAMP}" || { echo "PARAMS_CHAMP not found"; exit 2; }
           test -f "${PARAMS_ALT}"   || { echo "PARAMS_ALT not found"; exit 2; }
 
       - name: Run SINGLE — Champion
+        env:
+          THR:  ${{ env.OVERRIDE_THR_CHAMP }}
+          HOLD: ${{ env.OVERRIDE_HOLD_CHAMP }}
         run: |
           set -euo pipefail
           OUT="out_single_champion"
+          python ci/precheck_contract.py --data-root "." --csv-glob "$CSVG_SANITIZED" --outdir "$OUT" || true
           python ci/wfo_entry.py \
             --params "${PARAMS_CHAMP}" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
             --outdir "$OUT" \
-            --thr "${OVERRIDE_THR_CHAMP}" \
-            --hold "${OVERRIDE_HOLD_CHAMP}"
+            --thr "${THR}" \
+            --hold "${HOLD}"
+          python ci/metrics_enforcer.py \
+            --outdir "$OUT" \
+            --data-root "." \
+            --csv-glob "$CSVG_SANITIZED" \
+            --thr "${THR}" \
+            --hold "${HOLD}"
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
 
       - name: Run SINGLE — Alt
+        env:
+          THR:  ${{ env.OVERRIDE_THR_ALT }}
+          HOLD: ${{ env.OVERRIDE_HOLD_ALT }}
         run: |
           set -euo pipefail
           OUT="out_single_alt"
+          python ci/precheck_contract.py --data-root "." --csv-glob "$CSVG_SANITIZED" --outdir "$OUT" || true
           python ci/wfo_entry.py \
             --params "${PARAMS_ALT}" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
             --outdir "$OUT" \
-            --thr "${OVERRIDE_THR_ALT}" \
-            --hold "${OVERRIDE_HOLD_ALT}"
+            --thr "${THR}" \
+            --hold "${HOLD}"
+          python ci/metrics_enforcer.py \
+            --outdir "$OUT" \
+            --data-root "." \
+            --csv-glob "$CSVG_SANITIZED" \
+            --thr "${THR}" \
+            --hold "${HOLD}"
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
 
       - name: Upload artifacts (pinned)
