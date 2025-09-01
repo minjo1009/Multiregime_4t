@@ -1,4 +1,4 @@
-name: Single Sensitivity VECTORIZED - one process
+name: Single Sensitivity VECTORIZED - enforce metrics
 
 on:
   workflow_dispatch:
@@ -54,8 +54,30 @@ jobs:
             --codepack "strategy_v2_codepack_v2.1.3.zip" \
             --out-bundle "sweep_vec_bundle_${GITHUB_SHA::7}.zip"
 
+      - name: Enforce metrics for each cell & rebuild bundle
+        env:
+          THR_LIST: ${{ env.THR_LIST }}
+          HOLD_LIST: ${{ env.HOLD_LIST }}
+        run: |
+          set -euo pipefail
+          for THR in $THR_LIST; do
+            for HOLD in $HOLD_LIST; do
+              OUT="out_thr${THR}_h${HOLD}"
+              python ci/precheck_contract.py --data-root "." --csv-glob "$CSVG_SANITIZED" --outdir "$OUT" || true
+              python ci/metrics_enforcer.py \
+                --outdir "$OUT" \
+                --data-root "." \
+                --csv-glob "$CSVG_SANITIZED" \
+                --thr "${THR}" \
+                --hold "${HOLD}"
+              ( cd "$OUT" && zip -rq ../sweep_${THR}_${HOLD}.zip . )
+            done
+          done
+          zip -rq "sweep_vec_bundle_enforced_${GITHUB_SHA::7}.zip" sweep_*.zip
+          mkdir -p _agg && mv "sweep_vec_bundle_enforced_${GITHUB_SHA::7}.zip" _agg/
+
       - name: Upload aggregated artifact (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: sweep_vec_bundle
-          path: sweep_vec_bundle_*.zip
+          path: _agg/sweep_vec_bundle_enforced_*.zip
