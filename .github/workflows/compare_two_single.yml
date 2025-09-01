@@ -1,49 +1,16 @@
-name: Compare Two Singles (Champion vs Alt) — root-safe (SHA pinned)
+name: Compare Two Singles (Champion vs Alt) — force codepack runner
 
 on:
   workflow_dispatch:
     inputs:
-      PARAMS_CHAMP:
-        description: "챔피언 파라미터 경로"
-        required: false
-        default: "conf/params_champion.yml"
-      PARAMS_ALT:
-        description: "번들#2(≈3.75) 파라미터 경로"
-        required: false
-        default: "conf/params_alt.yml"
-      # 선택 입력(비워두면 원본 파일값 사용)
-      OVERRIDE_THR_CHAMP:
-        description: "챔피언 thr (예: 0.83)"
-        required: false
-        default: ""
-      OVERRIDE_HOLD_CHAMP:
-        description: "챔피언 hold (예: 8)"
-        required: false
-        default: ""
-      OVERRIDE_THR_ALT:
-        description: "번들#2 thr (예: 0.83)"
-        required: false
-        default: ""
-      OVERRIDE_HOLD_ALT:
-        description: "번들#2 hold (예: 9)"
-        required: false
-        default: ""
-      CSV_GLOB:
-        description: "CSV GLOB (레포 루트 기준; 레포명/./ 붙여도 자동 보정)"
-        required: false
-        default: "**/*ETHUSDT*1min*2020*2025*.csv"
-      DATA_ZIP:
-        description: "루트에 올린 데이터 ZIP (있으면 자동 언집)"
-        required: false
-        default: "ETHUSDT_1min_2020_2025.zip"
-      RUNNER_PATH:
-        description: "러너 경로(예: backtest/runner.py, 비우면 자동탐색)"
-        required: false
-        default: ""
-      PY_VERSION:
-        description: "Python 버전"
-        required: false
-        default: "3.10"
+      PARAMS_CHAMP: { default: "conf/params_champion.yml" }
+      PARAMS_ALT:   { default: "conf/params_alt.yml" }
+      OVERRIDE_THR_CHAMP: { default: "0.83" }
+      OVERRIDE_HOLD_CHAMP:{ default: "8" }
+      OVERRIDE_THR_ALT:   { default: "0.83" }
+      OVERRIDE_HOLD_ALT:  { default: "9" }
+      CSV_GLOB: { default: "**/*ETHUSDT*1min*2020*2025*.csv" }
+      PY_VERSION: { default: "3.10" }
 
 env:
   PYTHONUTF8: "1"
@@ -52,70 +19,107 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      # 액션은 풀 SHA로 고정 (조직 정책 대응)
       - name: Checkout (pinned)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-
       - name: Setup Python (pinned)
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ github.event.inputs.PY_VERSION }}
-
-      - name: Deps (numba 호환 고정)
+        with: { python-version: ${{ github.event.inputs.PY_VERSION }} }
+      - name: Deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
           pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
-
-      - name: Unzip data (optional)
-        run: |
-          set -euo pipefail
-          ZIP='${{ github.event.inputs.DATA_ZIP }}'
-          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
 
       - name: Normalize CSV_GLOB to repo root
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
           CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
-          CSVG="${CSVG_IN#${ROOTF}/}"   # '레포명/' 제거
-          CSVG="${CSVG#./}"             # './' 제거
+          CSVG="${CSVG_IN#${ROOTF}/}"; CSVG="${CSVG#./}"
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
-          echo "[glob] in : $CSVG_IN"
-          echo "[glob] out: $CSVG"
 
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
 
-      - name: Sanity check (scripts & params)
+      - name: Sanity check
         run: |
           set -euo pipefail
           test -f ci/wfo_entry.py || { echo "ci/wfo_entry.py missing"; exit 2; }
           test -f "${{ github.event.inputs.PARAMS_CHAMP }}" || { echo "PARAMS_CHAMP not found"; exit 2; }
           test -f "${{ github.event.inputs.PARAMS_ALT }}"   || { echo "PARAMS_ALT not found"; exit 2; }
+          test -f "strategy_v2_codepack_v2.1.3.zip"         || { echo "codepack zip missing"; exit 2; }
 
-      - name: Patch params safety (thr clamp & optional override)
+      # ★ 핵심: 코드팩을 언집-패치하고 그 러너를 강제로 사용
+      - name: Prepare patched runner from codepack
+        run: |
+          set -euo pipefail
+          rm -rf _codepack
+          unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
+          # 패치 스크립트가 레포에 없다면(모바일팩 기준 파일명), 임시로 쓰기
+          if [ -f ci/patch_runner_append.py ]; then
+            python ci/patch_runner_append.py --repo-root _codepack || true
+          else
+            python - <<'PY'
+            import os
+            p="_codepack/backtest/runner.py"
+            post = r'''
+# ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
+try:
+    import json, pandas as pd, numpy as np, os
+    outdir = locals().get("outdir", ".")
+    trades_path = os.path.join(outdir, "trades.csv")
+    if os.path.exists(trades_path):
+        df_tr = pd.read_csv(trades_path)
+        ev = next((c for c in df_tr.columns if str(c).lower()=="event"), None)
+        df_ex = df_tr[df_tr[ev].astype(str).str.upper()=="EXIT"].copy() if ev is not None else df_tr.copy()
+        pnl_col = None
+        for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+            if c in df_ex.columns: pnl_col=c; break
+        if pnl_col is None:
+            df_tr["pnl_close_based"] = 0.0
+            df_tr.to_csv(trades_path, index=False)
+            pnl_col = "pnl_close_based"; df_ex = df_tr.copy()
+        s_path = os.path.join(outdir, "summary.json")
+        summ = {}
+        if os.path.exists(s_path):
+            import json; summ = json.load(open(s_path,"r",encoding="utf-8"))
+        s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
+        summ["exits"] = int(len(s))
+        summ["win_rate"] = float((s>0).sum())/max(1,len(s))
+        pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
+        summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
+        summ["cum_pnl_close_based"] = float(s.sum())
+        json.dump(summ, open(s_path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+except Exception:
+    pass
+# ==== END: auto-post-enrich (v2.1.3-patched) ====
+'''
+            open(p,'a',encoding='utf-8').write(post)
+            PY
+          fi
+          echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
+
+      - name: Patch params safety (clamp & override)
         env:
           PF_C: ${{ github.event.inputs.PARAMS_CHAMP }}
           PF_A: ${{ github.event.inputs.PARAMS_ALT }}
           THR_C: ${{ github.event.inputs.OVERRIDE_THR_CHAMP }}
-          HOLD_C: ${{ github.event.inputs.OVERRIDE_HOLD_CHAMP }}
+          HOLD_C:${{ github.event.inputs.OVERRIDE_HOLD_CHAMP }}
           THR_A: ${{ github.event.inputs.OVERRIDE_THR_ALT }}
-          HOLD_A: ${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
+          HOLD_A:${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
         run: |
           python - <<'PY'
           import os, yaml
           def clamp_thr(v):
-            try: x=float(v)
-            except: x=0.6
-            if x>1.0: x=0.95
-            if x<0.3: x=0.3
+            try:x=float(v)
+            except:x=0.6
+            if x>1.0:x=0.95
+            if x<0.3:x=0.3
             return float(f"{x:.4f}")
           def patch(p, thr, hold):
             d=yaml.safe_load(open(p,'r',encoding='utf-8')) or {}
             d.setdefault('entry',{}).setdefault('p_thr',{})
-            for k in ('trend','range'):
-              d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
+            for k in ('trend','range'): d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
             d.setdefault('exit',{}); d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
             return d
           dc=patch(os.environ['PF_C'], os.environ.get('THR_C',''), os.environ.get('HOLD_C',''))
@@ -123,13 +127,9 @@ jobs:
           os.makedirs('conf', exist_ok=True)
           yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
           yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
-          print('[params] champion:', dc)
-          print('[params] alt:', da)
           PY
 
-      - name: Run SINGLE — Champion
-        env:
-          RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
+      - name: Run SINGLE — Champion (force codepack runner)
         run: |
           set -euo pipefail
           OUT="out_single_champion"
@@ -137,13 +137,12 @@ jobs:
             --params "conf/params_champion_safe.yml" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
-            --runner "$RUNNER" \
+            --runner "$RUNNER_PATH_EXP" \
             --outdir "$OUT"
+          ( cd "$OUT" && jq -r '.win_rate, .profit_factor, .cum_pnl_close_based, .exits' summary.json || true )
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
 
-      - name: Run SINGLE — Alt(≈3.75)
-        env:
-          RUNNER: ${{ github.event.inputs.RUNNER_PATH }}
+      - name: Run SINGLE — Alt (force codepack runner)
         run: |
           set -euo pipefail
           OUT="out_single_alt"
@@ -151,8 +150,9 @@ jobs:
             --params "conf/params_alt_safe.yml" \
             --data-root "." \
             --csv-glob "$CSVG_SANITIZED" \
-            --runner "$RUNNER" \
+            --runner "$RUNNER_PATH_EXP" \
             --outdir "$OUT"
+          ( cd "$OUT" && jq -r '.win_rate, .profit_factor, .cum_pnl_close_based, .exits' summary.json || true )
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
 
       - name: Upload artifacts (pinned)
