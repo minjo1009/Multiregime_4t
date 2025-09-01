@@ -1,4 +1,4 @@
-name: Compare Two Singles (Champion vs Alt) — force codepack runner
+name: Compare Two Singles (Champion vs Alt) - force codepack runner
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ on:
       OVERRIDE_THR_ALT:   { default: "0.83" }
       OVERRIDE_HOLD_ALT:  { default: "9" }
       CSV_GLOB: { default: "**/*ETHUSDT*1min*2020*2025*.csv" }
+      DATA_ZIP: { default: "ETHUSDT_1min_2020_2025.zip" }
       PY_VERSION: { default: "3.10" }
 
 env:
@@ -28,8 +29,12 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
-
+          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml" "jq"
+      - name: Unzip data (optional)
+        run: |
+          set -euo pipefail
+          ZIP='${{ github.event.inputs.DATA_ZIP }}'
+          if [ -n "$ZIP" ] && [ -f "$ZIP" ]; then unzip -o "$ZIP" >/dev/null; fi
       - name: Normalize CSV_GLOB to repo root
         run: |
           set -euo pipefail
@@ -37,10 +42,8 @@ jobs:
           CSVG_IN='${{ github.event.inputs.CSV_GLOB }}'
           CSVG="${CSVG_IN#${ROOTF}/}"; CSVG="${CSVG#./}"
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
-
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
-
       - name: Sanity check
         run: |
           set -euo pipefail
@@ -48,21 +51,14 @@ jobs:
           test -f "${{ github.event.inputs.PARAMS_CHAMP }}" || { echo "PARAMS_CHAMP not found"; exit 2; }
           test -f "${{ github.event.inputs.PARAMS_ALT }}"   || { echo "PARAMS_ALT not found"; exit 2; }
           test -f "strategy_v2_codepack_v2.1.3.zip"         || { echo "codepack zip missing"; exit 2; }
-
-      # ★ 핵심: 코드팩을 언집-패치하고 그 러너를 강제로 사용
-      - name: Prepare patched runner from codepack
+      - name: Prepare patched runner from codepack (force use)
         run: |
           set -euo pipefail
           rm -rf _codepack
           unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          # 패치 스크립트가 레포에 없다면(모바일팩 기준 파일명), 임시로 쓰기
-          if [ -f ci/patch_runner_append.py ]; then
-            python ci/patch_runner_append.py --repo-root _codepack || true
-          else
-            python - <<'PY'
-            import os
-            p="_codepack/backtest/runner.py"
-            post = r'''
+          python - <<'PY'
+          p="_codepack/backtest/runner.py"
+          post = r'''
 # ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
 try:
     import json, pandas as pd, numpy as np, os
@@ -94,19 +90,17 @@ except Exception:
     pass
 # ==== END: auto-post-enrich (v2.1.3-patched) ====
 '''
-            open(p,'a',encoding='utf-8').write(post)
-            PY
-          fi
+          open(p,'a',encoding='utf-8').write(post)
+          PY
           echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
-
       - name: Patch params safety (clamp & override)
         env:
           PF_C: ${{ github.event.inputs.PARAMS_CHAMP }}
           PF_A: ${{ github.event.inputs.PARAMS_ALT }}
           THR_C: ${{ github.event.inputs.OVERRIDE_THR_CHAMP }}
-          HOLD_C:${{ github.event.inputs.OVERRIDE_HOLD_CHAMP }}
+          HOLD_C: ${{ github.event.inputs.OVERRIDE_HOLD_CHAMP }}
           THR_A: ${{ github.event.inputs.OVERRIDE_THR_ALT }}
-          HOLD_A:${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
+          HOLD_A: ${{ github.event.inputs.OVERRIDE_HOLD_ALT }}
         run: |
           python - <<'PY'
           import os, yaml
@@ -124,37 +118,32 @@ except Exception:
             return d
           dc=patch(os.environ['PF_C'], os.environ.get('THR_C',''), os.environ.get('HOLD_C',''))
           da=patch(os.environ['PF_A'], os.environ.get('THR_A',''), os.environ.get('HOLD_A',''))
-          os.makedirs('conf', exist_ok=True)
+          import os; os.makedirs('conf', exist_ok=True)
           yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
           yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
           PY
-
-      - name: Run SINGLE — Champion (force codepack runner)
+      - name: Run SINGLE - Champion (force codepack runner)
         run: |
           set -euo pipefail
           OUT="out_single_champion"
-          python ci/wfo_entry.py \
-            --params "conf/params_champion_safe.yml" \
-            --data-root "." \
-            --csv-glob "$CSVG_SANITIZED" \
-            --runner "$RUNNER_PATH_EXP" \
-            --outdir "$OUT"
-          ( cd "$OUT" && jq -r '.win_rate, .profit_factor, .cum_pnl_close_based, .exits' summary.json || true )
+          python ci/wfo_entry.py --params "conf/params_champion_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
+          ( cd "$OUT" && cat summary.json | python - <<'PY' || true
+import sys, json; j=json.load(sys.stdin); 
+print(j.get("win_rate"), j.get("profit_factor"), j.get("cum_pnl_close_based"), j.get("exits"))
+PY
+          )
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
-
-      - name: Run SINGLE — Alt (force codepack runner)
+      - name: Run SINGLE - Alt (force codepack runner)
         run: |
           set -euo pipefail
           OUT="out_single_alt"
-          python ci/wfo_entry.py \
-            --params "conf/params_alt_safe.yml" \
-            --data-root "." \
-            --csv-glob "$CSVG_SANITIZED" \
-            --runner "$RUNNER_PATH_EXP" \
-            --outdir "$OUT"
-          ( cd "$OUT" && jq -r '.win_rate, .profit_factor, .cum_pnl_close_based, .exits' summary.json || true )
+          python ci/wfo_entry.py --params "conf/params_alt_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
+          ( cd "$OUT" && cat summary.json | python - <<'PY' || true
+import sys, json; j=json.load(sys.stdin); 
+print(j.get("win_rate"), j.get("profit_factor"), j.get("cum_pnl_close_based"), j.get("exits"))
+PY
+          )
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
-
       - name: Upload artifacts (pinned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
