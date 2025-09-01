@@ -28,14 +28,14 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip wheel setuptools
-          pip install "numpy==1.26.4" "pandas==2.2.2" "numba==0.59.1" "llvmlite==0.42.0" "pyyaml"
+          pip install "numpy==1.26.4" "pandas==2.2.2" "pyyaml"
 
       - name: Unzip data if present
         run: |
           set -euo pipefail
           if [ -f "${DATA_ZIP}" ]; then unzip -o "${DATA_ZIP}" >/dev/null; fi
 
-      - name: Normalize CSV_GLOB to repo root (strip repo name and 'Multiregime 4t*')
+      - name: Normalize CSV_GLOB (strip repo and 'Multiregime 4t*')
         run: |
           set -euo pipefail
           ROOTF="$(basename "$GITHUB_WORKSPACE")"
@@ -49,73 +49,27 @@ jobs:
       - name: Export PYTHONPATH
         run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
 
-      - name: Prepare patched runner from codepack (force)
+      - name: Build sweep lists
         run: |
-          set -euo pipefail
-          test -f strategy_v2_codepack_v2.1.3.zip || { echo "codepack zip missing"; exit 2; }
-          rm -rf _codepack
-          unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          cat >> _codepack/backtest/runner.py <<'PY'
-# ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
-try:
-    import json, pandas as pd, numpy as np, os
-    outdir = locals().get("outdir", ".")
-    trades_path = os.path.join(outdir, "trades.csv")
-    if os.path.exists(trades_path):
-        df_tr = pd.read_csv(trades_path)
-        ev = next((c for c in df_tr.columns if str(c).lower()=="event"), None)
-        df_ex = df_tr[df_tr[ev].astype(str).str.upper()=="EXIT"].copy() if ev is not None else df_tr.copy()
-        pnl_col = None
-        for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
-            if c in df_ex.columns:
-                pnl_col=c; break
-        if pnl_col is None:
-            df_tr["pnl_close_based"] = 0.0
-            df_tr.to_csv(trades_path, index=False)
-            pnl_col = "pnl_close_based"; df_ex = df_tr.copy()
-        s_path = os.path.join(outdir, "summary.json")
-        summ = {}
-        if os.path.exists(s_path):
-            summ = json.load(open(s_path,"r",encoding="utf-8"))
-        s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
-        summ["exits"] = int(len(s))
-        summ["win_rate"] = float((s>0).sum())/max(1,len(s))
-        pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
-        summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
-        summ["cum_pnl_close_based"] = float(s.sum())
-        json.dump(summ, open(s_path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
-except Exception:
-    pass
-# ==== END: auto-post-enrich (v2.1.3-patched) ====
-PY
-          echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
-
-      - name: Run sweep (3x3) and aggregate
-        env:
-          CSVG: ${{ env.CSVG_SANITIZED }}
-          RUNNER: ${{ env.RUNNER_PATH_EXP }}
-          BASE_PARAMS: ${{ env.BASE_PARAMS }}
-          BASE_THR: ${{ env.BASE_THR }}
-          BASE_HOLD: ${{ env.BASE_HOLD }}
-        run: |
-          set -euo pipefail
-          # build thr/hold lists
           python - <<'PY'
-import os, yaml
+import os
 base_thr=float(os.environ.get('BASE_THR','0.83')); base_hold=int(os.environ.get('BASE_HOLD','9'))
 thr = [max(0.3,min(0.95,round(base_thr+d,2))) for d in (-0.02,0.0,0.02)]
 hold = [base_hold-1, base_hold, base_hold+1]
 open("_thr.txt","w").write(" ".join(f"{t:.2f}" for t in thr))
 open("_hold.txt","w").write(" ".join(str(h) for h in hold))
 PY
+
+      - name: Run sweep and aggregate to one ZIP
+        env:
+          CSVG: ${{ env.CSVG_SANITIZED }}
+        run: |
+          set -euo pipefail
           THR_LIST=$(cat _thr.txt)
           HOLD_LIST=$(cat _hold.txt)
           mkdir -p conf
-
           for THR in $THR_LIST; do
             for HOLD in $HOLD_LIST; do
-              echo "[PARAM] thr=$THR hold=$HOLD"
-              # write params
               python - <<'PY'
 import os, yaml
 thr=os.environ['THR']; hold=os.environ['HOLD']; base=os.environ['BASE_PARAMS']
@@ -130,12 +84,37 @@ yaml.safe_dump(d, open(fn,'w',encoding='utf-8'), sort_keys=False, allow_unicode=
 print("WROTE", fn)
 PY
               OUT="out_thr${THR}_h${HOLD}"
-              python ci/wfo_entry.py --params "conf/params_thr${THR}_h${HOLD}.yml" --data-root "." --csv-glob "$CSVG" --runner "$RUNNER" --outdir "$OUT"
+              python ci/wfo_entry.py --params "conf/params_thr${THR}_h${HOLD}.yml" --data-root "." --csv-glob "$CSVG" --outdir "$OUT"
+              # post-enrich each OUT
+              python - <<'PY'
+import os, json, pandas as pd, numpy as np
+outdir=os.environ['OUTDIR']
+tp=os.path.join(outdir,"trades.csv"); sp=os.path.join(outdir,"summary.json")
+if os.path.exists(tp):
+  df=pd.read_csv(tp)
+  ev=next((c for c in df.columns if c.lower()=="event"), None)
+  if ev is not None:
+    df=df[df[ev].astype(str).str.upper()=="EXIT"].copy()
+  pnl=None
+  for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+    if c in df.columns: pnl=c; break
+  if pnl is None:
+    df["pnl_close_based"]=0.0; pnl="pnl_close_based"
+    df.to_csv(tp,index=False)
+  s=pd.to_numeric(df[pnl], errors="coerce").fillna(0.0)
+  summ={}
+  if os.path.exists(sp):
+    summ=json.load(open(sp,"r",encoding="utf-8"))
+  summ["exits"]=int(len(s))
+  summ["win_rate"]=float((s>0).sum())/max(1,len(s))
+  pos=float(s[s>0].sum()); neg=float(s[s<0].sum())
+  summ["profit_factor"]=(pos/abs(neg)) if neg!=0 else None
+  summ["cum_pnl_close_based"]=float(s.sum())
+  json.dump(summ, open(sp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
               ( cd "$OUT" && zip -rq ../sweep_${THR}_${HOLD}.zip . )
             done
           done
-
-          # aggregate to single zip with short SHA
           AGG="sweep_3x3_bundle_${GITHUB_SHA::7}.zip"
           zip -rq "$AGG" sweep_*.zip
           mkdir -p _agg && mv "$AGG" _agg/
