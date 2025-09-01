@@ -6,7 +6,6 @@ env:
   PYTHONUTF8: "1"
   PY_VERSION: "3.10"
   BASE_PARAMS: "conf/params_alt.yml"
-  # 아래 두 값만 바꾸면 스윕 범위 자동 반영(0.83±0.02, 9±1)
   BASE_THR: "0.83"
   BASE_HOLD: "9"
   CSV_GLOB: "**/*ETHUSDT*1min*2020*2025*.csv"
@@ -51,9 +50,8 @@ jobs:
           test -f strategy_v2_codepack_v2.1.3.zip || { echo "codepack zip missing"; exit 2; }
           rm -rf _codepack
           unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          python - <<'PY'
-p="_codepack/backtest/runner.py"
-post = r'''
+          # append post-enrich via heredoc (YAML-safe)
+          cat >> _codepack/backtest/runner.py <<'PY'
 # ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
 try:
     import json, pandas as pd, numpy as np, os
@@ -73,7 +71,7 @@ try:
         s_path = os.path.join(outdir, "summary.json")
         summ = {}
         if os.path.exists(s_path):
-            import json; summ = json.load(open(s_path,"r",encoding="utf-8"))
+            summ = json.load(open(s_path,"r",encoding="utf-8"))
         s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
         summ["exits"] = int(len(s))
         summ["win_rate"] = float((s>0).sum())/max(1,len(s))
@@ -84,8 +82,6 @@ try:
 except Exception:
     pass
 # ==== END: auto-post-enrich (v2.1.3-patched) ====
-'''
-open(p,'a',encoding='utf-8').write(post)
 PY
           echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
 
@@ -95,22 +91,23 @@ PY
           RUNNER: ${{ env.RUNNER_PATH_EXP }}
         run: |
           set -euo pipefail
-          mkdir -p conf
-          # 스윕 값 계산 (BASE_THR±0.02, BASE_HOLD±1)
+          # build thr/hold lists
           python - <<'PY'
 import os, yaml
-base_thr=float(os.environ['BASE_THR']); base_hold=int(os.environ['BASE_HOLD'])
-thr_list=[max(0.3,min(0.95,round(base_thr+d,2))) for d in (-0.02,0.0,0.02)]
-hold_list=[base_hold-1, base_hold, base_hold+1]
-open("_thr.txt","w").write(" ".join(f"{t:.2f}" for t in thr_list))
-open("_hold.txt","w").write(" ".join(str(h) for h in hold_list))
+base_thr=float(os.environ.get('BASE_THR','0.83')); base_hold=int(os.environ.get('BASE_HOLD','9'))
+thr = [max(0.3,min(0.95,round(base_thr+d,2))) for d in (-0.02,0.0,0.02)]
+hold = [base_hold-1, base_hold, base_hold+1]
+open("_thr.txt","w").write(" ".join(f"{t:.2f}" for t in thr))
+open("_hold.txt","w").write(" ".join(str(h) for h in hold))
 PY
           THR_LIST=$(cat _thr.txt)
           HOLD_LIST=$(cat _hold.txt)
+          mkdir -p conf
 
           for THR in $THR_LIST; do
             for HOLD in $HOLD_LIST; do
               echo "[PARAM] thr=$THR hold=$HOLD"
+              # write params
               python - <<'PY'
 import os, yaml
 thr=os.environ['THR']; hold=os.environ['HOLD']; base=os.environ['BASE_PARAMS']
@@ -128,7 +125,7 @@ PY
             done
           done
 
-          # 통합 ZIP (short SHA)
+          # aggregate to single zip with short SHA
           AGG="sweep_3x3_bundle_${GITHUB_SHA::7}.zip"
           zip -rq "$AGG" sweep_*.zip
           mkdir -p _agg && mv "$AGG" _agg/
