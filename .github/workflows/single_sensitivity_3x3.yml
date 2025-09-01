@@ -1,6 +1,7 @@
 name: Single Sensitivity 3x3 - aggregate
 
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
 
 env:
   PYTHONUTF8: "1"
@@ -89,6 +90,9 @@ PY
         env:
           CSVG: ${{ env.CSVG_SANITIZED }}
           RUNNER: ${{ env.RUNNER_PATH_EXP }}
+          BASE_PARAMS: ${{ env.BASE_PARAMS }}
+          BASE_THR: ${{ env.BASE_THR }}
+          BASE_HOLD: ${{ env.BASE_HOLD }}
         run: |
           set -euo pipefail
           # build thr/hold lists
