@@ -1,18 +1,12 @@
 name: Compare Two Singles - force codepack runner
-
 on:
   workflow_dispatch:
 
 env:
   PYTHONUTF8: "1"
   PY_VERSION: "3.10"
-  # 조정 포인트
-  PARAMS_CHAMP: "conf/params_champion.yml"
-  PARAMS_ALT:   "conf/params_alt.yml"
-  OVERRIDE_THR_CHAMP: "0.83"
-  OVERRIDE_HOLD_CHAMP: "8"
-  OVERRIDE_THR_ALT:   "0.83"
-  OVERRIDE_HOLD_ALT:  "9"
+  PARAMS_CHAMP: "conf/params_v2_champion.yml"
+  PARAMS_ALT:   "conf/params.v2.yml"
   CSV_GLOB: "**/*ETHUSDT*1min*2020*2025*.csv"
   DATA_ZIP: "ETHUSDT_1min_2020_2025.zip"
 
@@ -47,7 +41,7 @@ jobs:
           echo "CSVG_SANITIZED=$CSVG" >> "$GITHUB_ENV"
 
       - name: Export PYTHONPATH
-        run: echo "PYTHONPATH=.:${GITHUB_WORKSPACE}/src" >> $GITHUB_ENV
+        run: echo "PYTHONPATH=." >> $GITHUB_ENV
 
       - name: Sanity check
         run: |
@@ -57,82 +51,26 @@ jobs:
           test -f "${PARAMS_ALT}"   || { echo "PARAMS_ALT not found"; exit 2; }
           test -f "strategy_v2_codepack_v2.1.3.zip" || { echo "codepack zip missing"; exit 2; }
 
-      - name: Prepare patched runner from codepack (force)
+      - name: Use runner from codepack (force)
         run: |
           set -euo pipefail
           rm -rf _codepack
           unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          # append post-enrich via heredoc (YAML-safe)
-          cat >> _codepack/backtest/runner.py <<'PY'
-# ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
-try:
-    import json, pandas as pd, numpy as np, os
-    outdir = locals().get("outdir", ".")
-    trades_path = os.path.join(outdir, "trades.csv")
-    if os.path.exists(trades_path):
-        df_tr = pd.read_csv(trades_path)
-        ev = next((c for c in df_tr.columns if str(c).lower()=="event"), None)
-        df_ex = df_tr[df_tr[ev].astype(str).str.upper()=="EXIT"].copy() if ev is not None else df_tr.copy()
-        pnl_col = None
-        for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
-            if c in df_ex.columns: pnl_col=c; break
-        if pnl_col is None:
-            df_tr["pnl_close_based"] = 0.0
-            df_tr.to_csv(trades_path, index=False)
-            pnl_col = "pnl_close_based"; df_ex = df_tr.copy()
-        s_path = os.path.join(outdir, "summary.json")
-        summ = {}
-        if os.path.exists(s_path):
-            summ = json.load(open(s_path,"r",encoding="utf-8"))
-        s = pd.to_numeric(df_ex[pnl_col], errors="coerce").fillna(0.0)
-        summ["exits"] = int(len(s))
-        summ["win_rate"] = float((s>0).sum())/max(1,len(s))
-        pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
-        summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
-        summ["cum_pnl_close_based"] = float(s.sum())
-        json.dump(summ, open(s_path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
-except Exception:
-    pass
-# ==== END: auto-post-enrich (v2.1.3-patched) ====
-PY
           echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
+          test -f _codepack/backtest/runner.py || { echo "runner not found"; exit 2; }
 
-      - name: Patch params (clamp and override)
-        run: |
-          python - <<'PY'
-import os, yaml
-def clamp_thr(v):
-  try:x=float(v)
-  except:x=0.6
-  if x>1.0:x=0.95
-  if x<0.3:x=0.3
-  return float(f"{x:.4f}")
-def patch(p, thr, hold):
-  d=yaml.safe_load(open(p,'r',encoding='utf-8')) or {}
-  d.setdefault('entry',{}).setdefault('p_thr',{})
-  for k in ('trend','range'):
-    d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
-  d.setdefault('exit',{}); d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
-  return d
-dc=patch(os.environ['PARAMS_CHAMP'], os.environ.get('OVERRIDE_THR_CHAMP',''), os.environ.get('OVERRIDE_HOLD_CHAMP',''))
-da=patch(os.environ['PARAMS_ALT'],   os.environ.get('OVERRIDE_THR_ALT',''),   os.environ.get('OVERRIDE_HOLD_ALT',''))
-os.makedirs('conf', exist_ok=True)
-yaml.safe_dump(dc, open('conf/params_champion_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
-yaml.safe_dump(da, open('conf/params_alt_safe.yml','w',encoding='utf-8'), sort_keys=False, allow_unicode=True)
-PY
-
-      - name: Run SINGLE - Champion (force codepack runner)
+      - name: Run SINGLE - Champion
         run: |
           set -euo pipefail
           OUT="out_single_champion"
-          python ci/wfo_entry.py --params "conf/params_champion_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
+          python ci/wfo_entry.py --params "${PARAMS_CHAMP}" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_champion.zip . )
 
-      - name: Run SINGLE - Alt (force codepack runner)
+      - name: Run SINGLE - Alt
         run: |
           set -euo pipefail
           OUT="out_single_alt"
-          python ci/wfo_entry.py --params "conf/params_alt_safe.yml" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
+          python ci/wfo_entry.py --params "${PARAMS_ALT}" --data-root "." --csv-glob "$CSVG_SANITIZED" --runner "$RUNNER_PATH_EXP" --outdir "$OUT"
           ( cd "$OUT" && zip -rq ../bundle_single_alt.zip . )
 
       - name: Upload artifacts (pinned)
