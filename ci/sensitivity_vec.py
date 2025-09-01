@@ -1,5 +1,5 @@
 # ci/sensitivity_vec.py
-import argparse, os, sys, runpy, zipfile, json, yaml, glob, shutil
+import argparse, os, sys, runpy, zipfile, json, yaml, shutil
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -9,7 +9,6 @@ def sanitize_glob(g, repo_root):
     rootname = os.path.basename(repo_root.rstrip("/"))
     if g.startswith(rootname + "/"):
         g = g[len(rootname)+1:]
-    # strip 'Multiregime 4t*' prefix if present
     while True:
         parts = g.split("/", 1)
         if len(parts) == 2 and parts[0].lower().replace("_"," ").startswith("multiregime 4t"):
@@ -36,7 +35,8 @@ def patch_params(base_params_path, out_path, thr, hold):
     d.setdefault("exit", {})
     d["exit"]["min_hold"] = int(hold)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    yaml.safe_dump(d, open(out_path, "w", encoding="utf-8"), sort_keys=False, allow_unicode=True)
+    yaml.safe_dump(d, open(out_path, "w", encoding="utf-8"),
+                   sort_keys=False, allow_unicode=True)
 
 def post_enrich(outdir):
     tp = os.path.join(outdir, "trades.csv")
@@ -48,7 +48,8 @@ def post_enrich(outdir):
     if ev is not None:
         df = df[df[ev].astype(str).str.upper()=="EXIT"].copy()
     pnl = None
-    for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw","pnl_pct","pnl_percent","ret","return","pnl_close"]:
+    for c in ["pnl_close_based","pnl","pnl_value","pnl_usd","pnl_krw",
+              "pnl_pct","pnl_percent","ret","return","pnl_close"]:
         if c in df.columns:
             pnl = c; break
     if pnl is None:
@@ -60,11 +61,12 @@ def post_enrich(outdir):
     if os.path.exists(sp):
         summ = json.load(open(sp, "r", encoding="utf-8"))
     summ["exits"] = int(len(s))
-    summ["win_rate"] = float((s>0).sum())/max(1,len(s))
+    summ["win_rate"] = float((s>0).sum())/max(1, len(s))
     pos, neg = float(s[s>0].sum()), float(s[s<0].sum())
-    summ["profit_factor"] = (pos/abs(neg)) if neg!=0 else None
+    summ["profit_factor"] = (pos/abs(neg)) if neg != 0 else None
     summ["cum_pnl_close_based"] = float(s.sum())
-    json.dump(summ, open(sp,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    json.dump(summ, open(sp, "w", encoding="utf-8"),
+              ensure_ascii=False, indent=2)
 
 def zip_dir(path, zip_path):
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -76,8 +78,8 @@ def main():
     ap.add_argument("--params", required=True)
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--csv-glob", required=True)
-    ap.add_argument("--thr-list", nargs="+", required=True)     # e.g. 0.81 0.83 0.85
-    ap.add_argument("--hold-list", nargs="+", required=True)    # e.g. 8 9 10
+    ap.add_argument("--thr-list", nargs="+", required=True)
+    ap.add_argument("--hold-list", nargs="+", required=True)
     ap.add_argument("--codepack", default="strategy_v2_codepack_v2.1.3.zip")
     ap.add_argument("--runner", default="")
     ap.add_argument("--out-bundle", default="")
@@ -86,36 +88,29 @@ def main():
     repo_root = os.getcwd()
     csvg = sanitize_glob(args.csv_glob, repo_root)
 
-    # prepare codepack
+    # prepare codepack / runner path
     cp_dir = ensure_codepack(args.codepack, repo_root)
     if args.runner:
         runner_path = args.runner
     else:
         runner_path = os.path.join(cp_dir or ".", "backtest", "runner.py")
         if not os.path.exists(runner_path):
-            # fallback to repo runner
             runner_path = os.path.join("backtest", "runner.py")
     if not os.path.exists(runner_path):
         raise FileNotFoundError(f"runner not found: {runner_path}")
 
-    # pythonpath
+    # PYTHONPATH (repo + codepack)
     sys.path[:0] = [repo_root]
     if cp_dir:
         sys.path[:0] = [cp_dir, os.path.join(cp_dir, "backtest")]
-
-    # Warm-up: jit compile on first run (center combo if possible)
-    thr0 = args.thr-list[len(args.thr_list)//2]
-    hold0 = args.hold_list[len(args.hold_list)//2]
-    # but we'll just iterate sequentially; numba will compile once
 
     out_zips = []
     for thr in args.thr_list:
         for hold in args.hold_list:
             outdir = f"out_thr{thr}_h{hold}"
-            pfile = f"conf/params_thr{thr}_h{hold}.yml"
+            pfile  = f"conf/params_thr{thr}_h{hold}.yml"
             patch_params(args.params, pfile, thr, hold)
 
-            # build argv for runner.py
             saved_argv = sys.argv[:]
             sys.argv = [runner_path,
                         "--data-root", args.data_root,
