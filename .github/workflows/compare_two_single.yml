@@ -1,10 +1,12 @@
 name: Compare Two Singles - force codepack runner
 
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
 
 env:
   PYTHONUTF8: "1"
   PY_VERSION: "3.10"
+  # 조정 포인트
   PARAMS_CHAMP: "conf/params_champion.yml"
   PARAMS_ALT:   "conf/params_alt.yml"
   OVERRIDE_THR_CHAMP: "0.83"
@@ -60,7 +62,7 @@ jobs:
           set -euo pipefail
           rm -rf _codepack
           unzip -o strategy_v2_codepack_v2.1.3.zip -d _codepack >/dev/null
-          # append post-enrich block via heredoc (YAML-safe)
+          # append post-enrich via heredoc (YAML-safe)
           cat >> _codepack/backtest/runner.py <<'PY'
 # ==== BEGIN: auto-post-enrich (v2.1.3-patched) ====
 try:
@@ -95,7 +97,7 @@ except Exception:
 PY
           echo "RUNNER_PATH_EXP=_codepack/backtest/runner.py" >> $GITHUB_ENV
 
-      - name: Patch params (clamp & override)
+      - name: Patch params (clamp and override)
         run: |
           python - <<'PY'
 import os, yaml
@@ -108,7 +110,8 @@ def clamp_thr(v):
 def patch(p, thr, hold):
   d=yaml.safe_load(open(p,'r',encoding='utf-8')) or {}
   d.setdefault('entry',{}).setdefault('p_thr',{})
-  for k in ('trend','range'): d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
+  for k in ('trend','range'):
+    d['entry']['p_thr'][k]=clamp_thr(thr or d['entry']['p_thr'].get(k,0.6))
   d.setdefault('exit',{}); d['exit']['min_hold']=int(hold or d['exit'].get('min_hold',3))
   return d
 dc=patch(os.environ['PARAMS_CHAMP'], os.environ.get('OVERRIDE_THR_CHAMP',''), os.environ.get('OVERRIDE_HOLD_CHAMP',''))
